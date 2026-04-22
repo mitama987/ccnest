@@ -11,29 +11,59 @@ v0.1 — Windows only. Rust + `ratatui` + `crossterm` + `portable-pty` + `vt100`
 
 ## Install
 
+Two options — both end up with a `ccnest` binary on your PATH, so you can
+run it from any directory just like `ccmux`.
+
+**Recommended (rustup users):**
+
 ```sh
 git clone https://github.com/mitama987/ccnest
 cd ccnest
 cargo install --path .
 ```
 
+This drops `ccnest.exe` into `%USERPROFILE%\.cargo\bin\`, which rustup
+already puts on PATH.
+
+**Alternative (PowerShell, installs to `~/.local/bin`):**
+
+```powershell
+git clone https://github.com/mitama987/ccnest
+cd ccnest
+pwsh .\scripts\install.ps1
+```
+
+Override the destination with `$env:CCNEST_INSTALL_DIR` before running
+`install.ps1`.
+
 Requires a working `claude` CLI on `PATH`. If `claude` isn't found, panes
 fall back to the system shell (`%ComSpec%` / `$SHELL`) so the multiplexer
 stays usable.
+
+## Launch
+
+From any directory:
+
+```sh
+ccnest          # use the current directory as the initial pane cwd
+ccnest path\to\project
+```
 
 ## Default keybindings
 
 | Key | Action |
 |-----|--------|
-| `Ctrl+D` | Split the focused pane horizontally (new `claude` below) |
-| `Ctrl+E` | Split the focused pane vertically (new `claude` to the right) |
+| `Ctrl+D` | Split the focused pane vertically (new `claude` to the right) |
+| `Ctrl+E` | Split the focused pane horizontally (new `claude` below) |
 | `Ctrl+T` | Open a new tab with a fresh `claude` pane |
 | `Ctrl+W` | Close the focused pane (SIGTERM) |
-| `Ctrl+Tab` / `Ctrl+Shift+Tab` | Next / previous tab |
-| `Alt + ← → ↑ ↓` / `Alt + h j k l` | Move pane focus |
-| `Ctrl+B` | Toggle the left sidebar |
+| `Alt + ←` / `Alt + →` | Previous / next tab |
+| `Ctrl+Tab` / `Ctrl+Shift+Tab` | Previous / next tab (alias) |
+| `F2` | Rename the current tab (Enter to commit, Esc to cancel) |
+| `Ctrl + ← → ↑ ↓` | Move pane focus |
+| `Ctrl+F` | Toggle the left sidebar's file tree (opens it focused, closes when already on Files) |
+| `Ctrl+B` | Toggle the entire left sidebar |
 | `Ctrl+1` .. `Ctrl+4` | Jump to sidebar section (Files / Claude / Git / Panes) |
-| `Alt+S` / `Alt+C` | Focus sidebar / focus content |
 | `Tab` (sidebar focused) | Cycle sidebar section |
 | `↑` / `↓` / `j` / `k` (sidebar focused) | Move selection cursor |
 | `Enter` (on a file row) | Open the entry in `$EDITOR` (falls back to `code`) |
@@ -46,9 +76,17 @@ stays usable.
 will no longer send EOF. To exit a Claude session, use `/exit` inside
 Claude or `Ctrl+W` to close the pane from the outside.
 
+## Tabs
+
+Each tab's title is initialized from the pane's current folder name
+(e.g. `ccnest` when launched from the repo root). Press `F2` to rename
+the active tab — type the new title, then `Enter` to commit or `Esc` to
+cancel. The cursor (`▎`) is shown inline while editing.
+
 ## Sidebar
 
-The left sidebar is always available (`Ctrl+B` toggles). It has four
+The left sidebar is always available (`Ctrl+B` toggles the whole sidebar,
+`Ctrl+F` toggles the file tree view specifically). It has four
 sections:
 
 - **Files** — a tree of the focused pane's cwd (depth 3, honors

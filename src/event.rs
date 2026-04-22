@@ -10,6 +10,7 @@ use crate::app::{App, Rect};
 use crate::keymap::{resolve, Action};
 use crate::pane::grid::Direction;
 use crate::pane::PaneId;
+use crate::sidebar::Section;
 
 pub fn run_event_loop<B: Backend>(term: &mut Terminal<B>, mut app: App) -> Result<()> {
     let tick = Duration::from_millis(30);
@@ -41,6 +42,11 @@ pub fn run_event_loop<B: Backend>(term: &mut Terminal<B>, mut app: App) -> Resul
 }
 
 fn handle_key(app: &mut App, key: KeyEvent, pane_rects: &HashMap<PaneId, Rect>) -> Result<()> {
+    // Rename mode: intercept everything before keymap resolution.
+    if app.renaming_tab.is_some() {
+        handle_rename_key(app, key);
+        return Ok(());
+    }
     let action = resolve(&key, app.sidebar_focused);
     match action {
         Action::Quit => app.quit = true,
@@ -67,6 +73,12 @@ fn handle_key(app: &mut App, key: KeyEvent, pane_rects: &HashMap<PaneId, Rect>) 
             if !app.sidebar.visible {
                 app.sidebar_focused = false;
             }
+        }
+        Action::ToggleFileTree => {
+            toggle_file_tree(app);
+        }
+        Action::BeginRenameTab => {
+            app.renaming_tab = Some(app.current_tab().title.clone());
         }
         Action::SidebarSection(idx) => {
             app.sidebar.visible = true;
@@ -124,12 +136,55 @@ fn current_section_len(app: &App) -> usize {
 }
 
 fn open_selected_entry(app: &mut App) {
-    use crate::sidebar::Section;
     if let Section::FileTree = app.sidebar.active {
         if let Some(entry) = app.sidebar.file_entries.get(app.sidebar.cursor()) {
             let editor = std::env::var("EDITOR").unwrap_or_else(|_| "code".to_string());
             let _ = std::process::Command::new(editor).arg(&entry.path).spawn();
         }
+    }
+}
+
+fn toggle_file_tree(app: &mut App) {
+    if !app.sidebar.visible {
+        app.sidebar.visible = true;
+        app.sidebar.jump_section(Section::FileTree as u8);
+        app.sidebar_focused = true;
+        return;
+    }
+    if app.sidebar.active == Section::FileTree && app.sidebar_focused {
+        app.sidebar.visible = false;
+        app.sidebar_focused = false;
+    } else {
+        app.sidebar.jump_section(Section::FileTree as u8);
+        app.sidebar_focused = true;
+    }
+}
+
+fn handle_rename_key(app: &mut App, key: KeyEvent) {
+    let Some(buf) = app.renaming_tab.as_mut() else {
+        return;
+    };
+    match key.code {
+        KeyCode::Enter => {
+            let new_title = buf.trim().to_string();
+            if !new_title.is_empty() {
+                app.current_tab_mut().title = new_title;
+            }
+            app.renaming_tab = None;
+        }
+        KeyCode::Esc => {
+            app.renaming_tab = None;
+        }
+        KeyCode::Backspace => {
+            buf.pop();
+        }
+        KeyCode::Char(c)
+            if !key.modifiers.contains(KeyModifiers::CONTROL)
+                && !key.modifiers.contains(KeyModifiers::ALT) =>
+        {
+            buf.push(c);
+        }
+        _ => {}
     }
 }
 

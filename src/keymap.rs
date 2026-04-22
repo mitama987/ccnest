@@ -14,6 +14,7 @@ pub enum Action {
     NextTab,
     PrevTab,
     ToggleSidebar,
+    ToggleFileTree,
     SidebarSection(u8),
     SidebarCursorUp,
     SidebarCursorDown,
@@ -21,6 +22,7 @@ pub enum Action {
     SidebarCycleSection,
     FocusSidebar,
     FocusContent,
+    BeginRenameTab,
     PassThrough,
 }
 
@@ -29,19 +31,32 @@ pub fn resolve(ev: &KeyEvent, sidebar_focused: bool) -> Action {
     let alt = ev.modifiers.contains(KeyModifiers::ALT);
     let shift = ev.modifiers.contains(KeyModifiers::SHIFT);
 
+    // F2 → begin rename (no modifier required).
+    if let KeyCode::F(2) = ev.code {
+        return Action::BeginRenameTab;
+    }
+
     // Global multiplexer hotkeys (prefix-less) — claimed before pass-through.
     if ctrl {
         match ev.code {
-            KeyCode::Char('d') | KeyCode::Char('D') => return Action::SplitHorizontal,
-            KeyCode::Char('e') | KeyCode::Char('E') => return Action::SplitVertical,
+            // Split: D = vertical (right), E = horizontal (down).
+            KeyCode::Char('d') | KeyCode::Char('D') => return Action::SplitVertical,
+            KeyCode::Char('e') | KeyCode::Char('E') => return Action::SplitHorizontal,
             KeyCode::Char('t') | KeyCode::Char('T') => return Action::NewTab,
             KeyCode::Char('w') | KeyCode::Char('W') => return Action::ClosePane,
             KeyCode::Char('b') | KeyCode::Char('B') => return Action::ToggleSidebar,
+            KeyCode::Char('f') | KeyCode::Char('F') => return Action::ToggleFileTree,
             KeyCode::Char('q') | KeyCode::Char('Q') => return Action::Quit,
             KeyCode::Char('1') => return Action::SidebarSection(0),
             KeyCode::Char('2') => return Action::SidebarSection(1),
             KeyCode::Char('3') => return Action::SidebarSection(2),
             KeyCode::Char('4') => return Action::SidebarSection(3),
+            // Pane focus on Ctrl+arrow.
+            KeyCode::Left => return Action::FocusLeft,
+            KeyCode::Right => return Action::FocusRight,
+            KeyCode::Up => return Action::FocusUp,
+            KeyCode::Down => return Action::FocusDown,
+            // Legacy alias for tab switching.
             KeyCode::Tab => {
                 return if shift {
                     Action::PrevTab
@@ -54,12 +69,9 @@ pub fn resolve(ev: &KeyEvent, sidebar_focused: bool) -> Action {
     }
     if alt {
         match ev.code {
-            KeyCode::Left | KeyCode::Char('h') | KeyCode::Char('H') => return Action::FocusLeft,
-            KeyCode::Right | KeyCode::Char('l') | KeyCode::Char('L') => return Action::FocusRight,
-            KeyCode::Up | KeyCode::Char('k') | KeyCode::Char('K') => return Action::FocusUp,
-            KeyCode::Down | KeyCode::Char('j') | KeyCode::Char('J') => return Action::FocusDown,
-            KeyCode::Char('s') | KeyCode::Char('S') => return Action::FocusSidebar,
-            KeyCode::Char('c') | KeyCode::Char('C') => return Action::FocusContent,
+            // Tab navigation on Alt+left/right.
+            KeyCode::Left => return Action::PrevTab,
+            KeyCode::Right => return Action::NextTab,
             _ => {}
         }
     }
@@ -88,18 +100,18 @@ mod tests {
     }
 
     #[test]
-    fn ctrl_d_is_split_horizontal() {
+    fn ctrl_d_is_split_vertical() {
         assert_eq!(
             resolve(&key(KeyCode::Char('d'), KeyModifiers::CONTROL), false),
-            Action::SplitHorizontal
+            Action::SplitVertical
         );
     }
 
     #[test]
-    fn ctrl_e_is_split_vertical() {
+    fn ctrl_e_is_split_horizontal() {
         assert_eq!(
             resolve(&key(KeyCode::Char('e'), KeyModifiers::CONTROL), false),
-            Action::SplitVertical
+            Action::SplitHorizontal
         );
     }
 
@@ -128,10 +140,50 @@ mod tests {
     }
 
     #[test]
-    fn alt_arrow_moves_focus() {
+    fn ctrl_arrow_moves_pane_focus() {
+        assert_eq!(
+            resolve(&key(KeyCode::Left, KeyModifiers::CONTROL), false),
+            Action::FocusLeft
+        );
+        assert_eq!(
+            resolve(&key(KeyCode::Right, KeyModifiers::CONTROL), false),
+            Action::FocusRight
+        );
+        assert_eq!(
+            resolve(&key(KeyCode::Up, KeyModifiers::CONTROL), false),
+            Action::FocusUp
+        );
+        assert_eq!(
+            resolve(&key(KeyCode::Down, KeyModifiers::CONTROL), false),
+            Action::FocusDown
+        );
+    }
+
+    #[test]
+    fn alt_arrow_switches_tabs() {
+        assert_eq!(
+            resolve(&key(KeyCode::Right, KeyModifiers::ALT), false),
+            Action::NextTab
+        );
         assert_eq!(
             resolve(&key(KeyCode::Left, KeyModifiers::ALT), false),
-            Action::FocusLeft
+            Action::PrevTab
+        );
+    }
+
+    #[test]
+    fn ctrl_f_toggles_file_tree() {
+        assert_eq!(
+            resolve(&key(KeyCode::Char('f'), KeyModifiers::CONTROL), false),
+            Action::ToggleFileTree
+        );
+    }
+
+    #[test]
+    fn f2_begins_rename() {
+        assert_eq!(
+            resolve(&key(KeyCode::F(2), KeyModifiers::NONE), false),
+            Action::BeginRenameTab
         );
     }
 }
