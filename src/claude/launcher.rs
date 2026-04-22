@@ -48,5 +48,10 @@ fn claude_bin() -> String {
     if let Ok(bin) = std::env::var("CCNEST_CLAUDE_BIN") {
         return bin;
     }
-    if cfg!(windows) { "claude.cmd" } else { "claude" }.to_string()
+    if cfg!(windows) {
+        "claude.cmd"
+    } else {
+        "claude"
+    }
+    .to_string()
 }

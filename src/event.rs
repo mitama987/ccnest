@@ -172,4 +172,3 @@ fn key_to_bytes(key: &KeyEvent) -> Vec<u8> {
     }
     buf
 }
-
