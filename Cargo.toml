@@ -1,0 +1,36 @@
+[package]
+name = "ccnest"
+version = "0.1.0"
+edition = "2021"
+description = "Claude Code-aware terminal multiplexer (Windows first)"
+license = "MIT"
+repository = "https://github.com/mitama987/ccnest"
+readme = "README.md"
+keywords = ["claude", "tui", "multiplexer", "pty", "terminal"]
+categories = ["command-line-utilities"]
+
+[dependencies]
+ratatui = "0.29"
+crossterm = { version = "0.28", features = ["event-stream"] }
+portable-pty = "0.9"
+vt100 = "0.15"
+anyhow = "1"
+thiserror = "2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+toml = "0.8"
+ignore = "0.4"
+notify = "7"
+uuid = { version = "1", features = ["v4", "serde"] }
+dirs = "5"
+chrono = { version = "0.4", default-features = false, features = ["clock", "serde"] }
+
+[dependencies.git2]
+version = "0.20"
+default-features = false
+# Avoid OpenSSL pain on Windows — no HTTPS/SSH fetch needed for status/branch.
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
+strip = true
