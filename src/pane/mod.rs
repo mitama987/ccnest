@@ -26,8 +26,7 @@ pub struct Pane {
 impl Pane {
     pub fn spawn(id: PaneId, cwd: &Path, session_id: Uuid) -> Result<Self> {
         let parser = Arc::new(Mutex::new(vt100::Parser::new(24, 80, 2000)));
-        let (pty, command, claude_running) =
-            spawn_claude(cwd, session_id, Arc::clone(&parser))?;
+        let (pty, command, claude_running) = spawn_claude(cwd, session_id, Arc::clone(&parser))?;
         Ok(Self {
             id,
             cwd: cwd.to_path_buf(),

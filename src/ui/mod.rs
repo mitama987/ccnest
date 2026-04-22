@@ -3,17 +3,17 @@ pub mod theme;
 
 use std::collections::HashMap;
 
-use ratatui::Frame;
 use ratatui::buffer::Buffer;
 use ratatui::layout::{Constraint, Direction as LDir, Layout as LLayout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Paragraph, Widget};
+use ratatui::Frame;
 
 use crate::app::{App, Rect as AppRect};
-use crate::pane::PaneId;
 use crate::pane::grid::{Layout, SplitDir};
-use crate::sidebar::{Section, claude_ctx, panelist};
+use crate::pane::PaneId;
+use crate::sidebar::{claude_ctx, panelist, Section};
 
 pub fn draw(app: &App, frame: &mut Frame<'_>, pane_rects: &mut HashMap<PaneId, AppRect>) {
     let size = frame.area();
@@ -130,10 +130,7 @@ fn draw_sidebar(app: &App, frame: &mut Frame<'_>, area: Rect, theme: &theme::The
             .collect(),
         Section::Git => match app.sidebar.git_info.as_ref() {
             Some(gi) => vec![Line::from(Span::raw(gi.summary_line()))],
-            None => vec![Line::from(Span::styled(
-                "(not a git repo)",
-                theme.hint,
-            ))],
+            None => vec![Line::from(Span::styled("(not a git repo)", theme.hint))],
         },
         Section::Panes => panelist::rows(app)
             .into_iter()
@@ -166,7 +163,15 @@ fn draw_panes(
 ) {
     pane_rects.clear();
     let tab = app.current_tab();
-    render_layout(app, &tab.layout, tab.focused, area, frame, pane_rects, theme);
+    render_layout(
+        app,
+        &tab.layout,
+        tab.focused,
+        area,
+        frame,
+        pane_rects,
+        theme,
+    );
 }
 
 fn render_layout(

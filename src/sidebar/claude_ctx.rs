@@ -1,5 +1,5 @@
 use crate::app::App;
-use crate::claude::session::{ContextUsage, session_path, usage_from_file};
+use crate::claude::session::{session_path, usage_from_file, ContextUsage};
 
 #[derive(Debug, Clone)]
 pub struct PaneCtxRow {

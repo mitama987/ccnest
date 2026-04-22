@@ -3,13 +3,13 @@ use std::time::{Duration, Instant};
 
 use anyhow::Result;
 use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
-use ratatui::Terminal;
 use ratatui::backend::Backend;
+use ratatui::Terminal;
 
 use crate::app::{App, Rect};
-use crate::keymap::{Action, resolve};
-use crate::pane::PaneId;
+use crate::keymap::{resolve, Action};
 use crate::pane::grid::Direction;
+use crate::pane::PaneId;
 
 pub fn run_event_loop<B: Backend>(term: &mut Terminal<B>, mut app: App) -> Result<()> {
     let tick = Duration::from_millis(30);
@@ -128,9 +128,7 @@ fn open_selected_entry(app: &mut App) {
     if let Section::FileTree = app.sidebar.active {
         if let Some(entry) = app.sidebar.file_entries.get(app.sidebar.cursor()) {
             let editor = std::env::var("EDITOR").unwrap_or_else(|_| "code".to_string());
-            let _ = std::process::Command::new(editor)
-                .arg(&entry.path)
-                .spawn();
+            let _ = std::process::Command::new(editor).arg(&entry.path).spawn();
         }
     }
 }
