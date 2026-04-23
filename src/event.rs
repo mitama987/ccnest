@@ -22,21 +22,15 @@ pub fn run_event_loop<B: Backend>(term: &mut Terminal<B>, mut app: App) -> Resul
         term.draw(|f| crate::ui::draw(&app, f, &mut pane_rects))?;
 
         if event::poll(tick)? {
-            match event::read()? {
-                Event::Key(key) if key.kind != KeyEventKind::Release => {
-                    handle_key(&mut app, key, &pane_rects)?;
-                }
-                Event::Mouse(me) => {
-                    handle_mouse(&mut app, me, &pane_rects);
-                }
-                Event::Paste(text) => {
-                    handle_paste(&mut app, &text);
-                }
-                Event::Resize(_, _) => {
-                    // ratatui reads new size on next draw; pty will be resized there too.
-                }
-                _ => {}
+            // 同一 tick 内に溜まっているイベントを一気に drain して batch 化する。
+            // ペーストは Windows 上で Event::Paste ではなく個別 Key イベント群として
+            // 届くことがあるため、batch を走査して Enter を含む複数文字の連続を
+            // paste として検出・束ねる (Event::Paste が発火する環境でも従来どおり動く)。
+            let mut batch: Vec<Event> = vec![event::read()?];
+            while event::poll(Duration::from_millis(0))? {
+                batch.push(event::read()?);
             }
+            process_batch(&mut app, batch, &pane_rects)?;
         }
 
         if last_refresh.elapsed() >= refresh_every {
@@ -45,6 +39,84 @@ pub fn run_event_loop<B: Backend>(term: &mut Terminal<B>, mut app: App) -> Resul
         }
     }
     Ok(())
+}
+
+fn process_batch(
+    app: &mut App,
+    events: Vec<Event>,
+    pane_rects: &HashMap<PaneId, Rect>,
+) -> Result<()> {
+    let mut i = 0;
+    while i < events.len() {
+        // 連続する paste 候補(Char/Enter/Tab、Ctrl/Alt なし)の run を切り出し、
+        // 長さが 2 以上かつ Enter を含む場合のみ paste として束ねる。
+        // Enter を含まない連続文字は通常のタイプ入力とみなし個別処理に回す。
+        let mut run_end = i;
+        while run_end < events.len() && is_paste_candidate(&events[run_end]) {
+            run_end += 1;
+        }
+        let run_len = run_end - i;
+        let has_enter = events[i..run_end].iter().any(|e| {
+            matches!(
+                e,
+                Event::Key(k)
+                    if matches!(k.code, KeyCode::Enter) && k.kind != KeyEventKind::Release
+            )
+        });
+        if run_len >= 2 && has_enter {
+            let text: String = events[i..run_end]
+                .iter()
+                .filter_map(key_to_paste_char)
+                .collect();
+            handle_paste(app, &text);
+            i = run_end;
+            continue;
+        }
+
+        match &events[i] {
+            Event::Key(key) if key.kind != KeyEventKind::Release => {
+                handle_key(app, *key, pane_rects)?;
+            }
+            Event::Mouse(me) => {
+                handle_mouse(app, *me, pane_rects);
+            }
+            Event::Paste(text) => {
+                handle_paste(app, text);
+            }
+            Event::Resize(_, _) => {}
+            _ => {}
+        }
+        i += 1;
+    }
+    Ok(())
+}
+
+/// Key イベントが paste の一部になり得るか判定する。
+/// Ctrl/Alt 修飾付きキーやファンクションキーは paste に束ねない。
+fn is_paste_candidate(e: &Event) -> bool {
+    match e {
+        Event::Key(k) if k.kind != KeyEventKind::Release => {
+            if k.modifiers.contains(KeyModifiers::CONTROL)
+                || k.modifiers.contains(KeyModifiers::ALT)
+            {
+                return false;
+            }
+            matches!(k.code, KeyCode::Char(_) | KeyCode::Enter | KeyCode::Tab)
+        }
+        _ => false,
+    }
+}
+
+fn key_to_paste_char(e: &Event) -> Option<String> {
+    match e {
+        Event::Key(k) => match k.code {
+            KeyCode::Char(c) => Some(c.to_string()),
+            KeyCode::Enter => Some("\n".to_string()),
+            KeyCode::Tab => Some("\t".to_string()),
+            _ => None,
+        },
+        _ => None,
+    }
 }
 
 fn handle_key(app: &mut App, key: KeyEvent, pane_rects: &HashMap<PaneId, Rect>) -> Result<()> {
