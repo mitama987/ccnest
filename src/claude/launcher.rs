@@ -38,10 +38,7 @@ pub fn spawn_claude(
 /// Spawn the system shell in a PTY (cmd.exe on Windows, `$SHELL` otherwise).
 /// Used both as the initial fallback when `claude` is missing and when Ctrl+C
 /// 2 連打でペインを shell に切り戻すときの再起動先として使う。
-pub fn spawn_shell(
-    cwd: &Path,
-    parser: Arc<Mutex<vt100::Parser>>,
-) -> Result<(PtyHandle, String)> {
+pub fn spawn_shell(cwd: &Path, parser: Arc<Mutex<vt100::Parser>>) -> Result<(PtyHandle, String)> {
     let shell = if cfg!(windows) {
         std::env::var("ComSpec").unwrap_or_else(|_| "cmd.exe".to_string())
     } else {
