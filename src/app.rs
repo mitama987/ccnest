@@ -1,5 +1,6 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+use std::time::Instant;
 
 use anyhow::Result;
 use uuid::Uuid;
@@ -25,6 +26,9 @@ pub struct App {
     pub quit: bool,
     pub status: Option<String>,
     pub renaming_tab: Option<String>,
+    /// 直近の Ctrl+C の (ペイン, 押下時刻)。同ペインで閾値内に再度 Ctrl+C が
+    /// 来たら claude→shell の再起動をトリガする。
+    pub last_ctrl_c: Option<(PaneId, Instant)>,
 }
 
 /// Derive a tab title from the pane cwd (final path component).
@@ -59,6 +63,7 @@ impl App {
             quit: false,
             status: None,
             renaming_tab: None,
+            last_ctrl_c: None,
         })
     }
 

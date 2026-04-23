@@ -70,7 +70,7 @@ fn draw_tabbar(app: &App, frame: &mut Frame<'_>, area: Rect, theme: &theme::Them
         spans.push(Span::raw(" "));
     }
     let hint_text =
-        "  Ctrl+D:┃  Ctrl+E:━  Ctrl+T:tab  Ctrl+W:close  Ctrl+F:files  F2:rename  Ctrl+Q:quit";
+        "  Ctrl+D:┃  Ctrl+E:━  Ctrl+T:tab  Ctrl+W:close  Ctrl+F:files  F2:rename  Ctrl+C×2:shell  Ctrl+Q:quit";
     let hint = Span::styled(hint_text, theme.hint);
     spans.push(hint);
     frame.render_widget(Paragraph::new(Line::from(spans)), area);

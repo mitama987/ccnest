@@ -50,6 +50,36 @@ fn handle_key(app: &mut App, key: KeyEvent, pane_rects: &HashMap<PaneId, Rect>) 
         handle_rename_key(app, key);
         return Ok(());
     }
+
+    // Ctrl+C 2 連打でフォーカス中ペインを shell(cmd.exe / $SHELL) に切り替える。
+    // 1 回目は従来どおり子プロセス(claude など)へ 0x03 を pass-through する。
+    if is_ctrl_c(&key) {
+        let now = Instant::now();
+        let focused_id = app.current_tab().focused;
+        let double_tap = matches!(
+            app.last_ctrl_c,
+            Some((pid, t))
+                if pid == focused_id && now.duration_since(t) <= Duration::from_millis(800)
+        );
+        if double_tap {
+            if let Some(pane) = app.panes.get_mut(&focused_id) {
+                if pane.claude_running {
+                    let _ = pane.respawn_as_shell();
+                    app.last_ctrl_c = None;
+                    return Ok(());
+                }
+            }
+        }
+        app.last_ctrl_c = Some((focused_id, now));
+        if !app.sidebar_focused {
+            if let Some(pane) = app.panes.get(&focused_id) {
+                pane.scroll_to_bottom();
+                pane.write(&[0x03]);
+            }
+        }
+        return Ok(());
+    }
+
     let action = resolve(&key, app.sidebar_focused);
     match action {
         Action::Quit => app.quit = true,
@@ -232,6 +262,11 @@ fn handle_mouse(app: &mut App, me: MouseEvent, pane_rects: &HashMap<PaneId, Rect
     if let Some(pane) = app.panes.get(&target) {
         pane.scroll_by(delta * 3);
     }
+}
+
+fn is_ctrl_c(k: &KeyEvent) -> bool {
+    k.modifiers.contains(KeyModifiers::CONTROL)
+        && matches!(k.code, KeyCode::Char('c') | KeyCode::Char('C'))
 }
 
 fn key_to_bytes(key: &KeyEvent) -> Vec<u8> {
