@@ -1,0 +1,536 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>ccnest — a Claude Code-aware terminal multiplexer</title>
+<meta name="description" content="ccnest is a terminal multiplexer built around Claude Code. Prefix-less split hotkeys, per-pane Claude context usage, and a structured sidebar. Rust, Windows-first." />
+<meta property="og:title" content="ccnest — a Claude Code-aware terminal multiplexer" />
+<meta property="og:description" content="Prefix-less splits, per-pane Claude context usage, structured sidebar. Rust, Windows-first." />
+<meta property="og:type" content="website" />
+<meta name="theme-color" content="#0b0b0e" />
+<link rel="icon" type="image/svg+xml" href="favicon.svg" />
+<link rel="preconnect" href="https://fonts.googleapis.com" />
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;700&display=swap" rel="stylesheet" />
+<style>
+  :root {
+    --bg: #0b0b0e;
+    --panel: #141418;
+    --panel-2: #1a1a22;
+    --border: #2a2a32;
+    --border-strong: #3a3a44;
+    --text: #e8e8e8;
+    --dim: #888896;
+    --muted: #5a5a66;
+    --accent: #58b6ff;
+    --claude: #ff8c00;
+    --green: #8cc265;
+    --yellow: #e6cb00;
+    --red: #ff6b6b;
+  }
+  * { box-sizing: border-box; }
+  html { scroll-behavior: smooth; }
+  body {
+    margin: 0;
+    background: var(--bg);
+    color: var(--text);
+    font-family: Inter, -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+    font-size: 16px;
+    line-height: 1.6;
+    -webkit-font-smoothing: antialiased;
+  }
+  code, pre, .mono { font-family: "JetBrains Mono", ui-monospace, "SF Mono", Consolas, monospace; }
+  a { color: var(--accent); text-decoration: none; border-bottom: 1px solid transparent; transition: border-color 150ms ease; }
+  a:hover { border-bottom-color: var(--accent); }
+  h1, h2, h3 { font-weight: 700; letter-spacing: -0.02em; }
+  h2 { font-size: 1.9rem; margin: 0 0 1.2rem; }
+  h3 { font-size: 1.15rem; margin: 0 0 0.5rem; }
+  p { margin: 0 0 1rem; color: #d0d0d8; }
+  ::selection { background: var(--accent); color: var(--bg); }
+
+  /* Nav */
+  nav {
+    position: sticky; top: 0; z-index: 10;
+    background: rgba(11, 11, 14, 0.85);
+    backdrop-filter: blur(10px);
+    border-bottom: 1px solid var(--border);
+  }
+  nav .inner {
+    max-width: 1100px; margin: 0 auto;
+    padding: 0.9rem 1.5rem;
+    display: flex; align-items: center; justify-content: space-between;
+  }
+  nav .brand { font-family: "JetBrains Mono", monospace; font-weight: 700; font-size: 1.1rem; color: var(--text); }
+  nav .brand span { color: var(--claude); }
+  nav ul { display: flex; gap: 1.5rem; list-style: none; margin: 0; padding: 0; }
+  nav ul a { color: var(--dim); font-size: 0.9rem; border: none; }
+  nav ul a:hover { color: var(--text); }
+
+  main { max-width: 1100px; margin: 0 auto; padding: 0 1.5rem; }
+
+  /* Hero */
+  .hero { padding: 5rem 0 4rem; text-align: center; }
+  .hero .logo {
+    font-family: "JetBrains Mono", monospace;
+    font-size: 0.95rem; line-height: 1.05;
+    color: var(--claude); margin: 0 0 1.5rem;
+    white-space: pre; text-align: left; display: inline-block;
+    filter: drop-shadow(0 0 30px rgba(255, 140, 0, 0.15));
+  }
+  .hero h1 {
+    font-size: clamp(2.2rem, 5vw, 3.4rem);
+    margin: 0 0 1rem;
+    background: linear-gradient(120deg, #fff 0%, #b0b0b8 100%);
+    -webkit-background-clip: text;
+    background-clip: text;
+    color: transparent;
+  }
+  .hero .tag { font-size: 1.2rem; color: var(--dim); max-width: 640px; margin: 0 auto 2rem; }
+  .hero .cta { display: flex; gap: 0.75rem; justify-content: center; flex-wrap: wrap; }
+  .btn {
+    display: inline-block;
+    padding: 0.65rem 1.25rem;
+    border-radius: 6px;
+    font-weight: 600;
+    font-size: 0.95rem;
+    transition: all 150ms ease;
+    border: 1px solid var(--border-strong);
+    color: var(--text);
+    background: var(--panel);
+  }
+  .btn:hover { background: var(--panel-2); border-color: var(--accent); border-bottom-color: var(--accent); }
+  .btn.primary {
+    background: var(--claude); color: #0b0b0e; border-color: var(--claude);
+  }
+  .btn.primary:hover { background: #ffa02a; border-color: #ffa02a; }
+
+  .install-cmd {
+    margin: 2.5rem auto 0;
+    max-width: 540px;
+    background: var(--panel);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 0.8rem 1rem;
+    font-family: "JetBrains Mono", monospace;
+    font-size: 0.95rem;
+    text-align: left;
+    display: flex; align-items: center; gap: 0.75rem;
+  }
+  .install-cmd .prompt { color: var(--green); user-select: none; }
+  .install-cmd .cmd { flex: 1; color: var(--text); overflow-x: auto; }
+  .install-cmd button {
+    background: transparent; border: 1px solid var(--border-strong);
+    color: var(--dim); padding: 0.25rem 0.65rem; border-radius: 4px;
+    font: inherit; font-size: 0.8rem; cursor: pointer;
+  }
+  .install-cmd button:hover { color: var(--text); border-color: var(--accent); }
+
+  /* Section spacing */
+  section { padding: 4rem 0; }
+  section + section { border-top: 1px solid var(--border); }
+
+  /* Terminal mockup */
+  .mockup-wrap { padding: 2rem 0 4rem; }
+  .mockup {
+    background: var(--bg);
+    border: 1px solid var(--border-strong);
+    border-radius: 10px;
+    overflow: hidden;
+    box-shadow: 0 30px 80px rgba(0, 0, 0, 0.5), 0 0 0 1px rgba(88, 182, 255, 0.05);
+  }
+  .mockup-title {
+    background: #1a1a1f;
+    padding: 0.55rem 1rem;
+    display: flex; align-items: center; gap: 0.5rem;
+    border-bottom: 1px solid var(--border);
+  }
+  .mockup-title .dots { display: flex; gap: 0.4rem; }
+  .mockup-title .dot { width: 11px; height: 11px; border-radius: 50%; background: var(--muted); }
+  .mockup-title .dot.r { background: #ff5f56; }
+  .mockup-title .dot.y { background: #ffbd2e; }
+  .mockup-title .dot.g { background: #27c93f; }
+  .mockup-title .path { margin-left: 0.75rem; color: var(--dim); font-family: "JetBrains Mono", monospace; font-size: 0.82rem; }
+  .mockup-body {
+    display: grid;
+    grid-template-columns: 260px 1fr;
+    min-height: 420px;
+    font-family: "JetBrains Mono", monospace;
+    font-size: 0.82rem;
+  }
+  .mockup-sidebar {
+    background: #0d0d11;
+    border-right: 1px solid var(--border);
+    padding: 0.9rem 0.9rem;
+  }
+  .mockup-sidebar .sec-tabs {
+    display: flex; gap: 0.5rem; margin-bottom: 0.9rem;
+    color: var(--dim); font-size: 0.76rem;
+  }
+  .mockup-sidebar .sec-tabs .active { color: var(--bg); background: var(--accent); padding: 0.05rem 0.4rem; border-radius: 3px; }
+  .mockup-sidebar .tree { color: #c8c8d0; }
+  .mockup-sidebar .tree .sel {
+    background: #fff; color: #0b0b0e; padding: 0 0.2rem;
+  }
+  .mockup-sidebar .tree .dim { color: var(--muted); }
+  .mockup-sidebar .tree .dir { color: var(--accent); }
+
+  .mockup-main { display: flex; flex-direction: column; }
+  .mockup-tabs {
+    padding: 0.45rem 0.8rem;
+    border-bottom: 1px solid var(--border);
+    color: var(--dim);
+    display: flex; align-items: center; gap: 0.6rem;
+    font-size: 0.8rem;
+  }
+  .mockup-tabs .tab { padding: 0.15rem 0.6rem; border-radius: 3px; }
+  .mockup-tabs .tab.active { background: var(--accent); color: var(--bg); font-weight: 600; }
+  .mockup-tabs .hint { margin-left: auto; color: var(--muted); font-size: 0.72rem; }
+  .mockup-panes { flex: 1; display: grid; grid-template-columns: 1fr 1fr; gap: 1px; background: var(--border); padding: 1px; }
+  .pane {
+    background: var(--bg); padding: 0.7rem 0.85rem;
+    border: 1px solid transparent;
+    position: relative;
+  }
+  .pane.focused { border-color: var(--claude); }
+  .pane .ptitle { color: var(--dim); font-size: 0.72rem; margin-bottom: 0.5rem; }
+  .pane.focused .ptitle { color: var(--claude); }
+  .pane .line { color: #c8c8d0; }
+  .pane .line.logo { color: var(--claude); white-space: pre; font-size: 0.7rem; line-height: 1; }
+  .pane .line.dim { color: var(--muted); }
+  .pane .line.prompt { color: var(--green); }
+  .mockup-status {
+    padding: 0.3rem 0.9rem; border-top: 1px solid var(--border);
+    color: var(--muted); font-size: 0.75rem;
+  }
+
+  /* Features grid */
+  .features { display: grid; gap: 1rem; grid-template-columns: repeat(auto-fit, minmax(250px, 1fr)); }
+  .feature {
+    background: var(--panel);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 1.4rem;
+    transition: border-color 150ms ease;
+  }
+  .feature:hover { border-color: var(--border-strong); }
+  .feature .icon {
+    font-family: "JetBrains Mono", monospace;
+    font-weight: 700; font-size: 1.4rem;
+    color: var(--claude);
+    margin-bottom: 0.75rem;
+  }
+  .feature h3 { color: var(--text); }
+  .feature p { color: var(--dim); font-size: 0.92rem; margin: 0; }
+
+  /* Install / code blocks */
+  pre.code {
+    background: var(--panel);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 1rem 1.2rem;
+    font-size: 0.88rem;
+    overflow-x: auto;
+    color: var(--text);
+    margin: 0 0 1rem;
+  }
+  pre.code .c { color: var(--muted); }
+  pre.code .p { color: var(--green); }
+  pre.code .s { color: var(--yellow); }
+
+  /* Keybindings table */
+  .keys-table { width: 100%; border-collapse: collapse; font-size: 0.92rem; }
+  .keys-table th, .keys-table td {
+    text-align: left; padding: 0.6rem 0.8rem;
+    border-bottom: 1px solid var(--border);
+  }
+  .keys-table th { color: var(--dim); font-weight: 500; font-size: 0.82rem; text-transform: uppercase; letter-spacing: 0.05em; }
+  .keys-table kbd {
+    font-family: "JetBrains Mono", monospace;
+    background: var(--panel-2);
+    border: 1px solid var(--border-strong);
+    border-bottom-width: 2px;
+    padding: 0.08rem 0.45rem;
+    border-radius: 4px;
+    font-size: 0.82rem;
+    color: var(--text);
+  }
+  .keys-table td:first-child { white-space: nowrap; }
+
+  /* Inline list with dots */
+  .dot-list { list-style: none; padding: 0; margin: 0; }
+  .dot-list li { padding: 0.4rem 0 0.4rem 1.2rem; position: relative; color: #d0d0d8; }
+  .dot-list li::before {
+    content: "▸"; position: absolute; left: 0; color: var(--claude);
+  }
+
+  /* Footer */
+  footer { border-top: 1px solid var(--border); padding: 3rem 0 4rem; color: var(--dim); text-align: center; font-size: 0.9rem; }
+  footer a { color: var(--dim); border: none; }
+  footer a:hover { color: var(--text); }
+  footer .links { display: flex; gap: 2rem; justify-content: center; margin-bottom: 1rem; }
+
+  @media (max-width: 700px) {
+    .hero { padding: 3rem 0 2rem; }
+    .mockup-body { grid-template-columns: 1fr; }
+    .mockup-sidebar { border-right: none; border-bottom: 1px solid var(--border); }
+    .mockup-panes { grid-template-columns: 1fr; }
+    nav ul { gap: 1rem; }
+  }
+</style>
+</head>
+<body>
+
+<nav>
+  <div class="inner">
+    <a class="brand" href="#">cc<span>nest</span></a>
+    <ul>
+      <li><a href="#install">Install</a></li>
+      <li><a href="#keys">Keys</a></li>
+      <li><a href="#sidebar">Sidebar</a></li>
+      <li><a href="https://github.com/mitama987/ccnest" target="_blank" rel="noopener">GitHub</a></li>
+    </ul>
+  </div>
+</nav>
+
+<main>
+
+<section class="hero">
+  <pre class="logo">
+ ▄████▄   ▄████▄   ███▄    █ ▓█████   ██████ ▄▄▄█████▓
+▒██▀ ▀█  ▒██▀ ▀█   ██ ▀█   █ ▓█   ▀ ▒██    ▒ ▓  ██▒ ▓▒
+▒▓█    ▄ ▒▓█    ▄ ▓██  ▀█ ██▒▒███   ░ ▓██▄   ▒ ▓██░ ▒░
+▒▓▓▄ ▄██▒▒▓▓▄ ▄██▒▓██▒  ▐▌██▒▒▓█  ▄   ▒   ██▒░ ▓██▓ ░
+▒ ▓███▀ ░▒ ▓███▀ ░▒██░   ▓██░░▒████▒▒██████▒▒  ▒██▒ ░
+░ ░▒ ▒  ░░ ░▒ ▒  ░░ ▒░   ▒ ▒ ░░ ▒░ ░▒ ▒▓▒ ▒ ░  ▒ ░░
+  ░  ▒     ░  ▒   ░ ░░   ░ ▒░ ░ ░  ░░ ░▒  ░ ░    ░
+░        ░           ░   ░ ░    ░   ░  ░  ░    ░
+</pre>
+  <h1>Multiplex Claude Code.<br />Without the ceremony.</h1>
+  <p class="tag">
+    A terminal multiplexer built around <strong>Claude Code</strong>. Prefix-less splits,
+    per-pane context usage, a structured sidebar, and panes that actually start in your
+    project with <code>claude</code> already running.
+  </p>
+  <div class="cta">
+    <a class="btn primary" href="#install">Install</a>
+    <a class="btn" href="https://github.com/mitama987/ccnest" target="_blank" rel="noopener">View on GitHub</a>
+  </div>
+  <div class="install-cmd">
+    <span class="prompt">$</span>
+    <span class="cmd" id="install-cmd">cargo install --git https://github.com/mitama987/ccnest</span>
+    <button onclick="navigator.clipboard.writeText(document.getElementById('install-cmd').textContent);this.textContent='Copied';setTimeout(()=>this.textContent='Copy',1500);">Copy</button>
+  </div>
+</section>
+
+<section class="mockup-wrap" aria-label="What ccnest looks like when running">
+  <div class="mockup">
+    <div class="mockup-title">
+      <div class="dots"><span class="dot r"></span><span class="dot y"></span><span class="dot g"></span></div>
+      <div class="path">~/projects/ccnest — ccnest</div>
+    </div>
+    <div class="mockup-body">
+      <aside class="mockup-sidebar">
+        <div class="sec-tabs">
+          <span class="active">Files (1)</span>
+          <span>Claude (2)</span>
+          <span>Git (3)</span>
+          <span>Panes (4)</span>
+        </div>
+        <div class="tree">
+          <div class="dir">▾ ccnest/</div>
+          <div>&nbsp;&nbsp;<span class="dir">▾ src/</span></div>
+          <div>&nbsp;&nbsp;&nbsp;&nbsp;<span class="sel">&nbsp;app.rs&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;</span></div>
+          <div>&nbsp;&nbsp;&nbsp;&nbsp;event.rs</div>
+          <div>&nbsp;&nbsp;&nbsp;&nbsp;keymap.rs</div>
+          <div>&nbsp;&nbsp;&nbsp;&nbsp;lib.rs</div>
+          <div>&nbsp;&nbsp;&nbsp;&nbsp;main.rs</div>
+          <div>&nbsp;&nbsp;&nbsp;&nbsp;<span class="dir">▸ pane/</span></div>
+          <div>&nbsp;&nbsp;&nbsp;&nbsp;<span class="dir">▸ sidebar/</span></div>
+          <div>&nbsp;&nbsp;&nbsp;&nbsp;<span class="dir">▸ ui/</span></div>
+          <div>&nbsp;&nbsp;Cargo.toml</div>
+          <div>&nbsp;&nbsp;README.md</div>
+          <div>&nbsp;&nbsp;<span class="dim">target/</span></div>
+          <br />
+          <div class="dim">──────────</div>
+          <div class="dim">ctx  168k / 1000k</div>
+          <div class="dim">git  main  M 4  ?? 2</div>
+        </div>
+      </aside>
+      <div class="mockup-main">
+        <div class="mockup-tabs">
+          <span class="tab active"> ccnest </span>
+          <span class="tab"> notes </span>
+          <span class="hint">Ctrl+D:┃ Ctrl+E:━ Ctrl+T:tab Ctrl+F:files F2:rename</span>
+        </div>
+        <div class="mockup-panes">
+          <div class="pane focused">
+            <div class="ptitle">[1] claude.exe ◉ focused</div>
+            <div class="line logo">  ▐▛███▜▌   Claude Code v2.1.117
+▝▜█████▛▘  Opus 4.7 (1M context)
+  ▘▘ ▝▝    ~/projects/ccnest</div>
+            <div class="line dim">───────────────────────────────────</div>
+            <div class="line prompt">❯ &nbsp;refactor the keymap to use</div>
+            <div class="line prompt">&nbsp;&nbsp;a single table instead of match_</div>
+            <div class="line dim">&nbsp;&nbsp;⏸ plan mode on</div>
+          </div>
+          <div class="pane">
+            <div class="ptitle">[2] claude.exe</div>
+            <div class="line">Running tests...</div>
+            <div class="line"><span style="color:var(--green)">✓</span> 23 passed <span class="dim">(0.12s)</span></div>
+            <div class="line"><span style="color:var(--green)">✓</span> clippy clean</div>
+            <div class="line dim">───────────────────────────────────</div>
+            <div class="line prompt">❯ cargo build --release</div>
+            <div class="line dim">&nbsp;&nbsp;&nbsp;Compiling ccnest v0.1.1</div>
+          </div>
+        </div>
+        <div class="mockup-status">cwd: ~/projects/ccnest</div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<section>
+  <h2>Why ccnest</h2>
+  <div class="features">
+    <div class="feature">
+      <div class="icon">┃━</div>
+      <h3>Prefix-less splits</h3>
+      <p>
+        <kbd style="font-family:JetBrains Mono;background:#1a1a22;border:1px solid #3a3a44;padding:0.05rem 0.4rem;border-radius:3px;font-size:0.82rem;">Ctrl+D</kbd>
+        splits right,
+        <kbd style="font-family:JetBrains Mono;background:#1a1a22;border:1px solid #3a3a44;padding:0.05rem 0.4rem;border-radius:3px;font-size:0.82rem;">Ctrl+E</kbd>
+        splits down. No tmux leader-key dance.
+      </p>
+    </div>
+    <div class="feature">
+      <div class="icon">◉</div>
+      <h3>Panes start with Claude</h3>
+      <p>Every new pane spawns <code>claude --session-id &lt;uuid&gt;</code> in your current folder. No setup.</p>
+    </div>
+    <div class="feature">
+      <div class="icon">%</div>
+      <h3>Per-pane context usage</h3>
+      <p>Reads the Claude Code JSONL log for each pane's session and shows remaining context live.</p>
+    </div>
+    <div class="feature">
+      <div class="icon">⌨</div>
+      <h3>Keyboard-first navigation</h3>
+      <p>Alt+arrow tabs, Ctrl+arrow panes, F2 to rename. White-block selection cursor in the sidebar.</p>
+    </div>
+  </div>
+</section>
+
+<section id="install">
+  <h2>Install</h2>
+  <p>
+    ccnest is written in Rust. You need a recent Rust toolchain
+    (<a href="https://rustup.rs" target="_blank" rel="noopener">rustup</a>) and, to actually get
+    value from the Claude integration, the <a href="https://www.anthropic.com/claude-code" target="_blank" rel="noopener">claude</a> CLI on your <code>PATH</code>.
+    If <code>claude</code> is not found, panes fall back to the system shell so the multiplexer is still usable.
+  </p>
+
+  <h3 style="margin-top:2rem;">Via cargo <span class="mono" style="color:var(--dim);font-weight:400;font-size:0.9rem;">(recommended)</span></h3>
+<pre class="code"><span class="c"># clone &amp; install — lands in ~/.cargo/bin</span>
+<span class="p">$</span> git clone https://github.com/mitama987/ccnest
+<span class="p">$</span> cd ccnest
+<span class="p">$</span> cargo install --path .</pre>
+
+  <h3 style="margin-top:2rem;">Via PowerShell script <span class="mono" style="color:var(--dim);font-weight:400;font-size:0.9rem;">(Windows, installs to <code>~/.local/bin</code>)</span></h3>
+<pre class="code"><span class="p">&gt;</span> git clone https://github.com/mitama987/ccnest
+<span class="p">&gt;</span> cd ccnest
+<span class="p">&gt;</span> pwsh .\scripts\install.ps1</pre>
+
+  <h3 style="margin-top:2rem;">Launch</h3>
+<pre class="code"><span class="p">$</span> ccnest                     <span class="c"># use cwd as the first pane's directory</span>
+<span class="p">$</span> ccnest path/to/project</pre>
+  <p style="color:var(--dim);font-size:0.92rem;">
+    ccnest opens in an alternate screen. Press <kbd>Ctrl+Q</kbd> to exit, or
+    <kbd>Ctrl+W</kbd> to close individual panes.
+  </p>
+</section>
+
+<section id="keys">
+  <h2>Keybindings</h2>
+  <p>
+    ccnest intercepts a small set of modifier-combos before the pty sees them.
+    Everything else passes straight through to the focused pane, so Claude Code
+    keybindings keep working.
+  </p>
+  <table class="keys-table">
+    <thead>
+      <tr><th>Key</th><th>Action</th></tr>
+    </thead>
+    <tbody>
+      <tr><td><kbd>Ctrl+D</kbd></td><td>Split the focused pane vertically (new <code>claude</code> to the right)</td></tr>
+      <tr><td><kbd>Ctrl+E</kbd></td><td>Split the focused pane horizontally (new <code>claude</code> below)</td></tr>
+      <tr><td><kbd>Ctrl+T</kbd></td><td>New tab with a fresh <code>claude</code> pane</td></tr>
+      <tr><td><kbd>Ctrl+W</kbd></td><td>Close the focused pane</td></tr>
+      <tr><td><kbd>Alt+←</kbd> / <kbd>Alt+→</kbd></td><td>Previous / next tab</td></tr>
+      <tr><td><kbd>Ctrl+Tab</kbd> / <kbd>Ctrl+Shift+Tab</kbd></td><td>Previous / next tab (alias)</td></tr>
+      <tr><td><kbd>F2</kbd></td><td>Rename the active tab (Enter to commit, Esc to cancel)</td></tr>
+      <tr><td><kbd>Ctrl+←</kbd> / <kbd>Ctrl+→</kbd> / <kbd>Ctrl+↑</kbd> / <kbd>Ctrl+↓</kbd></td><td>Move pane focus</td></tr>
+      <tr><td><kbd>Ctrl+F</kbd></td><td>Toggle the file tree (opens to Files, closes when already on Files)</td></tr>
+      <tr><td><kbd>Ctrl+B</kbd></td><td>Toggle the entire left sidebar</td></tr>
+      <tr><td><kbd>Ctrl+1</kbd> .. <kbd>Ctrl+4</kbd></td><td>Jump to sidebar section (Files / Claude / Git / Panes)</td></tr>
+      <tr><td><kbd>Tab</kbd> <em style="color:var(--dim)">(sidebar focused)</em></td><td>Cycle sidebar sections</td></tr>
+      <tr><td><kbd>↑</kbd> / <kbd>↓</kbd> / <kbd>j</kbd> / <kbd>k</kbd> <em style="color:var(--dim)">(sidebar)</em></td><td>Move selection cursor</td></tr>
+      <tr><td><kbd>Enter</kbd> <em style="color:var(--dim)">(on a file row)</em></td><td>Open in <code>$EDITOR</code> (falls back to <code>code</code>)</td></tr>
+      <tr><td><kbd>Ctrl+Q</kbd></td><td>Quit ccnest</td></tr>
+    </tbody>
+  </table>
+  <p style="color:var(--dim);font-size:0.92rem;margin-top:1.2rem;">
+    Heads-up: <kbd>Ctrl+D</kbd> is captured, so it will not send EOF to <code>claude</code>. Use <code>/exit</code> inside Claude, or <kbd>Ctrl+W</kbd> to close the pane from the outside.
+  </p>
+</section>
+
+<section id="sidebar">
+  <h2>The sidebar</h2>
+  <p>
+    The left sidebar is always available (<kbd>Ctrl+B</kbd> toggles the whole thing,
+    <kbd>Ctrl+F</kbd> focuses the file tree). It has four sections you can jump to with
+    <kbd>Ctrl+1</kbd>..<kbd>Ctrl+4</kbd>:
+  </p>
+  <ul class="dot-list">
+    <li><strong>Files</strong> — a depth-3 tree of the focused pane's cwd. Honors <code>.gitignore</code> via the <code>ignore</code> crate.</li>
+    <li><strong>Claude</strong> — per-pane context usage parsed from <code>~/.claude/projects/&lt;encoded-cwd&gt;/&lt;session-id&gt;.jsonl</code>. Each pane is launched with <code>claude --session-id &lt;uuid&gt;</code>, so ccnest knows which file to read. Override the default 200k-token window with <code>CCNEST_CONTEXT_WINDOW=1000000</code> for 1M-context models.</li>
+    <li><strong>Git</strong> — current branch plus <code>M / S / ?</code> counts for the focused pane's cwd, via <code>git2</code>.</li>
+    <li><strong>Panes</strong> — a list of every pane in the current tab, marking the active pane and whether Claude is running.</li>
+  </ul>
+  <p style="color:var(--dim);font-size:0.92rem;margin-top:1.2rem;">
+    The selection cursor is a solid reversed-white block, rendered across the full row.
+    It was the original motivation for building ccnest.
+  </p>
+</section>
+
+<section>
+  <h2>Status &amp; roadmap</h2>
+  <p>
+    ccnest is <strong>v0.1.1</strong> — Windows-first, Rust, single binary. The core loop
+    (split / focus / sidebar / Claude JSONL parsing) is stable and tested. Not production
+    software; expect sharp edges around non-Windows terminals and exotic PTY configurations.
+  </p>
+  <ul class="dot-list">
+    <li><strong>v0.2</strong> — macOS / Linux support, config file, themes, session save/restore.</li>
+    <li><strong>v0.3</strong> — mouse support, plugins, git diff preview in the sidebar.</li>
+  </ul>
+  <p style="margin-top:1.5rem;">
+    File issues and PRs on
+    <a href="https://github.com/mitama987/ccnest" target="_blank" rel="noopener">GitHub</a>.
+  </p>
+</section>
+
+</main>
+
+<footer>
+  <div class="links">
+    <a href="https://github.com/mitama987/ccnest" target="_blank" rel="noopener">GitHub</a>
+    <a href="https://github.com/mitama987/ccnest/blob/main/README.md" target="_blank" rel="noopener">README</a>
+    <a href="https://github.com/mitama987/ccnest/issues" target="_blank" rel="noopener">Issues</a>
+    <a href="https://www.anthropic.com/claude-code" target="_blank" rel="noopener">Claude Code</a>
+  </div>
+  <div>ccnest — MIT licensed. Built with Rust, ratatui, crossterm, portable-pty, and vt100.</div>
+</footer>
+
+</body>
+</html>

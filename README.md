@@ -5,6 +5,8 @@ A Claude Code-aware terminal multiplexer. Windows-first. Inspired by
 prefix-less pane creation hotkeys and a structured left sidebar that
 surfaces file tree, Claude context usage, git status, and pane list.
 
+**Docs site:** <https://mitama987.github.io/ccnest/>
+
 ## Status
 
 v0.1 — Windows only. Rust + `ratatui` + `crossterm` + `portable-pty` + `vt100`.
