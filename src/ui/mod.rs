@@ -225,8 +225,13 @@ fn render_layout(
             );
 
             if let Some(pane) = app.panes.get(pid) {
+                let selection = app
+                    .selection
+                    .filter(|s| s.pane_id == *pid)
+                    .map(|s| normalize_selection(s.anchor, s.cursor));
                 let widget = PaneCells {
                     parser: &pane.parser,
+                    selection,
                 };
                 frame.render_widget(widget, inner);
                 // Ensure pty is sized to the rendering area.
@@ -258,6 +263,8 @@ fn render_layout(
 
 struct PaneCells<'a> {
     parser: &'a std::sync::Mutex<vt100::Parser>,
+    /// (start, end) のペイン内座標(col,row)。start<=end で正規化済み。
+    selection: Option<((u16, u16), (u16, u16))>,
 }
 
 impl<'a> Widget for PaneCells<'a> {
@@ -270,7 +277,12 @@ impl<'a> Widget for PaneCells<'a> {
             for x in 0..area.width {
                 if let Some(cell) = screen.cell(y, x) {
                     let ch = cell.contents();
-                    let style = style_from_cell(cell);
+                    let mut style = style_from_cell(cell);
+                    if let Some((start, end)) = self.selection {
+                        if selection_contains((x, y), start, end) {
+                            style = style.add_modifier(Modifier::REVERSED);
+                        }
+                    }
                     let bx = area.x + x;
                     let by = area.y + y;
                     let bcell = &mut buf[(bx, by)];
@@ -283,6 +295,32 @@ impl<'a> Widget for PaneCells<'a> {
                 }
             }
         }
+    }
+}
+
+fn selection_contains(pos: (u16, u16), start: (u16, u16), end: (u16, u16)) -> bool {
+    let (x, y) = pos;
+    if y < start.1 || y > end.1 {
+        return false;
+    }
+    if start.1 == end.1 {
+        return x >= start.0 && x <= end.0;
+    }
+    if y == start.1 {
+        return x >= start.0;
+    }
+    if y == end.1 {
+        return x <= end.0;
+    }
+    true
+}
+
+/// (anchor, cursor) を行優先で昇順に並べ替える。event.rs 側と同一ルール。
+pub fn normalize_selection(a: (u16, u16), b: (u16, u16)) -> ((u16, u16), (u16, u16)) {
+    if a.1 < b.1 || (a.1 == b.1 && a.0 <= b.0) {
+        (a, b)
+    } else {
+        (b, a)
     }
 }
 
