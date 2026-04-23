@@ -477,10 +477,18 @@
       <tr><td><kbd>↑</kbd> / <kbd>↓</kbd> / <kbd>j</kbd> / <kbd>k</kbd> <em style="color:var(--dim)">(sidebar)</em></td><td>Move selection cursor</td></tr>
       <tr><td><kbd>Enter</kbd> <em style="color:var(--dim)">(on a file row)</em></td><td>Open in <code>$EDITOR</code> (falls back to <code>code</code>)</td></tr>
       <tr><td><kbd>Ctrl+Q</kbd></td><td>Quit ccnest</td></tr>
+      <tr><td colspan="2" style="background:var(--panel-2);color:var(--dim);font-size:0.78rem;text-transform:uppercase;letter-spacing:0.05em;padding:0.5rem 0.8rem;">Forwarded to the focused pane</td></tr>
+      <tr><td><kbd>Shift+Tab</kbd></td><td>Sent as back-tab (<code>CSI Z</code>) — drives Claude's mode cycle (default → auto-accept → plan)</td></tr>
+      <tr><td><kbd>Shift+Enter</kbd> / <kbd>Ctrl+Enter</kbd></td><td>Insert a newline in the prompt instead of submitting (sent as <code>ESC + CR</code>)</td></tr>
+      <tr><td colspan="2" style="background:var(--panel-2);color:var(--dim);font-size:0.78rem;text-transform:uppercase;letter-spacing:0.05em;padding:0.5rem 0.8rem;">Scrollback (2000 lines per pane)</td></tr>
+      <tr><td>Mouse wheel</td><td>Scroll history in the pane under the cursor (3 lines / tick)</td></tr>
+      <tr><td><kbd>Shift+PageUp</kbd> / <kbd>Shift+PageDown</kbd></td><td>Scroll the focused pane one screen of history</td></tr>
+      <tr><td><kbd>Shift+↑</kbd> / <kbd>Shift+↓</kbd></td><td>Scroll the focused pane one line of history</td></tr>
+      <tr><td><em style="color:var(--dim)">any keystroke</em></td><td>Snaps the view back to the live tail (<code>set_scrollback(0)</code>)</td></tr>
     </tbody>
   </table>
   <p style="color:var(--dim);font-size:0.92rem;margin-top:1.2rem;">
-    Heads-up: <kbd>Ctrl+D</kbd> is captured, so it will not send EOF to <code>claude</code>. Use <code>/exit</code> inside Claude, or <kbd>Ctrl+W</kbd> to close the pane from the outside.
+    Heads-up: <kbd>Ctrl+D</kbd> is captured, so it will not send EOF to <code>claude</code>. Use <code>/exit</code> inside Claude, or <kbd>Ctrl+W</kbd> to close the pane from the outside. Plain <kbd>PageUp</kbd> / <kbd>PageDown</kbd> still pass through to <code>claude</code> — only the <kbd>Shift</kbd>-modified variants drive ccnest's scrollback.
   </p>
 </section>
 
@@ -512,7 +520,7 @@
   </p>
   <ul class="dot-list">
     <li><strong>v0.2</strong> — macOS / Linux support, config file, themes, session save/restore.</li>
-    <li><strong>v0.3</strong> — mouse support, plugins, git diff preview in the sidebar.</li>
+    <li><strong>v0.3</strong> — richer mouse support (drag-to-resize, click-to-focus), plugins, git diff preview in the sidebar.</li>
   </ul>
   <p style="margin-top:1.5rem;">
     File issues and PRs on
