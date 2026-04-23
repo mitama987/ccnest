@@ -57,7 +57,9 @@ impl Pane {
     /// スクロールバック位置を delta 行ぶん移動する（+ で履歴へ、- で現在へ）。
     /// vt100 側でクランプされるので範囲チェック不要。
     pub fn scroll_by(&self, delta: i32) {
-        let Ok(mut p) = self.parser.lock() else { return };
+        let Ok(mut p) = self.parser.lock() else {
+            return;
+        };
         let cur = p.screen().scrollback() as i32;
         let next = (cur + delta).max(0) as usize;
         p.set_scrollback(next);
