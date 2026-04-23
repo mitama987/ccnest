@@ -237,6 +237,7 @@ fn handle_mouse(app: &mut App, me: MouseEvent, pane_rects: &HashMap<PaneId, Rect
 fn key_to_bytes(key: &KeyEvent) -> Vec<u8> {
     let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
     let alt = key.modifiers.contains(KeyModifiers::ALT);
+    let shift = key.modifiers.contains(KeyModifiers::SHIFT);
     let mut buf = Vec::new();
     match key.code {
         KeyCode::Char(c) => {
@@ -255,7 +256,14 @@ fn key_to_bytes(key: &KeyEvent) -> Vec<u8> {
                 buf.extend_from_slice(c.to_string().as_bytes());
             }
         }
-        KeyCode::Enter => buf.push(b'\r'),
+        KeyCode::Enter => {
+            if shift || ctrl {
+                // ESC+CR: Claude/Copilot CLI が改行（送信せずに次行）として解釈する標準シーケンス。
+                buf.extend_from_slice(b"\x1b\r");
+            } else {
+                buf.push(b'\r');
+            }
+        }
         KeyCode::Tab => buf.push(b'\t'),
         KeyCode::Backspace => buf.push(0x7f),
         KeyCode::Esc => buf.push(0x1b),
