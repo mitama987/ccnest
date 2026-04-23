@@ -264,7 +264,15 @@ fn key_to_bytes(key: &KeyEvent) -> Vec<u8> {
                 buf.push(b'\r');
             }
         }
-        KeyCode::Tab => buf.push(b'\t'),
+        KeyCode::Tab => {
+            if shift {
+                // Back-tab (CSI Z): Claude CLI の Shift+Tab モード切替が認識する。
+                buf.extend_from_slice(b"\x1b[Z");
+            } else {
+                buf.push(b'\t');
+            }
+        }
+        KeyCode::BackTab => buf.extend_from_slice(b"\x1b[Z"),
         KeyCode::Backspace => buf.push(0x7f),
         KeyCode::Esc => buf.push(0x1b),
         KeyCode::Left => buf.extend_from_slice(b"\x1b[D"),
