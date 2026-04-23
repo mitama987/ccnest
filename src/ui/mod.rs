@@ -61,13 +61,17 @@ fn draw_tabbar(app: &App, frame: &mut Frame<'_>, area: Rect, theme: &theme::Them
         } else {
             theme.tab_inactive
         };
-        spans.push(Span::styled(format!(" {} ", tab.title), style));
+        let label = if active && app.renaming_tab.is_some() {
+            format!(" {}\u{258e} ", app.renaming_tab.as_deref().unwrap_or(""))
+        } else {
+            format!(" {} ", tab.title)
+        };
+        spans.push(Span::styled(label, style));
         spans.push(Span::raw(" "));
     }
-    let hint = Span::styled(
-        "  Ctrl+D:━  Ctrl+E:┃  Ctrl+T:tab  Ctrl+W:close  Ctrl+B:sidebar  Ctrl+Q:quit",
-        theme.hint,
-    );
+    let hint_text =
+        "  Ctrl+D:┃  Ctrl+E:━  Ctrl+T:tab  Ctrl+W:close  Ctrl+F:files  F2:rename  Ctrl+Q:quit";
+    let hint = Span::styled(hint_text, theme.hint);
     spans.push(hint);
     frame.render_widget(Paragraph::new(Line::from(spans)), area);
 }

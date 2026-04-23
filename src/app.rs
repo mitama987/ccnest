@@ -1,5 +1,5 @@
 use std::collections::HashMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use anyhow::Result;
 use uuid::Uuid;
@@ -24,6 +24,15 @@ pub struct App {
     pub sidebar_focused: bool,
     pub quit: bool,
     pub status: Option<String>,
+    pub renaming_tab: Option<String>,
+}
+
+/// Derive a tab title from the pane cwd (final path component).
+pub fn folder_title(cwd: &Path) -> String {
+    cwd.file_name()
+        .map(|s| s.to_string_lossy().to_string())
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| cwd.display().to_string())
 }
 
 impl App {
@@ -34,7 +43,7 @@ impl App {
         panes.insert(first_id, first);
 
         let tab = Tab {
-            title: "1".to_string(),
+            title: folder_title(&cwd),
             layout: Layout::Leaf(first_id),
             focused: first_id,
         };
@@ -49,6 +58,7 @@ impl App {
             sidebar_focused: false,
             quit: false,
             status: None,
+            renaming_tab: None,
         })
     }
 
@@ -87,9 +97,8 @@ impl App {
         self.next_pane_id += 1;
         let pane = Pane::spawn(new_id, &cwd, Uuid::new_v4())?;
         self.panes.insert(new_id, pane);
-        let title = format!("{}", self.tabs.len() + 1);
         self.tabs.push(Tab {
-            title,
+            title: folder_title(&cwd),
             layout: Layout::Leaf(new_id),
             focused: new_id,
         });
