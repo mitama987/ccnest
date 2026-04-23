@@ -2,7 +2,7 @@ use std::collections::HashMap;
 use std::time::{Duration, Instant};
 
 use anyhow::Result;
-use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
+use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseEvent};
 use ratatui::backend::Backend;
 use ratatui::Terminal;
 
@@ -25,6 +25,9 @@ pub fn run_event_loop<B: Backend>(term: &mut Terminal<B>, mut app: App) -> Resul
             match event::read()? {
                 Event::Key(key) if key.kind != KeyEventKind::Release => {
                     handle_key(&mut app, key, &pane_rects)?;
+                }
+                Event::Mouse(me) => {
+                    handle_mouse(&mut app, me, &pane_rects);
                 }
                 Event::Resize(_, _) => {
                     // ratatui reads new size on next draw; pty will be resized there too.
@@ -104,6 +107,22 @@ fn handle_key(app: &mut App, key: KeyEvent, pane_rects: &HashMap<PaneId, Rect>) 
         Action::FocusContent => {
             app.sidebar_focused = false;
         }
+        Action::ScrollLineUp => scroll_focused(app, 1),
+        Action::ScrollLineDown => scroll_focused(app, -1),
+        Action::ScrollPageUp => {
+            let h = pane_rects
+                .get(&app.current_tab().focused)
+                .map(|r| r.h)
+                .unwrap_or(24);
+            scroll_focused(app, h.max(1));
+        }
+        Action::ScrollPageDown => {
+            let h = pane_rects
+                .get(&app.current_tab().focused)
+                .map(|r| r.h)
+                .unwrap_or(24);
+            scroll_focused(app, -h.max(1));
+        }
         Action::PassThrough => {
             if app.sidebar_focused {
                 // Ignore character input while sidebar has focus.
@@ -112,6 +131,7 @@ fn handle_key(app: &mut App, key: KeyEvent, pane_rects: &HashMap<PaneId, Rect>) 
             let bytes = key_to_bytes(&key);
             if !bytes.is_empty() {
                 if let Some(pane) = app.panes.get(&app.current_tab().focused) {
+                    pane.scroll_to_bottom();
                     pane.write(&bytes);
                 }
             }
@@ -185,6 +205,32 @@ fn handle_rename_key(app: &mut App, key: KeyEvent) {
             buf.push(c);
         }
         _ => {}
+    }
+}
+
+fn scroll_focused(app: &App, delta: i32) {
+    if let Some(pane) = app.panes.get(&app.current_tab().focused) {
+        pane.scroll_by(delta);
+    }
+}
+
+fn handle_mouse(app: &mut App, me: MouseEvent, pane_rects: &HashMap<PaneId, Rect>) {
+    use crossterm::event::MouseEventKind::*;
+    let delta = match me.kind {
+        ScrollUp => 1,
+        ScrollDown => -1,
+        _ => return,
+    };
+    let mx = me.column as i32;
+    let my = me.row as i32;
+    let target = pane_rects
+        .iter()
+        .find_map(|(pid, r)| {
+            (mx >= r.x && mx < r.x + r.w && my >= r.y && my < r.y + r.h).then_some(*pid)
+        })
+        .unwrap_or(app.current_tab().focused);
+    if let Some(pane) = app.panes.get(&target) {
+        pane.scroll_by(delta * 3);
     }
 }
 
