@@ -8,7 +8,7 @@ use std::time::Instant;
 use anyhow::Result;
 use uuid::Uuid;
 
-use crate::claude::launcher::spawn_claude;
+use crate::claude::launcher::{spawn_claude, spawn_shell};
 
 pub type PaneId = u64;
 
@@ -52,6 +52,22 @@ impl Pane {
 
     pub fn terminate(self) {
         self.pty.kill();
+    }
+
+    /// 現在走っている子プロセス（claude 等）を kill し、同じペイン枠に
+    /// 新しいシェル(cmd.exe / $SHELL)を起動し直す。Ctrl+C 2 連打で呼ばれる。
+    ///
+    /// 新しい vt100::Parser を割り当てて画面状態をリセットする。旧 parser は
+    /// 旧 PTY の reader スレッドが EOF まで書き込むが、誰も参照しないので問題ない。
+    pub fn respawn_as_shell(&mut self) -> Result<()> {
+        self.pty.kill();
+        let new_parser = Arc::new(Mutex::new(vt100::Parser::new(24, 80, 2000)));
+        let (new_pty, cmd_label) = spawn_shell(&self.cwd, Arc::clone(&new_parser))?;
+        self.pty = new_pty;
+        self.parser = new_parser;
+        self.command = cmd_label;
+        self.claude_running = false;
+        Ok(())
     }
 
     /// スクロールバック位置を delta 行ぶん移動する（+ で履歴へ、- で現在へ）。

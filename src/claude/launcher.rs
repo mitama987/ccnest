@@ -30,17 +30,28 @@ pub fn spawn_claude(
     }
 
     // Fallback: start the system shell so the pane is at least usable.
+    let (h, shell) = spawn_shell(cwd, parser)
+        .map_err(|e| anyhow!("failed to spawn both claude and shell: {e}"))?;
+    Ok((h, shell, false))
+}
+
+/// Spawn the system shell in a PTY (cmd.exe on Windows, `$SHELL` otherwise).
+/// Used both as the initial fallback when `claude` is missing and when Ctrl+C
+/// 2 連打でペインを shell に切り戻すときの再起動先として使う。
+pub fn spawn_shell(
+    cwd: &Path,
+    parser: Arc<Mutex<vt100::Parser>>,
+) -> Result<(PtyHandle, String)> {
     let shell = if cfg!(windows) {
         std::env::var("ComSpec").unwrap_or_else(|_| "cmd.exe".to_string())
     } else {
         std::env::var("SHELL").unwrap_or_else(|_| "/bin/sh".to_string())
     };
-    let mut fallback = CommandBuilder::new(&shell);
-    fallback.cwd(cwd);
-    apply_env(&mut fallback);
-    let h = PtyHandle::spawn(fallback, parser)
-        .map_err(|e| anyhow!("failed to spawn both claude and shell: {e}"))?;
-    Ok((h, shell, false))
+    let mut cmd = CommandBuilder::new(&shell);
+    cmd.cwd(cwd);
+    apply_env(&mut cmd);
+    let h = PtyHandle::spawn(cmd, parser).map_err(|e| anyhow!("failed to spawn shell: {e}"))?;
+    Ok((h, shell))
 }
 
 fn apply_env(cmd: &mut CommandBuilder) {

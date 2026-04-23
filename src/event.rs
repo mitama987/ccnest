@@ -29,6 +29,9 @@ pub fn run_event_loop<B: Backend>(term: &mut Terminal<B>, mut app: App) -> Resul
                 Event::Mouse(me) => {
                     handle_mouse(&mut app, me, &pane_rects);
                 }
+                Event::Paste(text) => {
+                    handle_paste(&mut app, &text);
+                }
                 Event::Resize(_, _) => {
                     // ratatui reads new size on next draw; pty will be resized there too.
                 }
@@ -50,6 +53,54 @@ fn handle_key(app: &mut App, key: KeyEvent, pane_rects: &HashMap<PaneId, Rect>) 
         handle_rename_key(app, key);
         return Ok(());
     }
+
+    // 選択範囲が存在する状態で Ctrl+C → クリップボードへコピーして選択解除。
+    // reshell / pass-through より優先。その他のキーは選択をクリアしてから通常処理。
+    if let Some(sel) = app.selection {
+        if is_ctrl_c(&key) {
+            if let Some(pane) = app.panes.get(&sel.pane_id) {
+                let text = extract_selected_text(pane, sel);
+                if !text.is_empty() {
+                    copy_to_clipboard(&text);
+                }
+            }
+            app.selection = None;
+            app.last_ctrl_c = None; // 2 連打カウンタもリセット
+            return Ok(());
+        }
+        // Ctrl+C 以外のキーが来たら選択を解除して以降を通常処理。
+        app.selection = None;
+    }
+
+    // Ctrl+C 2 連打でフォーカス中ペインを shell(cmd.exe / $SHELL) に切り替える。
+    // 1 回目は従来どおり子プロセス(claude など)へ 0x03 を pass-through する。
+    if is_ctrl_c(&key) {
+        let now = Instant::now();
+        let focused_id = app.current_tab().focused;
+        let double_tap = matches!(
+            app.last_ctrl_c,
+            Some((pid, t))
+                if pid == focused_id && now.duration_since(t) <= Duration::from_millis(800)
+        );
+        if double_tap {
+            if let Some(pane) = app.panes.get_mut(&focused_id) {
+                if pane.claude_running {
+                    let _ = pane.respawn_as_shell();
+                    app.last_ctrl_c = None;
+                    return Ok(());
+                }
+            }
+        }
+        app.last_ctrl_c = Some((focused_id, now));
+        if !app.sidebar_focused {
+            if let Some(pane) = app.panes.get(&focused_id) {
+                pane.scroll_to_bottom();
+                pane.write(&[0x03]);
+            }
+        }
+        return Ok(());
+    }
+
     let action = resolve(&key, app.sidebar_focused);
     match action {
         Action::Quit => app.quit = true,
@@ -215,23 +266,154 @@ fn scroll_focused(app: &App, delta: i32) {
 }
 
 fn handle_mouse(app: &mut App, me: MouseEvent, pane_rects: &HashMap<PaneId, Rect>) {
-    use crossterm::event::MouseEventKind::*;
-    let delta = match me.kind {
-        ScrollUp => 1,
-        ScrollDown => -1,
-        _ => return,
-    };
+    use crossterm::event::{MouseButton, MouseEventKind::*};
     let mx = me.column as i32;
     let my = me.row as i32;
-    let target = pane_rects
-        .iter()
-        .find_map(|(pid, r)| {
-            (mx >= r.x && mx < r.x + r.w && my >= r.y && my < r.y + r.h).then_some(*pid)
-        })
-        .unwrap_or(app.current_tab().focused);
-    if let Some(pane) = app.panes.get(&target) {
-        pane.scroll_by(delta * 3);
+
+    match me.kind {
+        ScrollUp | ScrollDown => {
+            let delta = if matches!(me.kind, ScrollUp) { 1 } else { -1 };
+            let target = pane_rects
+                .iter()
+                .find_map(|(pid, r)| {
+                    (mx >= r.x && mx < r.x + r.w && my >= r.y && my < r.y + r.h).then_some(*pid)
+                })
+                .unwrap_or(app.current_tab().focused);
+            if let Some(pane) = app.panes.get(&target) {
+                pane.scroll_by(delta * 3);
+            }
+        }
+        Down(MouseButton::Left) => {
+            // 新しいドラッグ選択を開始。クリック位置が pane 内なら selection を更新、
+            // 外(サイドバー/タブバー/境界)なら既存選択はクリアする。
+            if let Some((pid, rect)) = find_pane_at(pane_rects, mx, my) {
+                let lx = (mx - rect.x).clamp(0, rect.w.saturating_sub(1)) as u16;
+                let ly = (my - rect.y).clamp(0, rect.h.saturating_sub(1)) as u16;
+                app.selection = Some(crate::app::Selection {
+                    pane_id: pid,
+                    anchor: (lx, ly),
+                    cursor: (lx, ly),
+                    dragging: true,
+                });
+            } else {
+                app.selection = None;
+            }
+        }
+        Drag(MouseButton::Left) => {
+            if let Some(sel) = app.selection.as_mut() {
+                if let Some(rect) = pane_rects.get(&sel.pane_id) {
+                    let lx = (mx - rect.x).clamp(0, rect.w.saturating_sub(1)) as u16;
+                    let ly = (my - rect.y).clamp(0, rect.h.saturating_sub(1)) as u16;
+                    sel.cursor = (lx, ly);
+                }
+            }
+        }
+        Up(MouseButton::Left) => {
+            if let Some(sel) = app.selection.as_mut() {
+                sel.dragging = false;
+                // 単一クリック(範囲0)はノーマルクリック扱いで選択破棄。
+                if sel.anchor == sel.cursor {
+                    app.selection = None;
+                }
+            }
+        }
+        _ => {}
     }
+}
+
+fn find_pane_at(pane_rects: &HashMap<PaneId, Rect>, mx: i32, my: i32) -> Option<(PaneId, Rect)> {
+    pane_rects
+        .iter()
+        .find(|(_, r)| mx >= r.x && mx < r.x + r.w && my >= r.y && my < r.y + r.h)
+        .map(|(pid, r)| (*pid, *r))
+}
+
+/// 選択範囲内のテキストを vt100 スクリーンから抜き出す。行末のスペースは
+/// trim し、行間は '\n' で結合。
+fn extract_selected_text(pane: &crate::pane::Pane, sel: crate::app::Selection) -> String {
+    let Ok(parser) = pane.parser.lock() else {
+        return String::new();
+    };
+    let screen = parser.screen();
+    let (rows, cols) = screen.size();
+    let (start, end) = normalize_range(sel.anchor, sel.cursor);
+    let mut lines: Vec<String> = Vec::new();
+    let max_y = end.1.min(rows.saturating_sub(1));
+    for y in start.1..=max_y {
+        let (x0, x1) = if start.1 == end.1 {
+            (start.0, end.0)
+        } else if y == start.1 {
+            (start.0, cols.saturating_sub(1))
+        } else if y == end.1 {
+            (0, end.0)
+        } else {
+            (0, cols.saturating_sub(1))
+        };
+        let mut line = String::new();
+        for x in x0..=x1.min(cols.saturating_sub(1)) {
+            if let Some(cell) = screen.cell(y, x) {
+                let ch = cell.contents();
+                if ch.is_empty() {
+                    line.push(' ');
+                } else {
+                    line.push_str(&ch);
+                }
+            } else {
+                line.push(' ');
+            }
+        }
+        lines.push(line.trim_end().to_string());
+    }
+    lines.join("\n")
+}
+
+/// (anchor, cursor) を行優先で昇順に並べ替える。
+fn normalize_range(a: (u16, u16), b: (u16, u16)) -> ((u16, u16), (u16, u16)) {
+    if a.1 < b.1 || (a.1 == b.1 && a.0 <= b.0) {
+        (a, b)
+    } else {
+        (b, a)
+    }
+}
+
+fn copy_to_clipboard(text: &str) {
+    // arboard は初期化に失敗し得る（ヘッドレス環境など）が、コピーは best-effort。
+    if let Ok(mut cb) = arboard::Clipboard::new() {
+        let _ = cb.set_text(text.to_string());
+    }
+}
+
+/// ペースト内容を bracketed-paste マーカー `ESC [200~ ... ESC [201~` で包んで
+/// フォーカス中ペインの PTY へ書き込む。Claude CLI 等の bracketed-paste 対応
+/// 子プロセスは、この区切りを見て「貼り付け」と認識し、途中に含まれる改行を
+/// 送信トリガとして扱わずに `[Pasted text +N lines]` のプレースホルダへまとめる。
+fn handle_paste(app: &mut App, text: &str) {
+    if app.sidebar_focused {
+        return;
+    }
+    let focused_id = app.current_tab().focused;
+    let Some(pane) = app.panes.get(&focused_id) else {
+        return;
+    };
+    pane.scroll_to_bottom();
+    let mut buf = Vec::with_capacity(text.len() + 12);
+    buf.extend_from_slice(b"\x1b[200~");
+    // CRLF を LF に正規化しておく（bracketed-paste 内でも CR が送信扱いになる
+    // 実装があり得るため事前に潰す）。
+    for ch in text.chars() {
+        if ch == '\r' {
+            continue;
+        }
+        let mut tmp = [0u8; 4];
+        buf.extend_from_slice(ch.encode_utf8(&mut tmp).as_bytes());
+    }
+    buf.extend_from_slice(b"\x1b[201~");
+    pane.write(&buf);
+}
+
+fn is_ctrl_c(k: &KeyEvent) -> bool {
+    k.modifiers.contains(KeyModifiers::CONTROL)
+        && matches!(k.code, KeyCode::Char('c') | KeyCode::Char('C'))
 }
 
 fn key_to_bytes(key: &KeyEvent) -> Vec<u8> {
