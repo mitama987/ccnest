@@ -31,6 +31,9 @@ version = "0.20"
 default-features = false
 # Avoid OpenSSL pain on Windows — no HTTPS/SSH fetch needed for status/branch.
 
+[dev-dependencies]
+tempfile = "3"
+
 [profile.release]
 lto = "thin"
 codegen-units = 1

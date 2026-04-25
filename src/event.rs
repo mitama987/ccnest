@@ -17,9 +17,12 @@ pub fn run_event_loop<B: Backend>(term: &mut Terminal<B>, mut app: App) -> Resul
     let mut last_refresh = Instant::now();
     let refresh_every = Duration::from_secs(2);
     let mut pane_rects: HashMap<PaneId, Rect> = HashMap::new();
+    let mut sidebar_file_rect: Option<Rect> = None;
 
     while !app.quit {
-        term.draw(|f| crate::ui::draw(&app, f, &mut pane_rects))?;
+        term.draw(|f| {
+            crate::ui::draw(&app, f, &mut pane_rects, &mut sidebar_file_rect)
+        })?;
 
         if event::poll(tick)? {
             // 同一 tick 内に溜まっているイベントを一気に drain して batch 化する。
@@ -45,7 +48,7 @@ pub fn run_event_loop<B: Backend>(term: &mut Terminal<B>, mut app: App) -> Resul
                     break;
                 }
             }
-            process_batch(&mut app, batch, &pane_rects)?;
+            process_batch(&mut app, batch, &pane_rects, sidebar_file_rect)?;
         }
 
         if last_refresh.elapsed() >= refresh_every {
@@ -60,6 +63,7 @@ fn process_batch(
     app: &mut App,
     events: Vec<Event>,
     pane_rects: &HashMap<PaneId, Rect>,
+    sidebar_file_rect: Option<Rect>,
 ) -> Result<()> {
     let mut i = 0;
     while i < events.len() {
@@ -74,7 +78,7 @@ fn process_batch(
                 handle_key(app, *key, pane_rects)?;
             }
             Event::Mouse(me) => {
-                handle_mouse(app, *me, pane_rects);
+                handle_mouse(app, *me, pane_rects, sidebar_file_rect);
             }
             Event::Paste(text) => {
                 handle_paste(app, text);
@@ -299,7 +303,7 @@ fn handle_key(app: &mut App, key: KeyEvent, pane_rects: &HashMap<PaneId, Rect>) 
 
 fn current_section_len(app: &App) -> usize {
     match app.sidebar.active {
-        crate::sidebar::Section::FileTree => app.sidebar.file_entries.len(),
+        crate::sidebar::Section::FileTree => app.sidebar.file_tree.visible_len(),
         crate::sidebar::Section::Claude => app.current_tab().layout.leaves().len(),
         crate::sidebar::Section::Git => {
             if app.sidebar.git_info.is_some() {
@@ -314,9 +318,13 @@ fn current_section_len(app: &App) -> usize {
 
 fn open_selected_entry(app: &mut App) {
     if let Section::FileTree = app.sidebar.active {
-        if let Some(entry) = app.sidebar.file_entries.get(app.sidebar.cursor()) {
-            let editor = std::env::var("EDITOR").unwrap_or_else(|_| "code".to_string());
-            let _ = std::process::Command::new(editor).arg(&entry.path).spawn();
+        let cursor = app.sidebar.cursor();
+        match app.sidebar.file_tree.activate_at(cursor) {
+            Some(crate::sidebar::filetree::ActivateResult::File(path)) => {
+                let editor = std::env::var("EDITOR").unwrap_or_else(|_| "code".to_string());
+                let _ = std::process::Command::new(editor).arg(&path).spawn();
+            }
+            Some(crate::sidebar::filetree::ActivateResult::DirToggled) | None => {}
         }
     }
 }
@@ -371,7 +379,12 @@ fn scroll_focused(app: &App, delta: i32) {
     }
 }
 
-fn handle_mouse(app: &mut App, me: MouseEvent, pane_rects: &HashMap<PaneId, Rect>) {
+fn handle_mouse(
+    app: &mut App,
+    me: MouseEvent,
+    pane_rects: &HashMap<PaneId, Rect>,
+    sidebar_file_rect: Option<Rect>,
+) {
     use crossterm::event::{MouseButton, MouseEventKind::*};
     let mx = me.column as i32;
     let my = me.row as i32;
@@ -390,6 +403,29 @@ fn handle_mouse(app: &mut App, me: MouseEvent, pane_rects: &HashMap<PaneId, Rect
             }
         }
         Down(MouseButton::Left) => {
+            // サイドバー Files 領域のクリック → カーソル移動 + Enter と同じ activate を実行。
+            // ペイン選択開始ロジックより先に判定し、当てはまれば early return。
+            if let Some(rect) = sidebar_file_rect {
+                if mx >= rect.x && mx < rect.x + rect.w && my >= rect.y && my < rect.y + rect.h {
+                    let row = (my - rect.y) as usize;
+                    if row < app.sidebar.file_tree.visible_len() {
+                        app.sidebar.visible = true;
+                        app.sidebar_focused = true;
+                        app.sidebar.active = Section::FileTree;
+                        app.sidebar.set_cursor(row);
+                        match app.sidebar.file_tree.activate_at(row) {
+                            Some(crate::sidebar::filetree::ActivateResult::File(p)) => {
+                                let editor = std::env::var("EDITOR")
+                                    .unwrap_or_else(|_| "code".to_string());
+                                let _ = std::process::Command::new(editor).arg(&p).spawn();
+                            }
+                            _ => {}
+                        }
+                        app.selection = None;
+                        return;
+                    }
+                }
+            }
             // 新しいドラッグ選択を開始。クリック位置が pane 内なら selection を更新、
             // 外(サイドバー/タブバー/境界)なら既存選択はクリアする。
             if let Some((pid, rect)) = find_pane_at(pane_rects, mx, my) {

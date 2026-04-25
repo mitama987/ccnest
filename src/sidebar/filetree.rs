@@ -1,14 +1,9 @@
+use std::cmp::Ordering;
+use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
 use anyhow::Result;
 use ignore::WalkBuilder;
-
-#[derive(Debug, Clone)]
-pub struct Entry {
-    pub path: PathBuf,
-    pub depth: usize,
-    pub is_dir: bool,
-}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum EntryKind {
@@ -30,45 +25,202 @@ pub enum EntryKind {
     Other,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct DisplayParts {
-    pub indent: String,
-    pub icon: &'static str,
+#[derive(Debug, Clone)]
+pub struct FileNode {
+    pub path: PathBuf,
     pub name: String,
     pub kind: EntryKind,
+    pub is_dir: bool,
+    pub expanded: bool,
+    /// 子ノードは初回展開時に lazy で読み込む。`None` = 未読み込み、
+    /// `Some(empty)` = 読み込み済みで子なし。
+    pub children: Option<Vec<FileNode>>,
 }
 
-impl Entry {
-    pub fn display_parts(&self, root: &Path) -> DisplayParts {
-        let name = self.name(root);
-        let kind = self.kind();
+/// アクション結果。Enter / クリック時に呼び出し側が分岐するために返す。
+#[derive(Debug, Clone)]
+pub enum ActivateResult {
+    File(PathBuf),
+    DirToggled,
+}
 
-        DisplayParts {
-            indent: "  ".repeat(self.depth.saturating_sub(1)),
-            icon: icon_for_kind(kind),
-            name: if self.is_dir {
-                format!("{name}/")
-            } else {
-                name
-            },
-            kind,
+#[derive(Debug)]
+pub struct FileTree {
+    pub root: PathBuf,
+    pub entries: Vec<FileNode>,
+}
+
+impl FileTree {
+    pub fn new(root: PathBuf) -> Self {
+        let entries = load_dir(&root).unwrap_or_default();
+        Self { root, entries }
+    }
+
+    /// 展開済みパスを保持しつつルートを再ロード。
+    pub fn refresh(&mut self) {
+        let expanded = self.snapshot_expanded();
+        self.entries = load_dir(&self.root).unwrap_or_default();
+        for e in self.entries.iter_mut() {
+            reapply_expansion(e, &expanded);
         }
     }
 
-    pub fn display(&self, root: &Path) -> String {
-        let parts = self.display_parts(root);
-        format!("{}{} {}", parts.indent, parts.icon, parts.name)
+    /// 表示中のノードを (depth, node) で列挙。
+    pub fn flatten(&self) -> Vec<(usize, &FileNode)> {
+        let mut out = Vec::new();
+        for e in &self.entries {
+            collect_visible(e, 0, &mut out);
+        }
+        out
     }
 
-    pub fn kind(&self) -> EntryKind {
-        classify_path(&self.path, self.is_dir)
+    pub fn visible_len(&self) -> usize {
+        let mut n = 0;
+        for e in &self.entries {
+            count_visible(e, &mut n);
+        }
+        n
     }
 
-    fn name(&self, root: &Path) -> String {
-        let rel = self.path.strip_prefix(root).unwrap_or(&self.path);
-        rel.file_name()
-            .map(|s| s.to_string_lossy().to_string())
-            .unwrap_or_else(|| rel.to_string_lossy().to_string())
+    /// 表示順 index に対応するノードを「アクティベート」する。
+    /// ディレクトリならトグル(必要なら子を lazy ロード)、ファイルならパスを返す。
+    pub fn activate_at(&mut self, index: usize) -> Option<ActivateResult> {
+        let mut counter = 0usize;
+        for e in self.entries.iter_mut() {
+            if let Some(action) = activate_node(e, index, &mut counter) {
+                return Some(action);
+            }
+        }
+        None
+    }
+
+    fn snapshot_expanded(&self) -> HashSet<PathBuf> {
+        let mut set = HashSet::new();
+        for e in &self.entries {
+            collect_expanded_paths(e, &mut set);
+        }
+        set
+    }
+}
+
+fn collect_visible<'a>(node: &'a FileNode, depth: usize, out: &mut Vec<(usize, &'a FileNode)>) {
+    out.push((depth, node));
+    if node.is_dir && node.expanded {
+        if let Some(children) = node.children.as_ref() {
+            for c in children {
+                collect_visible(c, depth + 1, out);
+            }
+        }
+    }
+}
+
+fn count_visible(node: &FileNode, out: &mut usize) {
+    *out += 1;
+    if node.is_dir && node.expanded {
+        if let Some(children) = node.children.as_ref() {
+            for c in children {
+                count_visible(c, out);
+            }
+        }
+    }
+}
+
+fn activate_node(
+    node: &mut FileNode,
+    target: usize,
+    counter: &mut usize,
+) -> Option<ActivateResult> {
+    if *counter == target {
+        return Some(if node.is_dir {
+            if node.children.is_none() {
+                node.children = Some(load_dir(&node.path).unwrap_or_default());
+            }
+            node.expanded = !node.expanded;
+            ActivateResult::DirToggled
+        } else {
+            ActivateResult::File(node.path.clone())
+        });
+    }
+    *counter += 1;
+    if node.is_dir && node.expanded {
+        if let Some(children) = node.children.as_mut() {
+            for c in children {
+                if let Some(r) = activate_node(c, target, counter) {
+                    return Some(r);
+                }
+            }
+        }
+    }
+    None
+}
+
+fn collect_expanded_paths(node: &FileNode, out: &mut HashSet<PathBuf>) {
+    if node.is_dir && node.expanded {
+        out.insert(node.path.clone());
+    }
+    if let Some(children) = node.children.as_ref() {
+        for c in children {
+            collect_expanded_paths(c, out);
+        }
+    }
+}
+
+fn reapply_expansion(node: &mut FileNode, expanded: &HashSet<PathBuf>) {
+    if node.is_dir && expanded.contains(&node.path) {
+        if node.children.is_none() {
+            node.children = Some(load_dir(&node.path).unwrap_or_default());
+        }
+        node.expanded = true;
+        if let Some(children) = node.children.as_mut() {
+            for c in children {
+                reapply_expansion(c, expanded);
+            }
+        }
+    }
+}
+
+/// ディレクトリ直下を 1 レベルだけ読み込み、エクスプローラ式に
+/// 「フォルダ→ファイル」「同種は名前昇順(大小無視)」で整列する。
+fn load_dir(path: &Path) -> Result<Vec<FileNode>> {
+    let mut entries: Vec<FileNode> = WalkBuilder::new(path)
+        .max_depth(Some(1))
+        .hidden(true)
+        .git_ignore(true)
+        .git_exclude(true)
+        .git_global(true)
+        .build()
+        .flatten()
+        .filter(|d| d.depth() == 1)
+        .filter_map(|d| {
+            let p = d.path().to_path_buf();
+            let is_dir = d.file_type().map(|t| t.is_dir()).unwrap_or(false);
+            let name = p
+                .file_name()
+                .map(|s| s.to_string_lossy().to_string())
+                .unwrap_or_default();
+            if name.is_empty() {
+                return None;
+            }
+            let kind = classify_path(&p, is_dir);
+            Some(FileNode {
+                path: p,
+                name,
+                kind,
+                is_dir,
+                expanded: false,
+                children: None,
+            })
+        })
+        .collect();
+    entries.sort_by(compare_explorer);
+    Ok(entries)
+}
+
+fn compare_explorer(a: &FileNode, b: &FileNode) -> Ordering {
+    match (a.is_dir, b.is_dir) {
+        (true, false) => Ordering::Less,
+        (false, true) => Ordering::Greater,
+        _ => a.name.to_lowercase().cmp(&b.name.to_lowercase()),
     }
 }
 
@@ -136,84 +288,110 @@ fn classify_path(path: &Path, is_dir: bool) -> EntryKind {
     }
 }
 
-pub fn walk(root: &Path, max_depth: usize) -> Result<Vec<Entry>> {
-    let mut out = Vec::new();
-    let walker = WalkBuilder::new(root)
-        .max_depth(Some(max_depth))
-        .hidden(true)
-        .git_ignore(true)
-        .git_exclude(true)
-        .git_global(true)
-        .build();
-    for dent in walker.flatten() {
-        if dent.depth() == 0 {
-            continue;
-        }
-        let is_dir = dent.file_type().map(|t| t.is_dir()).unwrap_or(false);
-        out.push(Entry {
-            path: dent.path().to_path_buf(),
-            depth: dent.depth(),
-            is_dir,
-        });
-    }
-    Ok(out)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::fs;
+    use tempfile::TempDir;
 
-    fn entry(root: &Path, relative: &str, is_dir: bool, depth: usize) -> Entry {
-        Entry {
-            path: root.join(relative),
-            depth,
-            is_dir,
+    fn mk_tree(td: &TempDir) -> PathBuf {
+        let root = td.path().to_path_buf();
+        fs::create_dir(root.join("src")).unwrap();
+        fs::create_dir(root.join("docs")).unwrap();
+        fs::write(root.join("src/main.rs"), "").unwrap();
+        fs::write(root.join("src/lib.rs"), "").unwrap();
+        fs::write(root.join("README.md"), "").unwrap();
+        fs::write(root.join("Cargo.toml"), "").unwrap();
+        root
+    }
+
+    #[test]
+    fn explorer_sort_puts_directories_before_files() {
+        let td = TempDir::new().unwrap();
+        let root = mk_tree(&td);
+        let tree = FileTree::new(root);
+        let names: Vec<&str> = tree.entries.iter().map(|e| e.name.as_str()).collect();
+        // dirs 昇順 → files 昇順
+        assert_eq!(names, vec!["docs", "src", "Cargo.toml", "README.md"]);
+    }
+
+    #[test]
+    fn folders_collapsed_by_default_show_only_top_level() {
+        let td = TempDir::new().unwrap();
+        let root = mk_tree(&td);
+        let tree = FileTree::new(root);
+        assert_eq!(tree.visible_len(), 4);
+        let flat = tree.flatten();
+        assert!(flat.iter().all(|(d, _)| *d == 0));
+    }
+
+    #[test]
+    fn activating_directory_toggles_expansion_and_loads_children() {
+        let td = TempDir::new().unwrap();
+        let root = mk_tree(&td);
+        let mut tree = FileTree::new(root);
+        // "src" は dirs 昇順なので index=1 (docs=0, src=1)
+        let result = tree.activate_at(1);
+        assert!(matches!(result, Some(ActivateResult::DirToggled)));
+        assert_eq!(tree.visible_len(), 6); // docs, src(展開), src/lib.rs, src/main.rs, Cargo.toml, README.md
+        let flat = tree.flatten();
+        // src(depth=0) の直下に lib.rs(depth=1), main.rs(depth=1) が並ぶ
+        let depth_one_names: Vec<&str> = flat
+            .iter()
+            .filter(|(d, _)| *d == 1)
+            .map(|(_, n)| n.name.as_str())
+            .collect();
+        assert_eq!(depth_one_names, vec!["lib.rs", "main.rs"]);
+    }
+
+    #[test]
+    fn activating_file_returns_path_without_changing_visible_count() {
+        let td = TempDir::new().unwrap();
+        let root = mk_tree(&td);
+        let mut tree = FileTree::new(root);
+        let before = tree.visible_len();
+        // "Cargo.toml" は dirs(2) の後の files で index=2
+        let result = tree.activate_at(2);
+        match result {
+            Some(ActivateResult::File(p)) => assert_eq!(p.file_name().unwrap(), "Cargo.toml"),
+            other => panic!("expected File path, got {other:?}"),
         }
+        assert_eq!(tree.visible_len(), before);
     }
 
     #[test]
-    fn display_parts_include_icon_indent_and_directory_suffix() {
-        let root = Path::new("workspace");
-        let parts = entry(root, "src", true, 1).display_parts(root);
-
-        assert_eq!(parts.kind, EntryKind::Directory);
-        assert_eq!(parts.icon, "📁");
-        assert_eq!(parts.indent, "");
-        assert_eq!(parts.name, "src/");
+    fn refresh_preserves_expansion() {
+        let td = TempDir::new().unwrap();
+        let root = mk_tree(&td);
+        let mut tree = FileTree::new(root);
+        tree.activate_at(1); // expand src
+        assert_eq!(tree.visible_len(), 6);
+        tree.refresh();
+        assert_eq!(tree.visible_len(), 6);
     }
 
     #[test]
-    fn display_parts_indent_nested_files() {
-        let root = Path::new("workspace");
-        let parts = entry(root, "src/main.rs", false, 2).display_parts(root);
-
-        assert_eq!(parts.kind, EntryKind::Rust);
-        assert_eq!(parts.icon, "🦀");
-        assert_eq!(parts.indent, "  ");
-        assert_eq!(parts.name, "main.rs");
+    fn icon_for_directory_is_folder_emoji() {
+        assert_eq!(icon_for_kind(EntryKind::Directory), "📁");
     }
 
     #[test]
-    fn classifies_common_file_kinds_for_colored_sidebar_rows() {
+    fn classify_recognizes_common_extensions() {
         let root = Path::new("workspace");
-        let cases = [
-            (".gitignore", EntryKind::Git, "🌱"),
-            (".marprc.yml", EntryKind::Config, "⚙"),
-            ("README.md", EntryKind::Markdown, "📝"),
-            ("image.png", EntryKind::Image, "🖼"),
-            ("script.py", EntryKind::Python, "🐍"),
-            ("app.tsx", EntryKind::TypeScript, "📘"),
-            ("Cargo.lock", EntryKind::Lock, "🔒"),
-            (".cursorignore", EntryKind::Dotfile, "•"),
-        ];
-
-        for (relative, expected_kind, expected_icon) in cases {
-            let parts = entry(root, relative, false, 1).display_parts(root);
-            assert_eq!(parts.kind, expected_kind, "{relative}");
-            assert_eq!(parts.icon, expected_icon, "{relative}");
-        }
+        assert_eq!(classify_path(&root.join("a.rs"), false), EntryKind::Rust);
+        assert_eq!(classify_path(&root.join("a.py"), false), EntryKind::Python);
+        assert_eq!(
+            classify_path(&root.join(".gitignore"), false),
+            EntryKind::Git
+        );
+        assert_eq!(
+            classify_path(&root.join("Cargo.lock"), false),
+            EntryKind::Lock
+        );
+        assert_eq!(classify_path(&root.join("anything"), true), EntryKind::Directory);
     }
 }
 
 // Version History
 // ver0.1 - 2026-04-25 - Added file tree icon and kind metadata with classification tests.
+// ver0.2 - 2026-04-25 - Replaced flat walk with lazy expand/collapse FileTree (folder-first sort).

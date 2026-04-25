@@ -15,7 +15,12 @@ use crate::pane::grid::{Layout, SplitDir};
 use crate::pane::PaneId;
 use crate::sidebar::{claude_ctx, filetree, panelist, Section};
 
-pub fn draw(app: &App, frame: &mut Frame<'_>, pane_rects: &mut HashMap<PaneId, AppRect>) {
+pub fn draw(
+    app: &App,
+    frame: &mut Frame<'_>,
+    pane_rects: &mut HashMap<PaneId, AppRect>,
+    sidebar_file_rect: &mut Option<AppRect>,
+) {
     let size = frame.area();
     let theme = theme::default_theme();
 
@@ -35,8 +40,9 @@ pub fn draw(app: &App, frame: &mut Frame<'_>, pane_rects: &mut HashMap<PaneId, A
         (None, chunks[0])
     };
 
+    *sidebar_file_rect = None;
     if let Some(area) = sidebar_area {
-        draw_sidebar(app, frame, area, &theme);
+        draw_sidebar(app, frame, area, &theme, sidebar_file_rect);
     }
 
     let vert = LLayout::default()
@@ -87,7 +93,13 @@ fn draw_statusbar(app: &App, frame: &mut Frame<'_>, area: Rect, theme: &theme::T
     );
 }
 
-fn draw_sidebar(app: &App, frame: &mut Frame<'_>, area: Rect, theme: &theme::Theme) {
+fn draw_sidebar(
+    app: &App,
+    frame: &mut Frame<'_>,
+    area: Rect,
+    theme: &theme::Theme,
+    sidebar_file_rect: &mut Option<AppRect>,
+) {
     let border_style = if app.sidebar_focused {
         theme.border_focused
     } else {
@@ -122,12 +134,21 @@ fn draw_sidebar(app: &App, frame: &mut Frame<'_>, area: Rect, theme: &theme::The
 
     // Body
     let lines: Vec<Line> = match app.sidebar.active {
-        Section::FileTree => app
-            .sidebar
-            .file_entries
-            .iter()
-            .map(|e| file_entry_line(e, &app.sidebar.cwd, theme))
-            .collect(),
+        Section::FileTree => {
+            // クリック→行→ノード対応のため、Files 描画域 (v[1]) を保存。
+            *sidebar_file_rect = Some(AppRect {
+                x: v[1].x as i32,
+                y: v[1].y as i32,
+                w: v[1].width as i32,
+                h: v[1].height as i32,
+            });
+            app.sidebar
+                .file_tree
+                .flatten()
+                .into_iter()
+                .map(|(depth, node)| file_tree_row(node, depth, theme))
+                .collect()
+        }
         Section::Claude => claude_ctx::rows(app)
             .into_iter()
             .map(|r| Line::from(Span::raw(r.display())))
@@ -158,19 +179,34 @@ fn draw_sidebar(app: &App, frame: &mut Frame<'_>, area: Rect, theme: &theme::The
     frame.render_widget(Paragraph::new(body), v[1]);
 }
 
-fn file_entry_line<'a>(
-    entry: &filetree::Entry,
-    root: &std::path::Path,
+fn file_tree_row<'a>(
+    node: &filetree::FileNode,
+    depth: usize,
     theme: &theme::Theme,
 ) -> Line<'a> {
-    let parts = entry.display_parts(root);
-    let style = file_entry_style(parts.kind, theme);
-
+    let style = file_entry_style(node.kind, theme);
+    let indent = "  ".repeat(depth);
+    let chevron = if node.is_dir {
+        if node.expanded {
+            "▾"
+        } else {
+            "▸"
+        }
+    } else {
+        " "
+    };
+    let name = if node.is_dir {
+        format!("{}/", node.name)
+    } else {
+        node.name.clone()
+    };
     Line::from(vec![
-        Span::raw(parts.indent),
-        Span::styled(parts.icon, style),
+        Span::raw(indent),
+        Span::styled(chevron.to_string(), theme.hint),
         Span::raw(" "),
-        Span::styled(parts.name, style),
+        Span::styled(filetree::icon_for_kind(node.kind), style),
+        Span::raw(" "),
+        Span::styled(name, style),
     ])
 }
 
