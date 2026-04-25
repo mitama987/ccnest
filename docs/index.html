@@ -8,6 +8,7 @@
 <meta property="og:title" content="ccnest — a Claude Code-aware terminal multiplexer" />
 <meta property="og:description" content="Prefix-less splits, per-pane Claude context usage, structured sidebar. Rust, Windows-first." />
 <meta property="og:type" content="website" />
+<meta property="og:image" content="https://mitama987.github.io/ccnest/logo.png" />
 <meta name="theme-color" content="#0b0b0e" />
 <link rel="icon" type="image/svg+xml" href="favicon.svg" />
 <link rel="preconnect" href="https://fonts.googleapis.com" />
@@ -72,11 +73,12 @@
   /* Hero */
   .hero { padding: 5rem 0 4rem; text-align: center; }
   .hero .logo {
-    font-family: "JetBrains Mono", monospace;
-    font-size: 0.95rem; line-height: 1.05;
-    color: var(--claude); margin: 0 0 1.5rem;
-    white-space: pre; text-align: left; display: inline-block;
-    filter: drop-shadow(0 0 30px rgba(255, 140, 0, 0.15));
+    display: block;
+    width: 100%;
+    max-width: 560px;
+    height: auto;
+    margin: 0 auto 1.5rem;
+    filter: drop-shadow(0 0 40px rgba(88, 182, 255, 0.18));
   }
   .hero h1 {
     font-size: clamp(2.2rem, 5vw, 3.4rem);
@@ -297,16 +299,7 @@
 <main>
 
 <section class="hero">
-  <pre class="logo">
- ▄████▄   ▄████▄   ███▄    █ ▓█████   ██████ ▄▄▄█████▓
-▒██▀ ▀█  ▒██▀ ▀█   ██ ▀█   █ ▓█   ▀ ▒██    ▒ ▓  ██▒ ▓▒
-▒▓█    ▄ ▒▓█    ▄ ▓██  ▀█ ██▒▒███   ░ ▓██▄   ▒ ▓██░ ▒░
-▒▓▓▄ ▄██▒▒▓▓▄ ▄██▒▓██▒  ▐▌██▒▒▓█  ▄   ▒   ██▒░ ▓██▓ ░
-▒ ▓███▀ ░▒ ▓███▀ ░▒██░   ▓██░░▒████▒▒██████▒▒  ▒██▒ ░
-░ ░▒ ▒  ░░ ░▒ ▒  ░░ ▒░   ▒ ▒ ░░ ▒░ ░▒ ▒▓▒ ▒ ░  ▒ ░░
-  ░  ▒     ░  ▒   ░ ░░   ░ ▒░ ░ ░  ░░ ░▒  ░ ░    ░
-░        ░           ░   ░ ░    ░   ░  ░  ░    ░
-</pre>
+  <img class="logo" src="logo.png" alt="ccnest" width="1536" height="1024" />
   <h1>Multiplex Claude Code.<br />Without the ceremony.</h1>
   <p class="tag">
     A terminal multiplexer built around <strong>Claude Code</strong>. Prefix-less splits,
@@ -554,6 +547,8 @@
      ver0.2 - 2026-04-25 - Updated mockup (collapsed lazy tree, status bar 2-line),
                             sidebar default-hidden text, emoji icon callout, keybinding
                             rows for folder-toggle and mouse click, Windows Terminal
-                            conflict callout, hero tagline tweak. -->
+                            conflict callout, hero tagline tweak.
+     ver0.3 - 2026-04-25 - Replaced ASCII art hero logo with raster logo (logo.png),
+                            added og:image meta. -->
 </body>
 </html>
