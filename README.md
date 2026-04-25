@@ -70,6 +70,12 @@ ccnest path\to\project
 | `↑` / `↓` / `j` / `k` (sidebar focused) | Move selection cursor |
 | `Enter` (on a file row) | Open the entry in `$EDITOR` (falls back to `code`) |
 | `Ctrl+Q` | Quit |
+| `Shift+Tab` | Forwarded as back-tab (`CSI Z`) — drives Claude's mode cycle (default → auto-accept → plan) |
+| `Shift+Enter` / `Ctrl+Enter` | Insert a newline in the prompt instead of submitting (sent as `ESC + CR`) |
+| Mouse wheel | Scroll history in the pane under the cursor (3 lines per tick) |
+| `Shift+PageUp` / `Shift+PageDown` | Scroll the focused pane one screen of history |
+| `Shift+↑` / `Shift+↓` | Scroll the focused pane one line of history |
+| any keystroke | Snaps the view back to the live tail |
 | anything else | Sent to the focused pane |
 
 ### Ctrl+D and EOF
@@ -77,6 +83,14 @@ ccnest path\to\project
 `Ctrl+D` is captured by the multiplexer before it reaches `claude`, so it
 will no longer send EOF. To exit a Claude session, use `/exit` inside
 Claude or `Ctrl+W` to close the pane from the outside.
+
+### Scrollback
+
+Each pane carries 2000 lines of history. The mouse wheel and
+`Shift+PageUp` / `Shift+PageDown` / `Shift+↑↓` keys move the view back
+through it; the next keystroke you type snaps the view back to the live
+tail automatically. Plain `PageUp` / `PageDown` (no Shift) still pass
+through to `claude` so the CLI's own paging keeps working.
 
 ## Tabs
 
@@ -92,7 +106,7 @@ The left sidebar is always available (`Ctrl+B` toggles the whole sidebar,
 sections:
 
 - **Files** — a tree of the focused pane's cwd (depth 3, honors
-  `.gitignore`).
+  `.gitignore`) with type-specific icons and colors for faster scanning.
 - **Claude** — per-pane context usage parsed from
   `~/.claude/projects/<encoded-cwd>/<session-id>.jsonl`. Each pane is
   launched with `claude --session-id <uuid>` so we know which JSONL to
@@ -128,3 +142,7 @@ cargo build --release   # target/release/ccnest.exe
 ## License
 
 MIT
+
+## Version History
+
+ver0.1 - 2026-04-25 - Documented iconized and colorized Files sidebar rows.

@@ -37,26 +37,26 @@ pub struct SidebarState {
     pub active: Section,
     pub cursors: [usize; 4],
     pub cwd: PathBuf,
-    pub file_entries: Vec<filetree::Entry>,
+    pub file_tree: filetree::FileTree,
     pub git_info: Option<git::GitInfo>,
 }
 
 impl SidebarState {
     pub fn new(cwd: PathBuf) -> Self {
-        let file_entries = filetree::walk(&cwd, 3).unwrap_or_default();
+        let file_tree = filetree::FileTree::new(cwd.clone());
         let git_info = git::load(&cwd).ok();
         Self {
-            visible: true,
+            visible: false,
             active: Section::FileTree,
             cursors: [0; 4],
             cwd,
-            file_entries,
+            file_tree,
             git_info,
         }
     }
 
     pub fn refresh(&mut self) {
-        self.file_entries = filetree::walk(&self.cwd, 3).unwrap_or_default();
+        self.file_tree.refresh();
         self.git_info = git::load(&self.cwd).ok();
     }
 

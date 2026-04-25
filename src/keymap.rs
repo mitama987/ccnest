@@ -23,6 +23,10 @@ pub enum Action {
     FocusSidebar,
     FocusContent,
     BeginRenameTab,
+    ScrollLineUp,
+    ScrollLineDown,
+    ScrollPageUp,
+    ScrollPageDown,
     PassThrough,
 }
 
@@ -72,6 +76,16 @@ pub fn resolve(ev: &KeyEvent, sidebar_focused: bool) -> Action {
             // Tab navigation on Alt+left/right.
             KeyCode::Left => return Action::PrevTab,
             KeyCode::Right => return Action::NextTab,
+            _ => {}
+        }
+    }
+
+    if shift && !ctrl && !alt {
+        match ev.code {
+            KeyCode::PageUp => return Action::ScrollPageUp,
+            KeyCode::PageDown => return Action::ScrollPageDown,
+            KeyCode::Up => return Action::ScrollLineUp,
+            KeyCode::Down => return Action::ScrollLineDown,
             _ => {}
         }
     }
@@ -184,6 +198,38 @@ mod tests {
         assert_eq!(
             resolve(&key(KeyCode::F(2), KeyModifiers::NONE), false),
             Action::BeginRenameTab
+        );
+    }
+
+    #[test]
+    fn shift_pageup_scrolls() {
+        assert_eq!(
+            resolve(&key(KeyCode::PageUp, KeyModifiers::SHIFT), false),
+            Action::ScrollPageUp,
+        );
+        assert_eq!(
+            resolve(&key(KeyCode::PageDown, KeyModifiers::SHIFT), false),
+            Action::ScrollPageDown,
+        );
+    }
+
+    #[test]
+    fn shift_arrow_scrolls_one_line() {
+        assert_eq!(
+            resolve(&key(KeyCode::Up, KeyModifiers::SHIFT), false),
+            Action::ScrollLineUp,
+        );
+        assert_eq!(
+            resolve(&key(KeyCode::Down, KeyModifiers::SHIFT), false),
+            Action::ScrollLineDown,
+        );
+    }
+
+    #[test]
+    fn plain_pageup_still_passes_through() {
+        assert_eq!(
+            resolve(&key(KeyCode::PageUp, KeyModifiers::NONE), false),
+            Action::PassThrough,
         );
     }
 }

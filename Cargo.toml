@@ -1,6 +1,6 @@
 [package]
 name = "ccnest"
-version = "0.1.0"
+version = "0.1.1"
 edition = "2021"
 description = "Claude Code-aware terminal multiplexer (Windows first)"
 license = "MIT"
@@ -11,7 +11,7 @@ categories = ["command-line-utilities"]
 
 [dependencies]
 ratatui = "0.29"
-crossterm = { version = "0.28", features = ["event-stream"] }
+crossterm = { version = "0.28", features = ["event-stream", "bracketed-paste"] }
 portable-pty = "0.9"
 vt100 = "0.15"
 anyhow = "1"
@@ -24,11 +24,15 @@ notify = "7"
 uuid = { version = "1", features = ["v4", "serde"] }
 dirs = "5"
 chrono = { version = "0.4", default-features = false, features = ["clock", "serde"] }
+arboard = { version = "3", default-features = false, features = ["windows-sys"] }
 
 [dependencies.git2]
 version = "0.20"
 default-features = false
 # Avoid OpenSSL pain on Windows — no HTTPS/SSH fetch needed for status/branch.
+
+[dev-dependencies]
+tempfile = "3"
 
 [profile.release]
 lto = "thin"
