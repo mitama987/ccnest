@@ -388,7 +388,10 @@ mod tests {
             classify_path(&root.join("Cargo.lock"), false),
             EntryKind::Lock
         );
-        assert_eq!(classify_path(&root.join("anything"), true), EntryKind::Directory);
+        assert_eq!(
+            classify_path(&root.join("anything"), true),
+            EntryKind::Directory
+        );
     }
 }
 

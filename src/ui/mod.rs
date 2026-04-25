@@ -179,11 +179,7 @@ fn draw_sidebar(
     frame.render_widget(Paragraph::new(body), v[1]);
 }
 
-fn file_tree_row<'a>(
-    node: &filetree::FileNode,
-    depth: usize,
-    theme: &theme::Theme,
-) -> Line<'a> {
+fn file_tree_row<'a>(node: &filetree::FileNode, depth: usize, theme: &theme::Theme) -> Line<'a> {
     let style = file_entry_style(node.kind, theme);
     let indent = "  ".repeat(depth);
     let chevron = if node.is_dir {

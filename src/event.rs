@@ -20,9 +20,7 @@ pub fn run_event_loop<B: Backend>(term: &mut Terminal<B>, mut app: App) -> Resul
     let mut sidebar_file_rect: Option<Rect> = None;
 
     while !app.quit {
-        term.draw(|f| {
-            crate::ui::draw(&app, f, &mut pane_rects, &mut sidebar_file_rect)
-        })?;
+        term.draw(|f| crate::ui::draw(&app, f, &mut pane_rects, &mut sidebar_file_rect))?;
 
         if event::poll(tick)? {
             // 同一 tick 内に溜まっているイベントを一気に drain して batch 化する。
@@ -452,13 +450,12 @@ fn handle_mouse(
                         app.sidebar_focused = true;
                         app.sidebar.active = Section::FileTree;
                         app.sidebar.set_cursor(row);
-                        match app.sidebar.file_tree.activate_at(row) {
-                            Some(crate::sidebar::filetree::ActivateResult::File(p)) => {
-                                let editor = std::env::var("EDITOR")
-                                    .unwrap_or_else(|_| "code".to_string());
-                                let _ = std::process::Command::new(editor).arg(&p).spawn();
-                            }
-                            _ => {}
+                        if let Some(crate::sidebar::filetree::ActivateResult::File(p)) =
+                            app.sidebar.file_tree.activate_at(row)
+                        {
+                            let editor =
+                                std::env::var("EDITOR").unwrap_or_else(|_| "code".to_string());
+                            let _ = std::process::Command::new(editor).arg(&p).spawn();
                         }
                         app.selection = None;
                         return;
@@ -799,10 +796,7 @@ mod tests {
     #[test]
     fn collect_paste_segment_single_paste_event() {
         let events = vec![Event::Paste("abc".to_string())];
-        assert_eq!(
-            collect_paste_segment(&events),
-            Some((1, "abc".to_string()))
-        );
+        assert_eq!(collect_paste_segment(&events), Some((1, "abc".to_string())));
     }
 
     #[test]
@@ -847,9 +841,6 @@ mod tests {
             Event::Resize(80, 24),
             Event::Paste("ignored-by-segment".to_string()),
         ];
-        assert_eq!(
-            collect_paste_segment(&events),
-            Some((1, "hi".to_string()))
-        );
+        assert_eq!(collect_paste_segment(&events), Some((1, "hi".to_string())));
     }
 }
