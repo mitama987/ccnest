@@ -67,7 +67,12 @@ fn process_batch(
 ) -> Result<()> {
     let mut i = 0;
     while i < events.len() {
-        if let Some((consumed, text)) = classify_run(&events[i..]) {
+        // 連続する paste 系イベント (Event::Paste と classify_run でマッチする
+        // Char/Enter/Tab run) をまとめて 1 回の handle_paste にする。
+        // Windows ConPTY が大きいペーストを複数チャンク=複数 Event::Paste で
+        // 配信するため、ここで合流させないと Claude 側で N 個の placeholder に
+        // 分裂して見える。
+        if let Some((consumed, text)) = collect_paste_segment(&events[i..]) {
             handle_paste(app, &text);
             i += consumed;
             continue;
@@ -80,15 +85,46 @@ fn process_batch(
             Event::Mouse(me) => {
                 handle_mouse(app, *me, pane_rects, sidebar_file_rect);
             }
-            Event::Paste(text) => {
-                handle_paste(app, text);
-            }
             Event::Resize(_, _) => {}
             _ => {}
         }
         i += 1;
     }
     Ok(())
+}
+
+/// 先頭から paste セグメント (Event::Paste と classify_run マッチを連結) を
+/// 1 つに合流させて返す。`Event::Paste` 単体でも 1 segment として扱うので、
+/// チャンク分割された bracketed-paste も 1 ペーストにまとまる。
+fn collect_paste_segment(events: &[Event]) -> Option<(usize, String)> {
+    let started_with_paste = matches!(events.first(), Some(Event::Paste(_)));
+    let started_with_run = classify_run(events).is_some();
+    if !started_with_paste && !started_with_run {
+        return None;
+    }
+    let mut text = String::new();
+    let mut i = 0;
+    while i < events.len() {
+        match &events[i] {
+            Event::Paste(t) => {
+                text.push_str(t);
+                i += 1;
+            }
+            _ => {
+                if let Some((consumed, run_text)) = classify_run(&events[i..]) {
+                    text.push_str(&run_text);
+                    i += consumed;
+                } else {
+                    break;
+                }
+            }
+        }
+    }
+    if i == 0 {
+        None
+    } else {
+        Some((i, text))
+    }
 }
 
 /// 先頭から paste run を切り出す純粋関数。
@@ -131,6 +167,8 @@ fn classify_run(events: &[Event]) -> Option<(usize, String)> {
 /// Key イベントが paste の一部になり得るか判定する。
 /// Ctrl/Alt 修飾付きキーやファンクションキーは paste に束ねない。
 /// Press / Release のいずれも run の継続を許す (Windows ConPTY が交互に届けるため)。
+/// `Event::Paste` (bracketed-paste 由来) も大きいペーストが複数チャンクに分割
+/// されるケースに備えて run の継続として扱う。
 fn is_paste_candidate(e: &Event) -> bool {
     match e {
         Event::Key(k) => {
@@ -141,6 +179,7 @@ fn is_paste_candidate(e: &Event) -> bool {
             }
             matches!(k.code, KeyCode::Char(_) | KeyCode::Enter | KeyCode::Tab)
         }
+        Event::Paste(_) => true,
         _ => false,
     }
 }
@@ -740,5 +779,77 @@ mod tests {
             press(KeyCode::Enter),
         ];
         assert_eq!(classify_run(&events), Some((4, "a\tb\n".to_string())));
+    }
+
+    #[test]
+    fn collect_paste_segment_merges_consecutive_paste_events() {
+        // バグ再現: Windows ConPTY が大きい paste を 3 つの Event::Paste に分割。
+        // 1 つの handle_paste にまとまるよう、3 chunk を 1 segment として返す。
+        let events = vec![
+            Event::Paste("hello\n".to_string()),
+            Event::Paste("world\n".to_string()),
+            Event::Paste("!".to_string()),
+        ];
+        assert_eq!(
+            collect_paste_segment(&events),
+            Some((3, "hello\nworld\n!".to_string()))
+        );
+    }
+
+    #[test]
+    fn collect_paste_segment_single_paste_event() {
+        let events = vec![Event::Paste("abc".to_string())];
+        assert_eq!(
+            collect_paste_segment(&events),
+            Some((1, "abc".to_string()))
+        );
+    }
+
+    #[test]
+    fn collect_paste_segment_classify_run_only() {
+        let events = vec![
+            press(KeyCode::Char('a')),
+            press(KeyCode::Char('b')),
+            press(KeyCode::Enter),
+        ];
+        assert_eq!(
+            collect_paste_segment(&events),
+            Some((3, "ab\n".to_string()))
+        );
+    }
+
+    #[test]
+    fn collect_paste_segment_mixed_paste_event_and_run() {
+        // bracketed-paste チャンク → ConPTY が key event 列に切り替えても続けて貼る。
+        let events = vec![
+            Event::Paste("foo".to_string()),
+            press(KeyCode::Char('b')),
+            press(KeyCode::Char('a')),
+            press(KeyCode::Char('r')),
+            press(KeyCode::Enter),
+        ];
+        assert_eq!(
+            collect_paste_segment(&events),
+            Some((5, "foobar\n".to_string()))
+        );
+    }
+
+    #[test]
+    fn collect_paste_segment_returns_none_for_non_paste() {
+        let events = vec![press(KeyCode::Char('x'))];
+        assert_eq!(collect_paste_segment(&events), None);
+    }
+
+    #[test]
+    fn collect_paste_segment_stops_at_non_paste_event() {
+        let events = vec![
+            Event::Paste("hi".to_string()),
+            Event::Resize(80, 24),
+            Event::Paste("ignored-by-segment".to_string()),
+        ];
+        assert_eq!(
+            collect_paste_segment(&events),
+            Some((1, "hi".to_string()))
+        );
     }
 }
