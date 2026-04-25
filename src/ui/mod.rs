@@ -75,22 +75,22 @@ fn draw_tabbar(app: &App, frame: &mut Frame<'_>, area: Rect, theme: &theme::Them
         spans.push(Span::styled(label, style));
         spans.push(Span::raw(" "));
     }
-    let hint_text =
-        "  Ctrl+D:┃  Ctrl+E:━  Ctrl+T:tab  Ctrl+W:close  Ctrl+F:files  F2:rename  Ctrl+C×2:shell  Ctrl+Q:quit";
-    let hint = Span::styled(hint_text, theme.hint);
-    spans.push(hint);
     frame.render_widget(Paragraph::new(Line::from(spans)), area);
 }
 
 fn draw_statusbar(app: &App, frame: &mut Frame<'_>, area: Rect, theme: &theme::Theme) {
-    let text = app
+    let hint_text =
+        "Ctrl+D:┃  Ctrl+E:━  Ctrl+T:tab  Ctrl+W:close  Ctrl+F:files  F2:rename  Ctrl+C×2:shell  Ctrl+Q:quit";
+    let status = app
         .status
         .clone()
         .unwrap_or_else(|| format!("cwd: {}", app.focused_pane_cwd().display()));
-    frame.render_widget(
-        Paragraph::new(Line::from(Span::styled(text, theme.hint))),
-        area,
-    );
+    let line = Line::from(vec![
+        Span::styled(hint_text, theme.hint),
+        Span::raw("  │  "),
+        Span::styled(status, theme.hint),
+    ]);
+    frame.render_widget(Paragraph::new(line), area);
 }
 
 fn draw_sidebar(
