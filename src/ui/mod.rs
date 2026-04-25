@@ -13,7 +13,7 @@ use ratatui::Frame;
 use crate::app::{App, Rect as AppRect};
 use crate::pane::grid::{Layout, SplitDir};
 use crate::pane::PaneId;
-use crate::sidebar::{claude_ctx, panelist, Section};
+use crate::sidebar::{claude_ctx, filetree, panelist, Section};
 
 pub fn draw(app: &App, frame: &mut Frame<'_>, pane_rects: &mut HashMap<PaneId, AppRect>) {
     let size = frame.area();
@@ -126,7 +126,7 @@ fn draw_sidebar(app: &App, frame: &mut Frame<'_>, area: Rect, theme: &theme::The
             .sidebar
             .file_entries
             .iter()
-            .map(|e| Line::from(Span::raw(e.display(&app.sidebar.cwd))))
+            .map(|e| file_entry_line(e, &app.sidebar.cwd, theme))
             .collect(),
         Section::Claude => claude_ctx::rows(app)
             .into_iter()
@@ -156,6 +156,43 @@ fn draw_sidebar(app: &App, frame: &mut Frame<'_>, area: Rect, theme: &theme::The
         .collect();
 
     frame.render_widget(Paragraph::new(body), v[1]);
+}
+
+fn file_entry_line<'a>(
+    entry: &filetree::Entry,
+    root: &std::path::Path,
+    theme: &theme::Theme,
+) -> Line<'a> {
+    let parts = entry.display_parts(root);
+    let style = file_entry_style(parts.kind, theme);
+
+    Line::from(vec![
+        Span::raw(parts.indent),
+        Span::styled(parts.icon, style),
+        Span::raw(" "),
+        Span::styled(parts.name, style),
+    ])
+}
+
+fn file_entry_style(kind: filetree::EntryKind, theme: &theme::Theme) -> Style {
+    match kind {
+        filetree::EntryKind::Directory => theme.file_directory,
+        filetree::EntryKind::Git => theme.file_git,
+        filetree::EntryKind::Markdown => theme.file_markdown,
+        filetree::EntryKind::Image => theme.file_image,
+        filetree::EntryKind::Rust => theme.file_rust,
+        filetree::EntryKind::Python => theme.file_python,
+        filetree::EntryKind::JavaScript => theme.file_javascript,
+        filetree::EntryKind::TypeScript => theme.file_typescript,
+        filetree::EntryKind::Web => theme.file_web,
+        filetree::EntryKind::Json => theme.file_json,
+        filetree::EntryKind::Config => theme.file_config,
+        filetree::EntryKind::Shell => theme.file_shell,
+        filetree::EntryKind::Lock => theme.file_lock,
+        filetree::EntryKind::Dotfile => theme.file_dotfile,
+        filetree::EntryKind::Text => theme.file_text,
+        filetree::EntryKind::Other => theme.file_other,
+    }
 }
 
 fn draw_panes(
@@ -351,3 +388,6 @@ fn color_from(c: vt100::Color) -> Color {
         vt100::Color::Rgb(r, g, b) => Color::Rgb(r, g, b),
     }
 }
+
+// Version History
+// ver0.1 - 2026-04-25 - Rendered file tree entries with type-specific icons and colors.

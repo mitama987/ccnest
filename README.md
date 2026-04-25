@@ -106,7 +106,7 @@ The left sidebar is always available (`Ctrl+B` toggles the whole sidebar,
 sections:
 
 - **Files** — a tree of the focused pane's cwd (depth 3, honors
-  `.gitignore`).
+  `.gitignore`) with type-specific icons and colors for faster scanning.
 - **Claude** — per-pane context usage parsed from
   `~/.claude/projects/<encoded-cwd>/<session-id>.jsonl`. Each pane is
   launched with `claude --session-id <uuid>` so we know which JSONL to
@@ -142,3 +142,7 @@ cargo build --release   # target/release/ccnest.exe
 ## License
 
 MIT
+
+## Version History
+
+ver0.1 - 2026-04-25 - Documented iconized and colorized Files sidebar rows.

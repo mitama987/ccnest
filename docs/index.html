@@ -500,7 +500,7 @@
     <kbd>Ctrl+1</kbd>..<kbd>Ctrl+4</kbd>:
   </p>
   <ul class="dot-list">
-    <li><strong>Files</strong> — a depth-3 tree of the focused pane's cwd. Honors <code>.gitignore</code> via the <code>ignore</code> crate.</li>
+    <li><strong>Files</strong> — a depth-3 tree of the focused pane's cwd. Honors <code>.gitignore</code> via the <code>ignore</code> crate, with type-specific icons and colors for faster scanning.</li>
     <li><strong>Claude</strong> — per-pane context usage parsed from <code>~/.claude/projects/&lt;encoded-cwd&gt;/&lt;session-id&gt;.jsonl</code>. Each pane is launched with <code>claude --session-id &lt;uuid&gt;</code>, so ccnest knows which file to read. Override the default 200k-token window with <code>CCNEST_CONTEXT_WINDOW=1000000</code> for 1M-context models.</li>
     <li><strong>Git</strong> — current branch plus <code>M / S / ?</code> counts for the focused pane's cwd, via <code>git2</code>.</li>
     <li><strong>Panes</strong> — a list of every pane in the current tab, marking the active pane and whether Claude is running.</li>
@@ -540,5 +540,7 @@
   <div>ccnest — MIT licensed. Built with Rust, ratatui, crossterm, portable-pty, and vt100.</div>
 </footer>
 
+<!-- Version History
+     ver0.1 - 2026-04-25 - Documented iconized and colorized Files sidebar rows. -->
 </body>
 </html>
