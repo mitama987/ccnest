@@ -73,21 +73,25 @@ impl Entry {
 }
 
 pub fn icon_for_kind(kind: EntryKind) -> &'static str {
+    // Nerd Font PUA グリフだと未インストール環境で菱形にフォールバックするため、
+    // Windows Terminal が Segoe UI Emoji 経由で確実に描ける emoji を使う。
     match kind {
-        EntryKind::Directory => "",
-        EntryKind::Git => "",
-        EntryKind::Markdown => "",
-        EntryKind::Image => "",
-        EntryKind::Rust => "",
-        EntryKind::Python => "",
-        EntryKind::JavaScript => "",
-        EntryKind::TypeScript => "",
-        EntryKind::Web => "",
-        EntryKind::Json => "",
-        EntryKind::Config => "",
-        EntryKind::Shell => "",
-        EntryKind::Lock => "",
-        EntryKind::Dotfile | EntryKind::Text | EntryKind::Other => "",
+        EntryKind::Directory => "📁",
+        EntryKind::Git => "🌱",
+        EntryKind::Markdown => "📝",
+        EntryKind::Image => "🖼",
+        EntryKind::Rust => "🦀",
+        EntryKind::Python => "🐍",
+        EntryKind::JavaScript => "📜",
+        EntryKind::TypeScript => "📘",
+        EntryKind::Web => "🌐",
+        EntryKind::Json => "📋",
+        EntryKind::Config => "⚙",
+        EntryKind::Shell => "🐚",
+        EntryKind::Lock => "🔒",
+        EntryKind::Dotfile => "•",
+        EntryKind::Text => "📃",
+        EntryKind::Other => "📄",
     }
 }
 
@@ -173,7 +177,7 @@ mod tests {
         let parts = entry(root, "src", true, 1).display_parts(root);
 
         assert_eq!(parts.kind, EntryKind::Directory);
-        assert_eq!(parts.icon, "");
+        assert_eq!(parts.icon, "📁");
         assert_eq!(parts.indent, "");
         assert_eq!(parts.name, "src/");
     }
@@ -184,7 +188,7 @@ mod tests {
         let parts = entry(root, "src/main.rs", false, 2).display_parts(root);
 
         assert_eq!(parts.kind, EntryKind::Rust);
-        assert_eq!(parts.icon, "");
+        assert_eq!(parts.icon, "🦀");
         assert_eq!(parts.indent, "  ");
         assert_eq!(parts.name, "main.rs");
     }
@@ -193,14 +197,14 @@ mod tests {
     fn classifies_common_file_kinds_for_colored_sidebar_rows() {
         let root = Path::new("workspace");
         let cases = [
-            (".gitignore", EntryKind::Git, ""),
-            (".marprc.yml", EntryKind::Config, ""),
-            ("README.md", EntryKind::Markdown, ""),
-            ("image.png", EntryKind::Image, ""),
-            ("script.py", EntryKind::Python, ""),
-            ("app.tsx", EntryKind::TypeScript, ""),
-            ("Cargo.lock", EntryKind::Lock, ""),
-            (".cursorignore", EntryKind::Dotfile, ""),
+            (".gitignore", EntryKind::Git, "🌱"),
+            (".marprc.yml", EntryKind::Config, "⚙"),
+            ("README.md", EntryKind::Markdown, "📝"),
+            ("image.png", EntryKind::Image, "🖼"),
+            ("script.py", EntryKind::Python, "🐍"),
+            ("app.tsx", EntryKind::TypeScript, "📘"),
+            ("Cargo.lock", EntryKind::Lock, "🔒"),
+            (".cursorignore", EntryKind::Dotfile, "•"),
         ];
 
         for (relative, expected_kind, expected_icon) in cases {
