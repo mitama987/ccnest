@@ -46,7 +46,7 @@ impl SidebarState {
         let file_entries = filetree::walk(&cwd, 3).unwrap_or_default();
         let git_info = git::load(&cwd).ok();
         Self {
-            visible: true,
+            visible: false,
             active: Section::FileTree,
             cursors: [0; 4],
             cwd,

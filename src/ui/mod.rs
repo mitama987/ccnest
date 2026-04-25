@@ -20,7 +20,7 @@ pub fn draw(app: &App, frame: &mut Frame<'_>, pane_rects: &mut HashMap<PaneId, A
     let theme = theme::default_theme();
 
     let cols = if app.sidebar.visible {
-        vec![Constraint::Length(32), Constraint::Min(10)]
+        vec![Constraint::Length(21), Constraint::Min(10)]
     } else {
         vec![Constraint::Min(10)]
     };
