@@ -203,6 +203,7 @@
     padding: 0.3rem 0.9rem; border-top: 1px solid var(--border);
     color: var(--muted); font-size: 0.75rem;
   }
+  .mockup-status .hint { margin-top: 0.15rem; color: var(--muted); }
 
   /* Features grid */
   .features { display: grid; gap: 1rem; grid-template-columns: repeat(auto-fit, minmax(250px, 1fr)); }
@@ -309,8 +310,8 @@
   <h1>Multiplex Claude Code.<br />Without the ceremony.</h1>
   <p class="tag">
     A terminal multiplexer built around <strong>Claude Code</strong>. Prefix-less splits,
-    per-pane context usage, a structured sidebar, and panes that actually start in your
-    project with <code>claude</code> already running.
+    per-pane context usage, a lazy-expand file tree (no Nerd Font needed), and panes that
+    actually start in your project with <code>claude</code> already running.
   </p>
   <div class="cta">
     <a class="btn primary" href="#install">Install</a>
@@ -338,19 +339,17 @@
           <span>Panes (4)</span>
         </div>
         <div class="tree">
-          <div class="dir">▾ ccnest/</div>
-          <div>&nbsp;&nbsp;<span class="dir">▾ src/</span></div>
-          <div>&nbsp;&nbsp;&nbsp;&nbsp;<span class="sel">&nbsp;app.rs&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;</span></div>
-          <div>&nbsp;&nbsp;&nbsp;&nbsp;event.rs</div>
-          <div>&nbsp;&nbsp;&nbsp;&nbsp;keymap.rs</div>
-          <div>&nbsp;&nbsp;&nbsp;&nbsp;lib.rs</div>
-          <div>&nbsp;&nbsp;&nbsp;&nbsp;main.rs</div>
-          <div>&nbsp;&nbsp;&nbsp;&nbsp;<span class="dir">▸ pane/</span></div>
-          <div>&nbsp;&nbsp;&nbsp;&nbsp;<span class="dir">▸ sidebar/</span></div>
-          <div>&nbsp;&nbsp;&nbsp;&nbsp;<span class="dir">▸ ui/</span></div>
-          <div>&nbsp;&nbsp;Cargo.toml</div>
-          <div>&nbsp;&nbsp;README.md</div>
-          <div>&nbsp;&nbsp;<span class="dim">target/</span></div>
+          <div><span class="dir">▾ 📁 src/</span></div>
+          <div>&nbsp;&nbsp;<span class="dir">▸ 📁 pane/</span></div>
+          <div>&nbsp;&nbsp;<span class="dir">▸ 📁 sidebar/</span></div>
+          <div>&nbsp;&nbsp;<span class="dir">▸ 📁 ui/</span></div>
+          <div>&nbsp;&nbsp;<span class="sel">&nbsp;🦀 app.rs&nbsp;&nbsp;&nbsp;</span></div>
+          <div>&nbsp;&nbsp;🦀 event.rs</div>
+          <div>&nbsp;&nbsp;🦀 keymap.rs</div>
+          <div>&nbsp;&nbsp;🦀 main.rs</div>
+          <div><span class="dir">▸ 📁 docs/</span></div>
+          <div>⚙ Cargo.toml</div>
+          <div>📝 README.md</div>
           <br />
           <div class="dim">──────────</div>
           <div class="dim">ctx  168k / 1000k</div>
@@ -361,7 +360,6 @@
         <div class="mockup-tabs">
           <span class="tab active"> ccnest </span>
           <span class="tab"> notes </span>
-          <span class="hint">Ctrl+D:┃ Ctrl+E:━ Ctrl+T:tab Ctrl+F:files F2:rename</span>
         </div>
         <div class="mockup-panes">
           <div class="pane focused">
@@ -384,7 +382,10 @@
             <div class="line dim">&nbsp;&nbsp;&nbsp;Compiling ccnest v0.1.1</div>
           </div>
         </div>
-        <div class="mockup-status">cwd: ~/projects/ccnest</div>
+        <div class="mockup-status">
+          <div>cwd: ~/projects/ccnest</div>
+          <div class="hint">Ctrl+D:┃  Ctrl+E:━  Ctrl+T:tab  Ctrl+W:close  Ctrl+F:files  F2:rename  Ctrl+C×2:shell  Ctrl+Q:quit</div>
+        </div>
       </div>
     </div>
   </div>
@@ -475,7 +476,9 @@
       <tr><td><kbd>Ctrl+1</kbd> .. <kbd>Ctrl+4</kbd></td><td>Jump to sidebar section (Files / Claude / Git / Panes)</td></tr>
       <tr><td><kbd>Tab</kbd> <em style="color:var(--dim)">(sidebar focused)</em></td><td>Cycle sidebar sections</td></tr>
       <tr><td><kbd>↑</kbd> / <kbd>↓</kbd> / <kbd>j</kbd> / <kbd>k</kbd> <em style="color:var(--dim)">(sidebar)</em></td><td>Move selection cursor</td></tr>
+      <tr><td><kbd>Enter</kbd> <em style="color:var(--dim)">(on a folder row)</em></td><td>Toggle expand / collapse (loads children lazily)</td></tr>
       <tr><td><kbd>Enter</kbd> <em style="color:var(--dim)">(on a file row)</em></td><td>Open in <code>$EDITOR</code> (falls back to <code>code</code>)</td></tr>
+      <tr><td>Mouse left-click <em style="color:var(--dim)">(file tree row)</em></td><td>Folders: toggle expand / collapse. Files: open in <code>$EDITOR</code>.</td></tr>
       <tr><td><kbd>Ctrl+Q</kbd></td><td>Quit ccnest</td></tr>
       <tr><td colspan="2" style="background:var(--panel-2);color:var(--dim);font-size:0.78rem;text-transform:uppercase;letter-spacing:0.05em;padding:0.5rem 0.8rem;">Forwarded to the focused pane</td></tr>
       <tr><td><kbd>Shift+Tab</kbd></td><td>Sent as back-tab (<code>CSI Z</code>) — drives Claude's mode cycle (default → auto-accept → plan)</td></tr>
@@ -490,17 +493,23 @@
   <p style="color:var(--dim);font-size:0.92rem;margin-top:1.2rem;">
     Heads-up: <kbd>Ctrl+D</kbd> is captured, so it will not send EOF to <code>claude</code>. Use <code>/exit</code> inside Claude, or <kbd>Ctrl+W</kbd> to close the pane from the outside. Plain <kbd>PageUp</kbd> / <kbd>PageDown</kbd> still pass through to <code>claude</code> — only the <kbd>Shift</kbd>-modified variants drive ccnest's scrollback.
   </p>
+  <div style="margin-top:1.2rem;padding:1rem 1.2rem;background:var(--panel-2);border:1px solid var(--border-strong);border-left:3px solid var(--claude);border-radius:6px;font-size:0.92rem;color:#d0d0d8;">
+    <strong style="color:var(--claude);">Windows Terminal users:</strong> WT's default keybindings for
+    <kbd>Ctrl+T</kbd> (new tab), <kbd>Ctrl+D</kbd> (split pane), <kbd>Ctrl+W</kbd> (close pane), and
+    <kbd>Alt+←</kbd>/<kbd>Alt+→</kbd> (prev/next tab) intercept these keys before they reach ccnest.
+    Remove or rebind them in <code>settings.json</code> so ccnest sees them.
+  </div>
 </section>
 
 <section id="sidebar">
   <h2>The sidebar</h2>
   <p>
-    The left sidebar is always available (<kbd>Ctrl+B</kbd> toggles the whole thing,
-    <kbd>Ctrl+F</kbd> focuses the file tree). It has four sections you can jump to with
-    <kbd>Ctrl+1</kbd>..<kbd>Ctrl+4</kbd>:
+    The left sidebar is <strong>hidden by default</strong>. Press <kbd>Ctrl+B</kbd> to toggle the whole
+    thing, or <kbd>Ctrl+F</kbd> to jump straight to the file tree. It has four sections you can jump to
+    with <kbd>Ctrl+1</kbd>..<kbd>Ctrl+4</kbd>:
   </p>
   <ul class="dot-list">
-    <li><strong>Files</strong> — a depth-3 tree of the focused pane's cwd. Honors <code>.gitignore</code> via the <code>ignore</code> crate, with type-specific icons and colors for faster scanning.</li>
+    <li><strong>Files</strong> — an <strong>explorer-style lazy tree</strong>: folders first, files second, alphabetical within each group. The top level shows immediately, deeper levels load on demand when you hit <kbd>Enter</kbd> or click a folder. Icons are emoji-based (📁 🦀 🐍 📝 …) so they render anywhere — no Nerd Font required. Honors <code>.gitignore</code> via the <code>ignore</code> crate.</li>
     <li><strong>Claude</strong> — per-pane context usage parsed from <code>~/.claude/projects/&lt;encoded-cwd&gt;/&lt;session-id&gt;.jsonl</code>. Each pane is launched with <code>claude --session-id &lt;uuid&gt;</code>, so ccnest knows which file to read. Override the default 200k-token window with <code>CCNEST_CONTEXT_WINDOW=1000000</code> for 1M-context models.</li>
     <li><strong>Git</strong> — current branch plus <code>M / S / ?</code> counts for the focused pane's cwd, via <code>git2</code>.</li>
     <li><strong>Panes</strong> — a list of every pane in the current tab, marking the active pane and whether Claude is running.</li>
@@ -541,6 +550,10 @@
 </footer>
 
 <!-- Version History
-     ver0.1 - 2026-04-25 - Documented iconized and colorized Files sidebar rows. -->
+     ver0.1 - 2026-04-25 - Documented iconized and colorized Files sidebar rows.
+     ver0.2 - 2026-04-25 - Updated mockup (collapsed lazy tree, status bar 2-line),
+                            sidebar default-hidden text, emoji icon callout, keybinding
+                            rows for folder-toggle and mouse click, Windows Terminal
+                            conflict callout, hero tagline tweak. -->
 </body>
 </html>
