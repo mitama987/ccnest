@@ -50,7 +50,7 @@ pub fn draw(
         .constraints([
             Constraint::Length(1),
             Constraint::Min(3),
-            Constraint::Length(1),
+            Constraint::Length(2),
         ])
         .split(main_area);
     draw_tabbar(app, frame, vert[0], &theme);
@@ -85,12 +85,12 @@ fn draw_statusbar(app: &App, frame: &mut Frame<'_>, area: Rect, theme: &theme::T
         .status
         .clone()
         .unwrap_or_else(|| format!("cwd: {}", app.focused_pane_cwd().display()));
-    let line = Line::from(vec![
-        Span::styled(hint_text, theme.hint),
-        Span::raw("  │  "),
-        Span::styled(status, theme.hint),
-    ]);
-    frame.render_widget(Paragraph::new(line), area);
+    // 上段: cwd / status、下段: ショートカットヒント
+    let lines = vec![
+        Line::from(Span::styled(status, theme.hint)),
+        Line::from(Span::styled(hint_text, theme.hint)),
+    ];
+    frame.render_widget(Paragraph::new(lines), area);
 }
 
 fn draw_sidebar(
