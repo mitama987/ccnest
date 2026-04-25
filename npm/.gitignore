@@ -1,0 +1,4 @@
+bin/ccnest
+bin/ccnest.exe
+*.tgz
+node_modules/
