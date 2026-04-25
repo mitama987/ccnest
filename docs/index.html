@@ -494,6 +494,29 @@
   </p>
 
   <h3 style="margin-top:2rem;">
+    <span class="lang-ja">Rust（cargo）がまだない場合 <span class="mono" style="color:var(--dim);font-weight:400;font-size:0.9rem;">（rustup で入れる）</span></span>
+    <span class="lang-en">If you don't have Rust (cargo) yet <span class="mono" style="color:var(--dim);font-weight:400;font-size:0.9rem;">(install via rustup)</span></span>
+  </h3>
+  <p style="color:var(--dim);font-size:0.92rem;">
+    <span class="lang-ja"><code>cargo --version</code> が通らない場合は Rust ツールチェインがまだ入っていません。<a href="https://rustup.rs" target="_blank" rel="noopener">rustup</a> は Rust 公式のインストーラで、コンパイラ・<code>cargo</code>・<code>rustfmt</code>・<code>clippy</code> をひと揃え入れてくれます。</span>
+    <span class="lang-en">If <code>cargo --version</code> fails, you don't have a Rust toolchain yet. <a href="https://rustup.rs" target="_blank" rel="noopener">rustup</a> is Rust's official installer and pulls in the compiler, <code>cargo</code>, <code>rustfmt</code>, and <code>clippy</code> in one shot.</span>
+  </p>
+<pre class="code"><span class="c lang-ja"># macOS / Linux: curl でワンライナー</span><span class="c lang-en"># macOS / Linux: one-liner via curl</span>
+<span class="p">$</span> curl --proto <span class="s">'=https'</span> --tlsv1.2 -sSf https://sh.rustup.rs | sh
+<span class="p">$</span> source <span class="s">"$HOME/.cargo/env"</span>     <span class="c lang-ja"># 同じシェルですぐ使うとき</span><span class="c lang-en"># to use it in the current shell</span>
+
+<span class="c lang-ja"># Windows: winget で入れる（PowerShell）</span><span class="c lang-en"># Windows: install via winget (PowerShell)</span>
+<span class="p">&gt;</span> winget install Rustlang.Rustup
+<span class="p">&gt;</span> rustup default stable           <span class="c lang-ja"># 安定版ツールチェインを既定に</span><span class="c lang-en"># set stable as the default toolchain</span>
+
+<span class="c lang-ja"># 入ったか確認</span><span class="c lang-en"># verify</span>
+<span class="p">$</span> cargo --version</pre>
+  <p style="color:var(--dim);font-size:0.92rem;">
+    <span class="lang-ja">インストール後はターミナルを開き直してから次のステップに進んでください。Windows で winget が使えない場合は <a href="https://rustup.rs" target="_blank" rel="noopener">rustup.rs</a> から <code>rustup-init.exe</code> を入手して実行できます。</span>
+    <span class="lang-en">Restart your terminal after installation, then continue to the next step. If <code>winget</code> isn't available on Windows, grab <code>rustup-init.exe</code> from <a href="https://rustup.rs" target="_blank" rel="noopener">rustup.rs</a> and run it.</span>
+  </p>
+
+  <h3 style="margin-top:2rem;">
     <span class="lang-ja">cargo で <span class="mono" style="color:var(--dim);font-weight:400;font-size:0.9rem;">（推奨）</span></span>
     <span class="lang-en">Via cargo <span class="mono" style="color:var(--dim);font-weight:400;font-size:0.9rem;">(recommended)</span></span>
   </h3>
