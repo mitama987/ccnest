@@ -48,28 +48,9 @@ fn process_batch(
 ) -> Result<()> {
     let mut i = 0;
     while i < events.len() {
-        // 連続する paste 候補(Char/Enter/Tab、Ctrl/Alt なし)の run を切り出し、
-        // 長さが 2 以上かつ Enter を含む場合のみ paste として束ねる。
-        // Enter を含まない連続文字は通常のタイプ入力とみなし個別処理に回す。
-        let mut run_end = i;
-        while run_end < events.len() && is_paste_candidate(&events[run_end]) {
-            run_end += 1;
-        }
-        let run_len = run_end - i;
-        let has_enter = events[i..run_end].iter().any(|e| {
-            matches!(
-                e,
-                Event::Key(k)
-                    if matches!(k.code, KeyCode::Enter) && k.kind != KeyEventKind::Release
-            )
-        });
-        if run_len >= 2 && has_enter {
-            let text: String = events[i..run_end]
-                .iter()
-                .filter_map(key_to_paste_char)
-                .collect();
+        if let Some((consumed, text)) = classify_run(&events[i..]) {
             handle_paste(app, &text);
-            i = run_end;
+            i += consumed;
             continue;
         }
 
@@ -91,11 +72,49 @@ fn process_batch(
     Ok(())
 }
 
+/// 先頭から paste run を切り出す純粋関数。
+///
+/// Char/Enter/Tab(Ctrl/Alt なし)が連続する区間を run とし、Press と Release が
+/// 交互に届く Windows ConPTY のケースでも途切れないよう Release も run の一部として
+/// 含める。Press イベント数が 2 以上かつ Enter Press を含むときのみ paste 判定し、
+/// `(消費イベント数, paste テキスト)` を返す。Press 数で判定するのは生 run_len が
+/// Press/Release ペアで膨らむため (Press+Release = 2 events で 1 文字)。
+fn classify_run(events: &[Event]) -> Option<(usize, String)> {
+    let mut run_end = 0;
+    while run_end < events.len() && is_paste_candidate(&events[run_end]) {
+        run_end += 1;
+    }
+    if run_end == 0 {
+        return None;
+    }
+    let mut press_count = 0usize;
+    let mut has_enter = false;
+    for e in &events[..run_end] {
+        if let Event::Key(k) = e {
+            if k.kind != KeyEventKind::Release {
+                press_count += 1;
+                if matches!(k.code, KeyCode::Enter) {
+                    has_enter = true;
+                }
+            }
+        }
+    }
+    if press_count < 2 || !has_enter {
+        return None;
+    }
+    let text: String = events[..run_end]
+        .iter()
+        .filter_map(key_to_paste_char)
+        .collect();
+    Some((run_end, text))
+}
+
 /// Key イベントが paste の一部になり得るか判定する。
 /// Ctrl/Alt 修飾付きキーやファンクションキーは paste に束ねない。
+/// Press / Release のいずれも run の継続を許す (Windows ConPTY が交互に届けるため)。
 fn is_paste_candidate(e: &Event) -> bool {
     match e {
-        Event::Key(k) if k.kind != KeyEventKind::Release => {
+        Event::Key(k) => {
             if k.modifiers.contains(KeyModifiers::CONTROL)
                 || k.modifiers.contains(KeyModifiers::ALT)
             {
@@ -109,7 +128,7 @@ fn is_paste_candidate(e: &Event) -> bool {
 
 fn key_to_paste_char(e: &Event) -> Option<String> {
     match e {
-        Event::Key(k) => match k.code {
+        Event::Key(k) if k.kind != KeyEventKind::Release => match k.code {
             KeyCode::Char(c) => Some(c.to_string()),
             KeyCode::Enter => Some("\n".to_string()),
             KeyCode::Tab => Some("\t".to_string()),
@@ -542,4 +561,133 @@ fn key_to_bytes(key: &KeyEvent) -> Vec<u8> {
         _ => {}
     }
     buf
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
+
+    fn press(code: KeyCode) -> Event {
+        Event::Key(KeyEvent::new_with_kind(
+            code,
+            KeyModifiers::NONE,
+            KeyEventKind::Press,
+        ))
+    }
+
+    fn release(code: KeyCode) -> Event {
+        Event::Key(KeyEvent::new_with_kind(
+            code,
+            KeyModifiers::NONE,
+            KeyEventKind::Release,
+        ))
+    }
+
+    fn ctrl_press(code: KeyCode) -> Event {
+        Event::Key(KeyEvent::new_with_kind(
+            code,
+            KeyModifiers::CONTROL,
+            KeyEventKind::Press,
+        ))
+    }
+
+    #[test]
+    fn classify_run_press_only_with_enter_is_paste() {
+        let events = vec![
+            press(KeyCode::Char('a')),
+            press(KeyCode::Char('b')),
+            press(KeyCode::Enter),
+        ];
+        assert_eq!(classify_run(&events), Some((3, "ab\n".to_string())));
+    }
+
+    #[test]
+    fn classify_run_press_release_interleaved_is_paste() {
+        // 本バグ再現: Windows ConPTY が Press/Release を交互に届けるケース。
+        let events = vec![
+            press(KeyCode::Char('a')),
+            release(KeyCode::Char('a')),
+            press(KeyCode::Char('b')),
+            release(KeyCode::Char('b')),
+            press(KeyCode::Enter),
+            release(KeyCode::Enter),
+        ];
+        assert_eq!(classify_run(&events), Some((6, "ab\n".to_string())));
+    }
+
+    #[test]
+    fn classify_run_multiline_paste_with_releases() {
+        let lines = ["foo", "bar", "baz", "qux", "quux"];
+        let mut events = Vec::new();
+        for line in &lines {
+            for c in line.chars() {
+                events.push(press(KeyCode::Char(c)));
+                events.push(release(KeyCode::Char(c)));
+            }
+            events.push(press(KeyCode::Enter));
+            events.push(release(KeyCode::Enter));
+        }
+        let result = classify_run(&events).expect("should be paste");
+        assert_eq!(result.0, events.len());
+        assert_eq!(result.1.matches('\n').count(), 5);
+        assert!(result.1.starts_with("foo\nbar\n"));
+    }
+
+    #[test]
+    fn classify_run_single_enter_press_release_is_not_paste() {
+        let events = vec![press(KeyCode::Enter), release(KeyCode::Enter)];
+        assert_eq!(classify_run(&events), None);
+    }
+
+    #[test]
+    fn classify_run_single_char_press_release_is_not_paste() {
+        let events = vec![press(KeyCode::Char('x')), release(KeyCode::Char('x'))];
+        assert_eq!(classify_run(&events), None);
+    }
+
+    #[test]
+    fn classify_run_typing_without_enter_is_not_paste() {
+        let events = vec![
+            press(KeyCode::Char('a')),
+            press(KeyCode::Char('b')),
+            press(KeyCode::Char('c')),
+        ];
+        assert_eq!(classify_run(&events), None);
+    }
+
+    #[test]
+    fn classify_run_breaks_on_ctrl_modifier() {
+        // Ctrl 修飾は run を切る → 後続の Enter は別 run になる。
+        let events = vec![
+            press(KeyCode::Char('a')),
+            ctrl_press(KeyCode::Char('c')),
+            press(KeyCode::Enter),
+        ];
+        // 先頭 run は Char('a') のみ、Enter なしで paste 不成立。
+        assert_eq!(classify_run(&events), None);
+    }
+
+    #[test]
+    fn classify_run_breaks_on_mouse_event() {
+        let events = vec![
+            press(KeyCode::Char('a')),
+            Event::Resize(80, 24),
+            press(KeyCode::Char('b')),
+            press(KeyCode::Enter),
+        ];
+        // 先頭 run は Char('a') のみで Enter なし → None。
+        assert_eq!(classify_run(&events), None);
+    }
+
+    #[test]
+    fn classify_run_includes_tab_in_paste() {
+        let events = vec![
+            press(KeyCode::Char('a')),
+            press(KeyCode::Tab),
+            press(KeyCode::Char('b')),
+            press(KeyCode::Enter),
+        ];
+        assert_eq!(classify_run(&events), Some((4, "a\tb\n".to_string())));
+    }
 }
