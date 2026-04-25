@@ -30,6 +30,21 @@ pub fn run_event_loop<B: Backend>(term: &mut Terminal<B>, mut app: App) -> Resul
             while event::poll(Duration::from_millis(0))? {
                 batch.push(event::read()?);
             }
+            // batch 末尾が paste 候補のままで終わっている場合、Windows ConPTY が
+            // 1 回の paste を複数 tick に分割して届けている可能性がある。
+            // burst が継続する限り (5ms 間隔で次イベントが到着する限り) 最大 500ms
+            // まで集め続けて 1 batch に統合する。これにより Claude CLI に届く
+            // bracketed-paste セグメントが 1 個になり、placeholder が分裂しない。
+            // 5ms 間隔のしきい値は人間のタイピング (≥ 50ms 間隔) と十分離れている
+            // ため誤検知しない。
+            let burst_deadline = Instant::now() + Duration::from_millis(500);
+            while Instant::now() < burst_deadline && batch.last().is_some_and(is_paste_candidate) {
+                if event::poll(Duration::from_millis(5))? {
+                    batch.push(event::read()?);
+                } else {
+                    break;
+                }
+            }
             process_batch(&mut app, batch, &pane_rects)?;
         }
 
