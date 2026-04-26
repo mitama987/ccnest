@@ -38,3 +38,11 @@ tempfile = "3"
 lto = "thin"
 codegen-units = 1
 strip = true
+
+[patch.crates-io]
+# Local fork of vt100-0.15.2 with a fix for the shrink-resize panic that
+# triggered when Ctrl+D split a pane while a wide character (e.g. the
+# Claude Code spinner glyph) was at the right edge. See
+# vendor/vt100-0.15.2/src/row.rs `Row::resize` and tests/
+# vt100_shrink_orphan_wide.rs.
+vt100 = { path = "vendor/vt100-0.15.2" }
