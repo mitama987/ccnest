@@ -112,3 +112,29 @@ jobs:
         with:
           files: out/checksums.txt
           fail_on_unmatched_files: true
+
+  publish-npm:
+    name: Publish ccnest-cli to npm
+    needs: [build, checksums]
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          registry-url: 'https://registry.npmjs.org'
+
+      - name: Sync npm package version with git tag
+        working-directory: npm
+        run: |
+          TAG="${GITHUB_REF#refs/tags/v}"
+          echo "Setting ccnest-cli version to ${TAG}"
+          npm version "${TAG}" --no-git-tag-version --allow-same-version
+
+      - name: Publish to npm
+        working-directory: npm
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: npm publish --access public
