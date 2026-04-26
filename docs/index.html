@@ -363,7 +363,7 @@
   </div>
   <div class="install-cmd">
     <span class="prompt">$</span>
-    <span class="cmd" id="install-cmd">cargo install --git https://github.com/mitama987/ccnest</span>
+    <span class="cmd" id="install-cmd">npm install -g ccnest-cli</span>
     <button id="install-copy-btn" data-ja-copy="コピー" data-en-copy="Copy" data-ja-copied="コピーしました" data-en-copied="Copied">Copy</button>
   </div>
 </section>
@@ -489,13 +489,27 @@
 <section id="install">
   <h2><span class="lang-ja">インストール</span><span class="lang-en">Install</span></h2>
   <p>
-    <span class="lang-ja">ccnest は Rust 製です。最新の Rust ツールチェイン（<a href="https://rustup.rs" target="_blank" rel="noopener">rustup</a>）と、Claude 連携の恩恵を受けるには <a href="https://www.anthropic.com/claude-code" target="_blank" rel="noopener">claude</a> CLI が <code>PATH</code> に通っている必要があります。<code>claude</code> が見つからない場合はシステムシェルにフォールバックするので、多重化ツールとしては動作します。</span>
-    <span class="lang-en">ccnest is written in Rust. You need a recent Rust toolchain (<a href="https://rustup.rs" target="_blank" rel="noopener">rustup</a>) and, to actually get value from the Claude integration, the <a href="https://www.anthropic.com/claude-code" target="_blank" rel="noopener">claude</a> CLI on your <code>PATH</code>. If <code>claude</code> is not found, panes fall back to the system shell so the multiplexer is still usable.</span>
+    <span class="lang-ja">ccnest を入れる方法は2つあります: <strong>npm でビルド済みバイナリを取得</strong>（最速・Rust不要）か、<strong>ソースからビルド</strong>（Rust ツールチェインが必要）か。Claude 連携の恩恵を受けるには <a href="https://www.anthropic.com/claude-code" target="_blank" rel="noopener">claude</a> CLI が <code>PATH</code> に通っている必要があります。<code>claude</code> が見つからない場合はシステムシェルにフォールバックするので、多重化ツールとしては動作します。</span>
+    <span class="lang-en">There are two ways to install ccnest: <strong>grab a prebuilt binary via npm</strong> (fastest, no Rust required) or <strong>build from source</strong> (needs the Rust toolchain). To actually benefit from the Claude integration you also need the <a href="https://www.anthropic.com/claude-code" target="_blank" rel="noopener">claude</a> CLI on your <code>PATH</code>. If <code>claude</code> is not found, panes fall back to the system shell so the multiplexer is still usable.</span>
   </p>
 
   <h3 style="margin-top:2rem;">
-    <span class="lang-ja">Rust（cargo）がまだない場合 <span class="mono" style="color:var(--dim);font-weight:400;font-size:0.9rem;">（rustup で入れる）</span></span>
-    <span class="lang-en">If you don't have Rust (cargo) yet <span class="mono" style="color:var(--dim);font-weight:400;font-size:0.9rem;">(install via rustup)</span></span>
+    <span class="lang-ja">npm で <span class="mono" style="color:var(--dim);font-weight:400;font-size:0.9rem;">（最速・推奨）</span></span>
+    <span class="lang-en">Via npm <span class="mono" style="color:var(--dim);font-weight:400;font-size:0.9rem;">(fastest, recommended)</span></span>
+  </h3>
+  <p style="color:var(--dim);font-size:0.92rem;">
+    <span class="lang-ja">postinstall で OS/アーキテクチャに合ったビルド済みバイナリを <a href="https://github.com/mitama987/ccnest/releases" target="_blank" rel="noopener">GitHub Releases</a> から取得し、<code>PATH</code> に <code>ccnest</code> として配置します。Rust ツールチェインは不要、所要時間は数秒〜数十秒です。</span>
+    <span class="lang-en">The postinstall step downloads the prebuilt binary for your OS / arch from <a href="https://github.com/mitama987/ccnest/releases" target="_blank" rel="noopener">GitHub Releases</a> and installs it on your <code>PATH</code> as <code>ccnest</code>. No Rust toolchain required; takes a few seconds.</span>
+  </p>
+<pre class="code"><span class="p">$</span> npm install -g ccnest-cli</pre>
+  <p style="color:var(--dim);font-size:0.92rem;">
+    <span class="lang-ja">対応プラットフォーム: Windows x64 / macOS arm64 / macOS x64 / Linux x64。<a href="https://www.npmjs.com/package/ccnest-cli" target="_blank" rel="noopener">npm: ccnest-cli</a></span>
+    <span class="lang-en">Supported platforms: Windows x64 / macOS arm64 / macOS x64 / Linux x64. <a href="https://www.npmjs.com/package/ccnest-cli" target="_blank" rel="noopener">npm: ccnest-cli</a></span>
+  </p>
+
+  <h3 style="margin-top:2.5rem;">
+    <span class="lang-ja">Rust（cargo）がまだない場合 <span class="mono" style="color:var(--dim);font-weight:400;font-size:0.9rem;">（ソースからビルドしたい人向け / rustup で入れる）</span></span>
+    <span class="lang-en">If you don't have Rust (cargo) yet <span class="mono" style="color:var(--dim);font-weight:400;font-size:0.9rem;">(only needed to build from source / install via rustup)</span></span>
   </h3>
   <p style="color:var(--dim);font-size:0.92rem;">
     <span class="lang-ja"><code>cargo --version</code> が通らない場合は Rust ツールチェインがまだ入っていません。<a href="https://rustup.rs" target="_blank" rel="noopener">rustup</a> は Rust 公式のインストーラで、コンパイラ・<code>cargo</code>・<code>rustfmt</code>・<code>clippy</code> をひと揃え入れてくれます。</span>
@@ -517,8 +531,8 @@
   </p>
 
   <h3 style="margin-top:2rem;">
-    <span class="lang-ja">cargo で <span class="mono" style="color:var(--dim);font-weight:400;font-size:0.9rem;">（推奨）</span></span>
-    <span class="lang-en">Via cargo <span class="mono" style="color:var(--dim);font-weight:400;font-size:0.9rem;">(recommended)</span></span>
+    <span class="lang-ja">cargo で <span class="mono" style="color:var(--dim);font-weight:400;font-size:0.9rem;">（ソースからビルド）</span></span>
+    <span class="lang-en">Via cargo <span class="mono" style="color:var(--dim);font-weight:400;font-size:0.9rem;">(build from source)</span></span>
   </h3>
 <pre class="code"><span class="c lang-ja"># clone してインストール — ~/.cargo/bin に配置されます</span><span class="c lang-en"># clone &amp; install — lands in ~/.cargo/bin</span>
 <span class="p">$</span> git clone https://github.com/mitama987/ccnest

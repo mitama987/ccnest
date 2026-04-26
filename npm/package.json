@@ -1,0 +1,42 @@
+{
+  "name": "ccnest-cli",
+  "version": "0.1.2",
+  "description": "ccnest — a Claude Code-aware terminal multiplexer (Rust TUI). Prefix-less splits, per-pane Claude context usage, structured sidebar.",
+  "bin": {
+    "ccnest": "bin/cli.js"
+  },
+  "scripts": {
+    "postinstall": "node scripts/install.js"
+  },
+  "keywords": [
+    "claude",
+    "claude-code",
+    "terminal",
+    "multiplexer",
+    "tui",
+    "pane",
+    "split",
+    "tmux",
+    "ccnest"
+  ],
+  "author": "mitama987",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/mitama987/ccnest"
+  },
+  "homepage": "https://mitama987.github.io/ccnest/",
+  "os": [
+    "win32",
+    "darwin",
+    "linux"
+  ],
+  "engines": {
+    "node": ">=16"
+  },
+  "files": [
+    "bin/",
+    "scripts/",
+    "README.md"
+  ]
+}
