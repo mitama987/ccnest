@@ -13,14 +13,19 @@ use ratatui::Frame;
 use crate::app::{App, Rect as AppRect};
 use crate::pane::grid::{Layout, SplitDir};
 use crate::pane::PaneId;
-use crate::sidebar::{claude_ctx, panelist, Section};
+use crate::sidebar::{claude_ctx, filetree, panelist, Section};
 
-pub fn draw(app: &App, frame: &mut Frame<'_>, pane_rects: &mut HashMap<PaneId, AppRect>) {
+pub fn draw(
+    app: &App,
+    frame: &mut Frame<'_>,
+    pane_rects: &mut HashMap<PaneId, AppRect>,
+    sidebar_file_rect: &mut Option<AppRect>,
+) {
     let size = frame.area();
     let theme = theme::default_theme();
 
     let cols = if app.sidebar.visible {
-        vec![Constraint::Length(32), Constraint::Min(10)]
+        vec![Constraint::Length(21), Constraint::Min(10)]
     } else {
         vec![Constraint::Min(10)]
     };
@@ -35,8 +40,9 @@ pub fn draw(app: &App, frame: &mut Frame<'_>, pane_rects: &mut HashMap<PaneId, A
         (None, chunks[0])
     };
 
+    *sidebar_file_rect = None;
     if let Some(area) = sidebar_area {
-        draw_sidebar(app, frame, area, &theme);
+        draw_sidebar(app, frame, area, &theme, sidebar_file_rect);
     }
 
     let vert = LLayout::default()
@@ -44,7 +50,7 @@ pub fn draw(app: &App, frame: &mut Frame<'_>, pane_rects: &mut HashMap<PaneId, A
         .constraints([
             Constraint::Length(1),
             Constraint::Min(3),
-            Constraint::Length(1),
+            Constraint::Length(2),
         ])
         .split(main_area);
     draw_tabbar(app, frame, vert[0], &theme);
@@ -69,25 +75,31 @@ fn draw_tabbar(app: &App, frame: &mut Frame<'_>, area: Rect, theme: &theme::Them
         spans.push(Span::styled(label, style));
         spans.push(Span::raw(" "));
     }
-    let hint_text =
-        "  Ctrl+D:┃  Ctrl+E:━  Ctrl+T:tab  Ctrl+W:close  Ctrl+F:files  F2:rename  Ctrl+Q:quit";
-    let hint = Span::styled(hint_text, theme.hint);
-    spans.push(hint);
     frame.render_widget(Paragraph::new(Line::from(spans)), area);
 }
 
 fn draw_statusbar(app: &App, frame: &mut Frame<'_>, area: Rect, theme: &theme::Theme) {
-    let text = app
+    let hint_text =
+        "Ctrl+D:┃  Ctrl+E:━  Ctrl+T:tab  Ctrl+W:close  Ctrl+F:files  F2:rename  Ctrl+C×2:shell  Ctrl+Q:quit";
+    let status = app
         .status
         .clone()
         .unwrap_or_else(|| format!("cwd: {}", app.focused_pane_cwd().display()));
-    frame.render_widget(
-        Paragraph::new(Line::from(Span::styled(text, theme.hint))),
-        area,
-    );
+    // 上段: cwd / status、下段: ショートカットヒント
+    let lines = vec![
+        Line::from(Span::styled(status, theme.hint)),
+        Line::from(Span::styled(hint_text, theme.hint)),
+    ];
+    frame.render_widget(Paragraph::new(lines), area);
 }
 
-fn draw_sidebar(app: &App, frame: &mut Frame<'_>, area: Rect, theme: &theme::Theme) {
+fn draw_sidebar(
+    app: &App,
+    frame: &mut Frame<'_>,
+    area: Rect,
+    theme: &theme::Theme,
+    sidebar_file_rect: &mut Option<AppRect>,
+) {
     let border_style = if app.sidebar_focused {
         theme.border_focused
     } else {
@@ -122,12 +134,21 @@ fn draw_sidebar(app: &App, frame: &mut Frame<'_>, area: Rect, theme: &theme::The
 
     // Body
     let lines: Vec<Line> = match app.sidebar.active {
-        Section::FileTree => app
-            .sidebar
-            .file_entries
-            .iter()
-            .map(|e| Line::from(Span::raw(e.display(&app.sidebar.cwd))))
-            .collect(),
+        Section::FileTree => {
+            // クリック→行→ノード対応のため、Files 描画域 (v[1]) を保存。
+            *sidebar_file_rect = Some(AppRect {
+                x: v[1].x as i32,
+                y: v[1].y as i32,
+                w: v[1].width as i32,
+                h: v[1].height as i32,
+            });
+            app.sidebar
+                .file_tree
+                .flatten()
+                .into_iter()
+                .map(|(depth, node)| file_tree_row(node, depth, theme))
+                .collect()
+        }
         Section::Claude => claude_ctx::rows(app)
             .into_iter()
             .map(|r| Line::from(Span::raw(r.display())))
@@ -156,6 +177,54 @@ fn draw_sidebar(app: &App, frame: &mut Frame<'_>, area: Rect, theme: &theme::The
         .collect();
 
     frame.render_widget(Paragraph::new(body), v[1]);
+}
+
+fn file_tree_row<'a>(node: &filetree::FileNode, depth: usize, theme: &theme::Theme) -> Line<'a> {
+    let style = file_entry_style(node.kind, theme);
+    let indent = "  ".repeat(depth);
+    let chevron = if node.is_dir {
+        if node.expanded {
+            "▾"
+        } else {
+            "▸"
+        }
+    } else {
+        " "
+    };
+    let name = if node.is_dir {
+        format!("{}/", node.name)
+    } else {
+        node.name.clone()
+    };
+    Line::from(vec![
+        Span::raw(indent),
+        Span::styled(chevron.to_string(), theme.hint),
+        Span::raw(" "),
+        Span::styled(filetree::icon_for_kind(node.kind), style),
+        Span::raw(" "),
+        Span::styled(name, style),
+    ])
+}
+
+fn file_entry_style(kind: filetree::EntryKind, theme: &theme::Theme) -> Style {
+    match kind {
+        filetree::EntryKind::Directory => theme.file_directory,
+        filetree::EntryKind::Git => theme.file_git,
+        filetree::EntryKind::Markdown => theme.file_markdown,
+        filetree::EntryKind::Image => theme.file_image,
+        filetree::EntryKind::Rust => theme.file_rust,
+        filetree::EntryKind::Python => theme.file_python,
+        filetree::EntryKind::JavaScript => theme.file_javascript,
+        filetree::EntryKind::TypeScript => theme.file_typescript,
+        filetree::EntryKind::Web => theme.file_web,
+        filetree::EntryKind::Json => theme.file_json,
+        filetree::EntryKind::Config => theme.file_config,
+        filetree::EntryKind::Shell => theme.file_shell,
+        filetree::EntryKind::Lock => theme.file_lock,
+        filetree::EntryKind::Dotfile => theme.file_dotfile,
+        filetree::EntryKind::Text => theme.file_text,
+        filetree::EntryKind::Other => theme.file_other,
+    }
 }
 
 fn draw_panes(
@@ -225,8 +294,13 @@ fn render_layout(
             );
 
             if let Some(pane) = app.panes.get(pid) {
+                let selection = app
+                    .selection
+                    .filter(|s| s.pane_id == *pid)
+                    .map(|s| normalize_selection(s.anchor, s.cursor));
                 let widget = PaneCells {
                     parser: &pane.parser,
+                    selection,
                 };
                 frame.render_widget(widget, inner);
                 // Ensure pty is sized to the rendering area.
@@ -258,6 +332,8 @@ fn render_layout(
 
 struct PaneCells<'a> {
     parser: &'a std::sync::Mutex<vt100::Parser>,
+    /// (start, end) のペイン内座標(col,row)。start<=end で正規化済み。
+    selection: Option<((u16, u16), (u16, u16))>,
 }
 
 impl<'a> Widget for PaneCells<'a> {
@@ -270,7 +346,12 @@ impl<'a> Widget for PaneCells<'a> {
             for x in 0..area.width {
                 if let Some(cell) = screen.cell(y, x) {
                     let ch = cell.contents();
-                    let style = style_from_cell(cell);
+                    let mut style = style_from_cell(cell);
+                    if let Some((start, end)) = self.selection {
+                        if selection_contains((x, y), start, end) {
+                            style = style.add_modifier(Modifier::REVERSED);
+                        }
+                    }
                     let bx = area.x + x;
                     let by = area.y + y;
                     let bcell = &mut buf[(bx, by)];
@@ -283,6 +364,32 @@ impl<'a> Widget for PaneCells<'a> {
                 }
             }
         }
+    }
+}
+
+fn selection_contains(pos: (u16, u16), start: (u16, u16), end: (u16, u16)) -> bool {
+    let (x, y) = pos;
+    if y < start.1 || y > end.1 {
+        return false;
+    }
+    if start.1 == end.1 {
+        return x >= start.0 && x <= end.0;
+    }
+    if y == start.1 {
+        return x >= start.0;
+    }
+    if y == end.1 {
+        return x <= end.0;
+    }
+    true
+}
+
+/// (anchor, cursor) を行優先で昇順に並べ替える。event.rs 側と同一ルール。
+pub fn normalize_selection(a: (u16, u16), b: (u16, u16)) -> ((u16, u16), (u16, u16)) {
+    if a.1 < b.1 || (a.1 == b.1 && a.0 <= b.0) {
+        (a, b)
+    } else {
+        (b, a)
     }
 }
 
@@ -313,3 +420,6 @@ fn color_from(c: vt100::Color) -> Color {
         vt100::Color::Rgb(r, g, b) => Color::Rgb(r, g, b),
     }
 }
+
+// Version History
+// ver0.1 - 2026-04-25 - Rendered file tree entries with type-specific icons and colors.

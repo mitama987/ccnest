@@ -1,5 +1,6 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+use std::time::Instant;
 
 use anyhow::Result;
 use uuid::Uuid;
@@ -25,6 +26,23 @@ pub struct App {
     pub quit: bool,
     pub status: Option<String>,
     pub renaming_tab: Option<String>,
+    /// 直近の Ctrl+C の (ペイン, 押下時刻)。同ペインで閾値内に再度 Ctrl+C が
+    /// 来たら claude→shell の再起動をトリガする。
+    pub last_ctrl_c: Option<(PaneId, Instant)>,
+    /// マウスドラッグで作られた画面テキスト選択範囲。選択がある状態で Ctrl+C を
+    /// 押すとクリップボードへコピーされる。
+    pub selection: Option<Selection>,
+}
+
+/// ペイン内のテキスト選択範囲。anchor/cursor はペイン内コンテンツ座標 (col,row)。
+#[derive(Debug, Clone, Copy)]
+pub struct Selection {
+    pub pane_id: PaneId,
+    pub anchor: (u16, u16),
+    pub cursor: (u16, u16),
+    /// マウスボタン押下中。false になっても選択は残し続け、Ctrl+C か
+    /// 新規クリックでクリアされる。
+    pub dragging: bool,
 }
 
 /// Derive a tab title from the pane cwd (final path component).
@@ -59,6 +77,8 @@ impl App {
             quit: false,
             status: None,
             renaming_tab: None,
+            last_ctrl_c: None,
+            selection: None,
         })
     }
 

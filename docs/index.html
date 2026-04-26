@@ -1,0 +1,831 @@
+<!DOCTYPE html>
+<html lang="ja" data-lang="ja">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title data-ja="ccnest — Claude Code 対応のターミナル多重化ツール"
+       data-en="ccnest — a Claude Code-aware terminal multiplexer">ccnest — Claude Code 対応のターミナル多重化ツール</title>
+<meta name="description"
+      data-ja="ccnest は Claude Code を中心に設計されたターミナル多重化ツール。プレフィックスなしの分割ホットキー、ペインごとの Claude コンテキスト使用量、構造化サイドバー。Rust 製・Windows 優先。"
+      data-en="ccnest is a terminal multiplexer built around Claude Code. Prefix-less split hotkeys, per-pane Claude context usage, and a structured sidebar. Rust, Windows-first."
+      content="ccnest は Claude Code を中心に設計されたターミナル多重化ツール。プレフィックスなしの分割ホットキー、ペインごとの Claude コンテキスト使用量、構造化サイドバー。Rust 製・Windows 優先。" />
+<meta property="og:title"
+      data-ja="ccnest — Claude Code 対応のターミナル多重化ツール"
+      data-en="ccnest — a Claude Code-aware terminal multiplexer"
+      content="ccnest — Claude Code 対応のターミナル多重化ツール" />
+<meta property="og:description"
+      data-ja="プレフィックスなしの分割、ペインごとの Claude コンテキスト使用量、構造化サイドバー。Rust 製・Windows 優先。"
+      data-en="Prefix-less splits, per-pane Claude context usage, structured sidebar. Rust, Windows-first."
+      content="プレフィックスなしの分割、ペインごとの Claude コンテキスト使用量、構造化サイドバー。Rust 製・Windows 優先。" />
+<meta property="og:type" content="website" />
+<meta property="og:image" content="https://mitama987.github.io/ccnest/logo.png" />
+<meta name="theme-color" content="#0b0b0e" />
+<link rel="icon" type="image/svg+xml" href="favicon.svg" />
+<link rel="preconnect" href="https://fonts.googleapis.com" />
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;700&display=swap" rel="stylesheet" />
+<style>
+  :root {
+    --bg: #0b0b0e;
+    --panel: #141418;
+    --panel-2: #1a1a22;
+    --border: #2a2a32;
+    --border-strong: #3a3a44;
+    --text: #e8e8e8;
+    --dim: #888896;
+    --muted: #5a5a66;
+    --accent: #58b6ff;
+    --claude: #ff8c00;
+    --green: #8cc265;
+    --yellow: #e6cb00;
+    --red: #ff6b6b;
+  }
+  * { box-sizing: border-box; }
+  html { scroll-behavior: smooth; }
+  body {
+    margin: 0;
+    background: var(--bg);
+    color: var(--text);
+    font-family: Inter, -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+    font-size: 16px;
+    line-height: 1.6;
+    -webkit-font-smoothing: antialiased;
+  }
+  code, pre, .mono { font-family: "JetBrains Mono", ui-monospace, "SF Mono", Consolas, monospace; }
+  a { color: var(--accent); text-decoration: none; border-bottom: 1px solid transparent; transition: border-color 150ms ease; }
+  a:hover { border-bottom-color: var(--accent); }
+  h1, h2, h3 { font-weight: 700; letter-spacing: -0.02em; }
+  h2 { font-size: 1.9rem; margin: 0 0 1.2rem; }
+  h3 { font-size: 1.15rem; margin: 0 0 0.5rem; }
+  p { margin: 0 0 1rem; color: #d0d0d8; }
+  ::selection { background: var(--accent); color: var(--bg); }
+
+  /* i18n: lang switching */
+  .lang-ja, .lang-en { display: inline; }
+  html[data-lang="ja"] .lang-en { display: none !important; }
+  html[data-lang="en"] .lang-ja { display: none !important; }
+
+  /* Nav */
+  nav {
+    position: sticky; top: 0; z-index: 10;
+    background: rgba(11, 11, 14, 0.85);
+    backdrop-filter: blur(10px);
+    border-bottom: 1px solid var(--border);
+  }
+  nav .inner {
+    max-width: 1100px; margin: 0 auto;
+    padding: 0.9rem 1.5rem;
+    display: flex; align-items: center; justify-content: space-between;
+  }
+  nav .brand { font-family: "JetBrains Mono", monospace; font-weight: 700; font-size: 1.1rem; color: var(--text); }
+  nav .brand span { color: var(--claude); }
+  nav ul { display: flex; align-items: center; gap: 1.5rem; list-style: none; margin: 0; padding: 0; }
+  nav ul a { color: var(--dim); font-size: 0.9rem; border: none; }
+  nav ul a:hover { color: var(--text); }
+
+  /* Language switcher */
+  nav .lang-switch { display: flex; align-items: center; gap: 0.35rem; margin-left: 0.5rem; }
+  nav .lang-btn {
+    background: transparent; border: none; padding: 0.1rem 0.45rem;
+    color: var(--dim); font: inherit; font-size: 0.82rem; cursor: pointer;
+    border-radius: 3px; font-family: "JetBrains Mono", monospace; line-height: 1;
+  }
+  nav .lang-btn:hover { color: var(--text); }
+  html[data-lang="ja"] nav .lang-btn[data-lang-set="ja"],
+  html[data-lang="en"] nav .lang-btn[data-lang-set="en"] {
+    color: var(--bg); background: var(--accent); font-weight: 700;
+  }
+  nav .lang-sep { color: var(--muted); font-size: 0.78rem; user-select: none; }
+
+  main { max-width: 1100px; margin: 0 auto; padding: 0 1.5rem; }
+
+  /* Hero */
+  .hero { padding: 5rem 0 4rem; text-align: center; }
+  .hero .logo {
+    display: block;
+    width: 100%;
+    max-width: 560px;
+    height: auto;
+    margin: 0 auto 1.5rem;
+    filter: drop-shadow(0 0 40px rgba(88, 182, 255, 0.18));
+  }
+  .hero h1 {
+    font-size: clamp(2.2rem, 5vw, 3.4rem);
+    margin: 0 0 1rem;
+    background: linear-gradient(120deg, #fff 0%, #b0b0b8 100%);
+    -webkit-background-clip: text;
+    background-clip: text;
+    color: transparent;
+  }
+  .hero .tag { font-size: 1.2rem; color: var(--dim); max-width: 640px; margin: 0 auto 2rem; }
+  .hero .cta { display: flex; gap: 0.75rem; justify-content: center; flex-wrap: wrap; }
+  .btn {
+    display: inline-block;
+    padding: 0.65rem 1.25rem;
+    border-radius: 6px;
+    font-weight: 600;
+    font-size: 0.95rem;
+    transition: all 150ms ease;
+    border: 1px solid var(--border-strong);
+    color: var(--text);
+    background: var(--panel);
+  }
+  .btn:hover { background: var(--panel-2); border-color: var(--accent); border-bottom-color: var(--accent); }
+  .btn.primary {
+    background: var(--claude); color: #0b0b0e; border-color: var(--claude);
+  }
+  .btn.primary:hover { background: #ffa02a; border-color: #ffa02a; }
+
+  .install-cmd {
+    margin: 2.5rem auto 0;
+    max-width: 540px;
+    background: var(--panel);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 0.8rem 1rem;
+    font-family: "JetBrains Mono", monospace;
+    font-size: 0.95rem;
+    text-align: left;
+    display: flex; align-items: center; gap: 0.75rem;
+  }
+  .install-cmd .prompt { color: var(--green); user-select: none; }
+  .install-cmd .cmd { flex: 1; color: var(--text); overflow-x: auto; }
+  .install-cmd button {
+    background: transparent; border: 1px solid var(--border-strong);
+    color: var(--dim); padding: 0.25rem 0.65rem; border-radius: 4px;
+    font: inherit; font-size: 0.8rem; cursor: pointer;
+  }
+  .install-cmd button:hover { color: var(--text); border-color: var(--accent); }
+
+  /* Section spacing */
+  section { padding: 4rem 0; }
+  section + section { border-top: 1px solid var(--border); }
+
+  /* Terminal mockup */
+  .mockup-wrap { padding: 2rem 0 4rem; }
+  .mockup {
+    background: var(--bg);
+    border: 1px solid var(--border-strong);
+    border-radius: 10px;
+    overflow: hidden;
+    box-shadow: 0 30px 80px rgba(0, 0, 0, 0.5), 0 0 0 1px rgba(88, 182, 255, 0.05);
+  }
+  .mockup-title {
+    background: #1a1a1f;
+    padding: 0.55rem 1rem;
+    display: flex; align-items: center; gap: 0.5rem;
+    border-bottom: 1px solid var(--border);
+  }
+  .mockup-title .dots { display: flex; gap: 0.4rem; }
+  .mockup-title .dot { width: 11px; height: 11px; border-radius: 50%; background: var(--muted); }
+  .mockup-title .dot.r { background: #ff5f56; }
+  .mockup-title .dot.y { background: #ffbd2e; }
+  .mockup-title .dot.g { background: #27c93f; }
+  .mockup-title .path { margin-left: 0.75rem; color: var(--dim); font-family: "JetBrains Mono", monospace; font-size: 0.82rem; }
+  .mockup-body {
+    display: grid;
+    grid-template-columns: 260px 1fr;
+    min-height: 420px;
+    font-family: "JetBrains Mono", monospace;
+    font-size: 0.82rem;
+  }
+  .mockup-sidebar {
+    background: #0d0d11;
+    border-right: 1px solid var(--border);
+    padding: 0.9rem 0.9rem;
+  }
+  .mockup-sidebar .sec-tabs {
+    display: flex; gap: 0.5rem; margin-bottom: 0.9rem;
+    color: var(--dim); font-size: 0.76rem;
+  }
+  .mockup-sidebar .sec-tabs .active { color: var(--bg); background: var(--accent); padding: 0.05rem 0.4rem; border-radius: 3px; }
+  .mockup-sidebar .tree { color: #c8c8d0; }
+  .mockup-sidebar .tree .sel {
+    background: #fff; color: #0b0b0e; padding: 0 0.2rem;
+  }
+  .mockup-sidebar .tree .dim { color: var(--muted); }
+  .mockup-sidebar .tree .dir { color: var(--accent); }
+
+  .mockup-main { display: flex; flex-direction: column; }
+  .mockup-tabs {
+    padding: 0.45rem 0.8rem;
+    border-bottom: 1px solid var(--border);
+    color: var(--dim);
+    display: flex; align-items: center; gap: 0.6rem;
+    font-size: 0.8rem;
+  }
+  .mockup-tabs .tab { padding: 0.15rem 0.6rem; border-radius: 3px; }
+  .mockup-tabs .tab.active { background: var(--accent); color: var(--bg); font-weight: 600; }
+  .mockup-tabs .hint { margin-left: auto; color: var(--muted); font-size: 0.72rem; }
+  .mockup-panes { flex: 1; display: grid; grid-template-columns: 1fr 1fr; gap: 1px; background: var(--border); padding: 1px; }
+  .pane {
+    background: var(--bg); padding: 0.7rem 0.85rem;
+    border: 1px solid transparent;
+    position: relative;
+  }
+  .pane.focused { border-color: var(--claude); }
+  .pane .ptitle { color: var(--dim); font-size: 0.72rem; margin-bottom: 0.5rem; }
+  .pane.focused .ptitle { color: var(--claude); }
+  .pane .line { color: #c8c8d0; }
+  .pane .line.logo { color: var(--claude); white-space: pre; font-size: 0.7rem; line-height: 1; }
+  .pane .line.dim { color: var(--muted); }
+  .pane .line.prompt { color: var(--green); }
+  .mockup-status {
+    padding: 0.3rem 0.9rem; border-top: 1px solid var(--border);
+    color: var(--muted); font-size: 0.75rem;
+  }
+  .mockup-status .hint { margin-top: 0.15rem; color: var(--muted); }
+
+  /* Features grid */
+  .features { display: grid; gap: 1rem; grid-template-columns: repeat(auto-fit, minmax(250px, 1fr)); }
+  .feature {
+    background: var(--panel);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 1.4rem;
+    transition: border-color 150ms ease;
+  }
+  .feature:hover { border-color: var(--border-strong); }
+  .feature .icon {
+    font-family: "JetBrains Mono", monospace;
+    font-weight: 700; font-size: 1.4rem;
+    color: var(--claude);
+    margin-bottom: 0.75rem;
+  }
+  .feature h3 { color: var(--text); }
+  .feature p { color: var(--dim); font-size: 0.92rem; margin: 0; }
+
+  /* Install / code blocks */
+  pre.code {
+    background: var(--panel);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 1rem 1.2rem;
+    font-size: 0.88rem;
+    overflow-x: auto;
+    color: var(--text);
+    margin: 0 0 1rem;
+  }
+  pre.code .c { color: var(--muted); }
+  pre.code .p { color: var(--green); }
+  pre.code .s { color: var(--yellow); }
+
+  /* Keybindings table */
+  .keys-table { width: 100%; border-collapse: collapse; font-size: 0.92rem; }
+  .keys-table th, .keys-table td {
+    text-align: left; padding: 0.6rem 0.8rem;
+    border-bottom: 1px solid var(--border);
+  }
+  .keys-table th { color: var(--dim); font-weight: 500; font-size: 0.82rem; text-transform: uppercase; letter-spacing: 0.05em; }
+  .keys-table kbd {
+    font-family: "JetBrains Mono", monospace;
+    background: var(--panel-2);
+    border: 1px solid var(--border-strong);
+    border-bottom-width: 2px;
+    padding: 0.08rem 0.45rem;
+    border-radius: 4px;
+    font-size: 0.82rem;
+    color: var(--text);
+  }
+  .keys-table td:first-child { white-space: nowrap; }
+
+  /* Inline list with dots */
+  .dot-list { list-style: none; padding: 0; margin: 0; }
+  .dot-list li { padding: 0.4rem 0 0.4rem 1.2rem; position: relative; color: #d0d0d8; }
+  .dot-list li::before {
+    content: "▸"; position: absolute; left: 0; color: var(--claude);
+  }
+
+  /* Footer */
+  footer { border-top: 1px solid var(--border); padding: 3rem 0 4rem; color: var(--dim); text-align: center; font-size: 0.9rem; }
+  footer a { color: var(--dim); border: none; }
+  footer a:hover { color: var(--text); }
+  footer .links { display: flex; gap: 2rem; justify-content: center; margin-bottom: 1rem; }
+
+  @media (max-width: 700px) {
+    .hero { padding: 3rem 0 2rem; }
+    .mockup-body { grid-template-columns: 1fr; }
+    .mockup-sidebar { border-right: none; border-bottom: 1px solid var(--border); }
+    .mockup-panes { grid-template-columns: 1fr; }
+    nav ul { gap: 1rem; }
+    nav .lang-switch { margin-left: 0; }
+  }
+</style>
+<script>
+  (function () {
+    var KEY = 'ccnest-lang';
+    var saved = null;
+    try { saved = localStorage.getItem(KEY); } catch (e) {}
+    var lang = saved;
+    if (lang !== 'ja' && lang !== 'en') {
+      var nav = (navigator.language || navigator.userLanguage || 'ja').toLowerCase();
+      lang = nav.indexOf('en') === 0 ? 'en' : 'ja';
+    }
+    document.documentElement.setAttribute('lang', lang);
+    document.documentElement.setAttribute('data-lang', lang);
+  })();
+</script>
+</head>
+<body>
+
+<nav>
+  <div class="inner">
+    <a class="brand" href="#">cc<span>nest</span></a>
+    <ul>
+      <li><a href="#install"><span class="lang-ja">インストール</span><span class="lang-en">Install</span></a></li>
+      <li><a href="#keys"><span class="lang-ja">キー</span><span class="lang-en">Keys</span></a></li>
+      <li><a href="#sidebar"><span class="lang-ja">サイドバー</span><span class="lang-en">Sidebar</span></a></li>
+      <li><a href="https://github.com/mitama987/ccnest" target="_blank" rel="noopener">GitHub</a></li>
+      <li class="lang-switch" role="group" aria-label="Language">
+        <button type="button" data-lang-set="ja" class="lang-btn">JA</button>
+        <span class="lang-sep">|</span>
+        <button type="button" data-lang-set="en" class="lang-btn">EN</button>
+      </li>
+    </ul>
+  </div>
+</nav>
+
+<main>
+
+<section class="hero">
+  <img class="logo" src="logo.png" alt="ccnest" width="1186" height="321" />
+  <h1>
+    <span class="lang-ja">Claude Code を多重化。<br />煩わしさはゼロで。</span>
+    <span class="lang-en">Multiplex Claude Code.<br />Without the ceremony.</span>
+  </h1>
+  <p class="tag">
+    <span class="lang-ja"><strong>Claude Code</strong> を中心に設計したターミナル多重化ツール。プレフィックスなしの分割、ペインごとのコンテキスト使用量、遅延展開のファイルツリー（Nerd Font 不要）、そしてプロジェクト直下で <code>claude</code> が起動済みのペイン。</span>
+    <span class="lang-en">A terminal multiplexer built around <strong>Claude Code</strong>. Prefix-less splits, per-pane context usage, a lazy-expand file tree (no Nerd Font needed), and panes that actually start in your project with <code>claude</code> already running.</span>
+  </p>
+  <div class="cta">
+    <a class="btn primary" href="#install"><span class="lang-ja">インストール</span><span class="lang-en">Install</span></a>
+    <a class="btn" href="https://github.com/mitama987/ccnest" target="_blank" rel="noopener"><span class="lang-ja">GitHub で見る</span><span class="lang-en">View on GitHub</span></a>
+  </div>
+  <div class="install-cmd">
+    <span class="prompt">$</span>
+    <span class="cmd" id="install-cmd">npm install -g ccnest-cli</span>
+    <button id="install-copy-btn" data-ja-copy="コピー" data-en-copy="Copy" data-ja-copied="コピーしました" data-en-copied="Copied">Copy</button>
+  </div>
+</section>
+
+<section class="mockup-wrap" aria-label="What ccnest looks like when running">
+  <div class="mockup">
+    <div class="mockup-title">
+      <div class="dots"><span class="dot r"></span><span class="dot y"></span><span class="dot g"></span></div>
+      <div class="path">~/projects/ccnest — ccnest</div>
+    </div>
+    <div class="mockup-body">
+      <aside class="mockup-sidebar">
+        <div class="sec-tabs">
+          <span class="active"><span class="lang-ja">ファイル (1)</span><span class="lang-en">Files (1)</span></span>
+          <span>Claude (2)</span>
+          <span>Git (3)</span>
+          <span><span class="lang-ja">ペイン (4)</span><span class="lang-en">Panes (4)</span></span>
+        </div>
+        <div class="tree">
+          <div><span class="dir">▾ 📁 src/</span></div>
+          <div>&nbsp;&nbsp;<span class="dir">▸ 📁 pane/</span></div>
+          <div>&nbsp;&nbsp;<span class="dir">▸ 📁 sidebar/</span></div>
+          <div>&nbsp;&nbsp;<span class="dir">▸ 📁 ui/</span></div>
+          <div>&nbsp;&nbsp;<span class="sel">&nbsp;🦀 app.rs&nbsp;&nbsp;&nbsp;</span></div>
+          <div>&nbsp;&nbsp;🦀 event.rs</div>
+          <div>&nbsp;&nbsp;🦀 keymap.rs</div>
+          <div>&nbsp;&nbsp;🦀 main.rs</div>
+          <div><span class="dir">▸ 📁 docs/</span></div>
+          <div>⚙ Cargo.toml</div>
+          <div>📝 README.md</div>
+          <br />
+          <div class="dim">──────────</div>
+          <div class="dim">ctx  168k / 1000k</div>
+          <div class="dim">git  main  M 4  ?? 2</div>
+        </div>
+      </aside>
+      <div class="mockup-main">
+        <div class="mockup-tabs">
+          <span class="tab active"> ccnest </span>
+          <span class="tab"> notes </span>
+        </div>
+        <div class="mockup-panes">
+          <div class="pane focused">
+            <div class="ptitle">[1] claude.exe ◉ <span class="lang-ja">アクティブ</span><span class="lang-en">focused</span></div>
+            <div class="line logo">  ▐▛███▜▌   Claude Code v2.1.117
+▝▜█████▛▘  Opus 4.7 (1M context)
+  ▘▘ ▝▝    ~/projects/ccnest</div>
+            <div class="line dim">───────────────────────────────────</div>
+            <div class="line prompt"><span class="lang-ja">❯ &nbsp;keymap を match ではなく単一テーブル</span><span class="lang-en">❯ &nbsp;refactor the keymap to use</span></div>
+            <div class="line prompt"><span class="lang-ja">&nbsp;&nbsp;でリファクタしたい</span><span class="lang-en">&nbsp;&nbsp;a single table instead of match_</span></div>
+            <div class="line dim"><span class="lang-ja">&nbsp;&nbsp;⏸ プランモード ON</span><span class="lang-en">&nbsp;&nbsp;⏸ plan mode on</span></div>
+          </div>
+          <div class="pane">
+            <div class="ptitle">[2] claude.exe</div>
+            <div class="line"><span class="lang-ja">テスト実行中...</span><span class="lang-en">Running tests...</span></div>
+            <div class="line"><span style="color:var(--green)">✓</span> <span class="lang-ja">23 件成功</span><span class="lang-en">23 passed</span> <span class="dim">(0.12s)</span></div>
+            <div class="line"><span style="color:var(--green)">✓</span> clippy clean</div>
+            <div class="line dim">───────────────────────────────────</div>
+            <div class="line prompt">❯ cargo build --release</div>
+            <div class="line dim">&nbsp;&nbsp;&nbsp;Compiling ccnest v0.1.1</div>
+          </div>
+        </div>
+        <div class="mockup-status">
+          <div>cwd: ~/projects/ccnest</div>
+          <div class="hint">
+            <span class="lang-ja">Ctrl+D:┃  Ctrl+E:━  Ctrl+T:タブ  Ctrl+W:閉じる  Ctrl+F:ファイル  F2:名称変更  Ctrl+C×2:シェル  Ctrl+Q:終了</span>
+            <span class="lang-en">Ctrl+D:┃  Ctrl+E:━  Ctrl+T:tab  Ctrl+W:close  Ctrl+F:files  F2:rename  Ctrl+C×2:shell  Ctrl+Q:quit</span>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<section>
+  <h2><span class="lang-ja">ccnest の特徴</span><span class="lang-en">Why ccnest</span></h2>
+  <div class="features">
+    <div class="feature">
+      <div class="icon">┃━</div>
+      <h3><span class="lang-ja">プレフィックスなしで分割</span><span class="lang-en">Prefix-less splits</span></h3>
+      <p>
+        <span class="lang-ja">
+          <kbd style="font-family:JetBrains Mono;background:#1a1a22;border:1px solid #3a3a44;padding:0.05rem 0.4rem;border-radius:3px;font-size:0.82rem;">Ctrl+D</kbd>
+          で右分割、
+          <kbd style="font-family:JetBrains Mono;background:#1a1a22;border:1px solid #3a3a44;padding:0.05rem 0.4rem;border-radius:3px;font-size:0.82rem;">Ctrl+E</kbd>
+          で下分割。tmux のリーダーキー連打は不要です。
+        </span>
+        <span class="lang-en">
+          <kbd style="font-family:JetBrains Mono;background:#1a1a22;border:1px solid #3a3a44;padding:0.05rem 0.4rem;border-radius:3px;font-size:0.82rem;">Ctrl+D</kbd>
+          splits right,
+          <kbd style="font-family:JetBrains Mono;background:#1a1a22;border:1px solid #3a3a44;padding:0.05rem 0.4rem;border-radius:3px;font-size:0.82rem;">Ctrl+E</kbd>
+          splits down. No tmux leader-key dance.
+        </span>
+      </p>
+    </div>
+    <div class="feature">
+      <div class="icon">◉</div>
+      <h3><span class="lang-ja">ペインは Claude 起動済み</span><span class="lang-en">Panes start with Claude</span></h3>
+      <p>
+        <span class="lang-ja">新しく開くペインは現在のフォルダで <code>claude --session-id &lt;uuid&gt;</code> を即座に起動します。設定不要。</span>
+        <span class="lang-en">Every new pane spawns <code>claude --session-id &lt;uuid&gt;</code> in your current folder. No setup.</span>
+      </p>
+    </div>
+    <div class="feature">
+      <div class="icon">%</div>
+      <h3><span class="lang-ja">ペインごとのコンテキスト使用量</span><span class="lang-en">Per-pane context usage</span></h3>
+      <p>
+        <span class="lang-ja">各ペインのセッションに対応する Claude Code の JSONL ログを読み、残りコンテキストをリアルタイムで表示します。</span>
+        <span class="lang-en">Reads the Claude Code JSONL log for each pane's session and shows remaining context live.</span>
+      </p>
+    </div>
+    <div class="feature">
+      <div class="icon">⌨</div>
+      <h3><span class="lang-ja">キーボードファーストの操作</span><span class="lang-en">Keyboard-first navigation</span></h3>
+      <p>
+        <span class="lang-ja">Alt+矢印でタブ移動、Ctrl+矢印でペイン移動、F2 でリネーム。サイドバーでは反転白ブロックの選択カーソルが行を示します。</span>
+        <span class="lang-en">Alt+arrow tabs, Ctrl+arrow panes, F2 to rename. White-block selection cursor in the sidebar.</span>
+      </p>
+    </div>
+  </div>
+</section>
+
+<section id="install">
+  <h2><span class="lang-ja">インストール</span><span class="lang-en">Install</span></h2>
+  <p>
+    <span class="lang-ja">ccnest を入れる方法は2つあります: <strong>npm でビルド済みバイナリを取得</strong>（最速・Rust不要）か、<strong>ソースからビルド</strong>（Rust ツールチェインが必要）か。Claude 連携の恩恵を受けるには <a href="https://www.anthropic.com/claude-code" target="_blank" rel="noopener">claude</a> CLI が <code>PATH</code> に通っている必要があります。<code>claude</code> が見つからない場合はシステムシェルにフォールバックするので、多重化ツールとしては動作します。</span>
+    <span class="lang-en">There are two ways to install ccnest: <strong>grab a prebuilt binary via npm</strong> (fastest, no Rust required) or <strong>build from source</strong> (needs the Rust toolchain). To actually benefit from the Claude integration you also need the <a href="https://www.anthropic.com/claude-code" target="_blank" rel="noopener">claude</a> CLI on your <code>PATH</code>. If <code>claude</code> is not found, panes fall back to the system shell so the multiplexer is still usable.</span>
+  </p>
+
+  <h3 style="margin-top:2rem;">
+    <span class="lang-ja">npm で <span class="mono" style="color:var(--dim);font-weight:400;font-size:0.9rem;">（最速・推奨）</span></span>
+    <span class="lang-en">Via npm <span class="mono" style="color:var(--dim);font-weight:400;font-size:0.9rem;">(fastest, recommended)</span></span>
+  </h3>
+  <p style="color:var(--dim);font-size:0.92rem;">
+    <span class="lang-ja">postinstall で OS/アーキテクチャに合ったビルド済みバイナリを <a href="https://github.com/mitama987/ccnest/releases" target="_blank" rel="noopener">GitHub Releases</a> から取得し、<code>PATH</code> に <code>ccnest</code> として配置します。Rust ツールチェインは不要、所要時間は数秒〜数十秒です。</span>
+    <span class="lang-en">The postinstall step downloads the prebuilt binary for your OS / arch from <a href="https://github.com/mitama987/ccnest/releases" target="_blank" rel="noopener">GitHub Releases</a> and installs it on your <code>PATH</code> as <code>ccnest</code>. No Rust toolchain required; takes a few seconds.</span>
+  </p>
+<pre class="code"><span class="p">$</span> npm install -g ccnest-cli</pre>
+  <p style="color:var(--dim);font-size:0.92rem;">
+    <span class="lang-ja">対応プラットフォーム: Windows x64 / macOS arm64 / macOS x64 / Linux x64。<a href="https://www.npmjs.com/package/ccnest-cli" target="_blank" rel="noopener">npm: ccnest-cli</a></span>
+    <span class="lang-en">Supported platforms: Windows x64 / macOS arm64 / macOS x64 / Linux x64. <a href="https://www.npmjs.com/package/ccnest-cli" target="_blank" rel="noopener">npm: ccnest-cli</a></span>
+  </p>
+
+  <h3 style="margin-top:2.5rem;">
+    <span class="lang-ja">Rust（cargo）がまだない場合 <span class="mono" style="color:var(--dim);font-weight:400;font-size:0.9rem;">（ソースからビルドしたい人向け / rustup で入れる）</span></span>
+    <span class="lang-en">If you don't have Rust (cargo) yet <span class="mono" style="color:var(--dim);font-weight:400;font-size:0.9rem;">(only needed to build from source / install via rustup)</span></span>
+  </h3>
+  <p style="color:var(--dim);font-size:0.92rem;">
+    <span class="lang-ja"><code>cargo --version</code> が通らない場合は Rust ツールチェインがまだ入っていません。<a href="https://rustup.rs" target="_blank" rel="noopener">rustup</a> は Rust 公式のインストーラで、コンパイラ・<code>cargo</code>・<code>rustfmt</code>・<code>clippy</code> をひと揃え入れてくれます。</span>
+    <span class="lang-en">If <code>cargo --version</code> fails, you don't have a Rust toolchain yet. <a href="https://rustup.rs" target="_blank" rel="noopener">rustup</a> is Rust's official installer and pulls in the compiler, <code>cargo</code>, <code>rustfmt</code>, and <code>clippy</code> in one shot.</span>
+  </p>
+<pre class="code"><span class="c lang-ja"># macOS / Linux: curl でワンライナー</span><span class="c lang-en"># macOS / Linux: one-liner via curl</span>
+<span class="p">$</span> curl --proto <span class="s">'=https'</span> --tlsv1.2 -sSf https://sh.rustup.rs | sh
+<span class="p">$</span> source <span class="s">"$HOME/.cargo/env"</span>     <span class="c lang-ja"># 同じシェルですぐ使うとき</span><span class="c lang-en"># to use it in the current shell</span>
+
+<span class="c lang-ja"># Windows: winget で入れる（PowerShell）</span><span class="c lang-en"># Windows: install via winget (PowerShell)</span>
+<span class="p">&gt;</span> winget install Rustlang.Rustup
+<span class="p">&gt;</span> rustup default stable           <span class="c lang-ja"># 安定版ツールチェインを既定に</span><span class="c lang-en"># set stable as the default toolchain</span>
+
+<span class="c lang-ja"># 入ったか確認</span><span class="c lang-en"># verify</span>
+<span class="p">$</span> cargo --version</pre>
+  <p style="color:var(--dim);font-size:0.92rem;">
+    <span class="lang-ja">インストール後はターミナルを開き直してから次のステップに進んでください。Windows で winget が使えない場合は <a href="https://rustup.rs" target="_blank" rel="noopener">rustup.rs</a> から <code>rustup-init.exe</code> を入手して実行できます。</span>
+    <span class="lang-en">Restart your terminal after installation, then continue to the next step. If <code>winget</code> isn't available on Windows, grab <code>rustup-init.exe</code> from <a href="https://rustup.rs" target="_blank" rel="noopener">rustup.rs</a> and run it.</span>
+  </p>
+
+  <h3 style="margin-top:2rem;">
+    <span class="lang-ja">cargo で <span class="mono" style="color:var(--dim);font-weight:400;font-size:0.9rem;">（ソースからビルド）</span></span>
+    <span class="lang-en">Via cargo <span class="mono" style="color:var(--dim);font-weight:400;font-size:0.9rem;">(build from source)</span></span>
+  </h3>
+<pre class="code"><span class="c lang-ja"># clone してインストール — ~/.cargo/bin に配置されます</span><span class="c lang-en"># clone &amp; install — lands in ~/.cargo/bin</span>
+<span class="p">$</span> git clone https://github.com/mitama987/ccnest
+<span class="p">$</span> cd ccnest
+<span class="p">$</span> cargo install --path .</pre>
+
+  <h3 style="margin-top:2rem;">
+    <span class="lang-ja">PowerShell スクリプトで <span class="mono" style="color:var(--dim);font-weight:400;font-size:0.9rem;">（Windows、<code>~/.local/bin</code> に配置）</span></span>
+    <span class="lang-en">Via PowerShell script <span class="mono" style="color:var(--dim);font-weight:400;font-size:0.9rem;">(Windows, installs to <code>~/.local/bin</code>)</span></span>
+  </h3>
+<pre class="code"><span class="p">&gt;</span> git clone https://github.com/mitama987/ccnest
+<span class="p">&gt;</span> cd ccnest
+<span class="p">&gt;</span> pwsh .\scripts\install.ps1</pre>
+
+  <h3 style="margin-top:2rem;"><span class="lang-ja">起動</span><span class="lang-en">Launch</span></h3>
+<pre class="code"><span class="p">$</span> ccnest                     <span class="c lang-ja"># cwd を最初のペインのディレクトリにする</span><span class="c lang-en"># use cwd as the first pane's directory</span>
+<span class="p">$</span> ccnest path/to/project</pre>
+  <p style="color:var(--dim);font-size:0.92rem;">
+    <span class="lang-ja">ccnest は alternate screen で開きます。<kbd>Ctrl+Q</kbd> で終了、<kbd>Ctrl+W</kbd> で個別ペインを閉じられます。</span>
+    <span class="lang-en">ccnest opens in an alternate screen. Press <kbd>Ctrl+Q</kbd> to exit, or <kbd>Ctrl+W</kbd> to close individual panes.</span>
+  </p>
+</section>
+
+<section id="keys">
+  <h2><span class="lang-ja">キーバインド</span><span class="lang-en">Keybindings</span></h2>
+  <p>
+    <span class="lang-ja">ccnest が捕捉するのは少数の修飾キー組み合わせだけです。それ以外はすべてフォーカス中のペインへ素通しされるので、Claude Code のキーバインドはそのまま使えます。</span>
+    <span class="lang-en">ccnest intercepts a small set of modifier-combos before the pty sees them. Everything else passes straight through to the focused pane, so Claude Code keybindings keep working.</span>
+  </p>
+  <table class="keys-table">
+    <thead>
+      <tr>
+        <th><span class="lang-ja">キー</span><span class="lang-en">Key</span></th>
+        <th><span class="lang-ja">動作</span><span class="lang-en">Action</span></th>
+      </tr>
+    </thead>
+    <tbody>
+      <tr><td><kbd>Ctrl+D</kbd></td><td>
+        <span class="lang-ja">フォーカス中のペインを縦分割（右側に新しい <code>claude</code>）</span>
+        <span class="lang-en">Split the focused pane vertically (new <code>claude</code> to the right)</span>
+      </td></tr>
+      <tr><td><kbd>Ctrl+E</kbd></td><td>
+        <span class="lang-ja">フォーカス中のペインを横分割（下側に新しい <code>claude</code>）</span>
+        <span class="lang-en">Split the focused pane horizontally (new <code>claude</code> below)</span>
+      </td></tr>
+      <tr><td><kbd>Ctrl+T</kbd></td><td>
+        <span class="lang-ja">新しいタブを開き、<code>claude</code> ペインを起動</span>
+        <span class="lang-en">New tab with a fresh <code>claude</code> pane</span>
+      </td></tr>
+      <tr><td><kbd>Ctrl+W</kbd></td><td>
+        <span class="lang-ja">フォーカス中のペインを閉じる</span>
+        <span class="lang-en">Close the focused pane</span>
+      </td></tr>
+      <tr><td><kbd>Alt+←</kbd> / <kbd>Alt+→</kbd></td><td>
+        <span class="lang-ja">前 / 次のタブへ</span>
+        <span class="lang-en">Previous / next tab</span>
+      </td></tr>
+      <tr><td><kbd>Ctrl+Tab</kbd> / <kbd>Ctrl+Shift+Tab</kbd></td><td>
+        <span class="lang-ja">前 / 次のタブへ（別名）</span>
+        <span class="lang-en">Previous / next tab (alias)</span>
+      </td></tr>
+      <tr><td><kbd>F2</kbd></td><td>
+        <span class="lang-ja">アクティブタブをリネーム（Enter で確定、Esc でキャンセル）</span>
+        <span class="lang-en">Rename the active tab (Enter to commit, Esc to cancel)</span>
+      </td></tr>
+      <tr><td><kbd>Ctrl+←</kbd> / <kbd>Ctrl+→</kbd> / <kbd>Ctrl+↑</kbd> / <kbd>Ctrl+↓</kbd></td><td>
+        <span class="lang-ja">ペイン間でフォーカスを移動</span>
+        <span class="lang-en">Move pane focus</span>
+      </td></tr>
+      <tr><td><kbd>Ctrl+F</kbd></td><td>
+        <span class="lang-ja">ファイルツリーをトグル（Files セクションへ移動、すでに Files なら閉じる）</span>
+        <span class="lang-en">Toggle the file tree (opens to Files, closes when already on Files)</span>
+      </td></tr>
+      <tr><td><kbd>Ctrl+B</kbd></td><td>
+        <span class="lang-ja">左サイドバー全体をトグル</span>
+        <span class="lang-en">Toggle the entire left sidebar</span>
+      </td></tr>
+      <tr><td><kbd>Ctrl+1</kbd> .. <kbd>Ctrl+4</kbd></td><td>
+        <span class="lang-ja">サイドバーのセクションへジャンプ（Files / Claude / Git / Panes）</span>
+        <span class="lang-en">Jump to sidebar section (Files / Claude / Git / Panes)</span>
+      </td></tr>
+      <tr><td><kbd>Tab</kbd> <em style="color:var(--dim)"><span class="lang-ja">（サイドバーフォーカス時）</span><span class="lang-en">(sidebar focused)</span></em></td><td>
+        <span class="lang-ja">サイドバーのセクションを循環</span>
+        <span class="lang-en">Cycle sidebar sections</span>
+      </td></tr>
+      <tr><td><kbd>↑</kbd> / <kbd>↓</kbd> / <kbd>j</kbd> / <kbd>k</kbd> <em style="color:var(--dim)"><span class="lang-ja">（サイドバー）</span><span class="lang-en">(sidebar)</span></em></td><td>
+        <span class="lang-ja">選択カーソルを移動</span>
+        <span class="lang-en">Move selection cursor</span>
+      </td></tr>
+      <tr><td><kbd>Enter</kbd> <em style="color:var(--dim)"><span class="lang-ja">（フォルダ行）</span><span class="lang-en">(on a folder row)</span></em></td><td>
+        <span class="lang-ja">展開 / 折りたたみをトグル（子は遅延ロード）</span>
+        <span class="lang-en">Toggle expand / collapse (loads children lazily)</span>
+      </td></tr>
+      <tr><td><kbd>Enter</kbd> <em style="color:var(--dim)"><span class="lang-ja">（ファイル行）</span><span class="lang-en">(on a file row)</span></em></td><td>
+        <span class="lang-ja"><code>$EDITOR</code> で開く（フォールバックは <code>code</code>）</span>
+        <span class="lang-en">Open in <code>$EDITOR</code> (falls back to <code>code</code>)</span>
+      </td></tr>
+      <tr><td>
+        <span class="lang-ja">マウス左クリック</span><span class="lang-en">Mouse left-click</span>
+        <em style="color:var(--dim)"><span class="lang-ja">（ファイルツリーの行）</span><span class="lang-en">(file tree row)</span></em>
+      </td><td>
+        <span class="lang-ja">フォルダは展開 / 折りたたみ。ファイルは <code>$EDITOR</code> で開く。</span>
+        <span class="lang-en">Folders: toggle expand / collapse. Files: open in <code>$EDITOR</code>.</span>
+      </td></tr>
+      <tr><td><kbd>Ctrl+Q</kbd></td><td>
+        <span class="lang-ja">ccnest を終了</span>
+        <span class="lang-en">Quit ccnest</span>
+      </td></tr>
+      <tr><td colspan="2" style="background:var(--panel-2);color:var(--dim);font-size:0.78rem;text-transform:uppercase;letter-spacing:0.05em;padding:0.5rem 0.8rem;">
+        <span class="lang-ja">フォーカス中のペインに転送</span>
+        <span class="lang-en">Forwarded to the focused pane</span>
+      </td></tr>
+      <tr><td><kbd>Shift+Tab</kbd></td><td>
+        <span class="lang-ja">バックタブ（<code>CSI Z</code>）として送信 — Claude のモード切替（default → auto-accept → plan）を駆動</span>
+        <span class="lang-en">Sent as back-tab (<code>CSI Z</code>) — drives Claude's mode cycle (default → auto-accept → plan)</span>
+      </td></tr>
+      <tr><td><kbd>Shift+Enter</kbd> / <kbd>Ctrl+Enter</kbd></td><td>
+        <span class="lang-ja">送信せず、プロンプトに改行を挿入（<code>ESC + CR</code> として送信）</span>
+        <span class="lang-en">Insert a newline in the prompt instead of submitting (sent as <code>ESC + CR</code>)</span>
+      </td></tr>
+      <tr><td colspan="2" style="background:var(--panel-2);color:var(--dim);font-size:0.78rem;text-transform:uppercase;letter-spacing:0.05em;padding:0.5rem 0.8rem;">
+        <span class="lang-ja">スクロールバック（ペインあたり 2000 行）</span>
+        <span class="lang-en">Scrollback (2000 lines per pane)</span>
+      </td></tr>
+      <tr><td><span class="lang-ja">マウスホイール</span><span class="lang-en">Mouse wheel</span></td><td>
+        <span class="lang-ja">カーソル下のペインの履歴をスクロール（1 ノッチ 3 行）</span>
+        <span class="lang-en">Scroll history in the pane under the cursor (3 lines / tick)</span>
+      </td></tr>
+      <tr><td><kbd>Shift+PageUp</kbd> / <kbd>Shift+PageDown</kbd></td><td>
+        <span class="lang-ja">フォーカス中のペインを 1 画面ぶんスクロール</span>
+        <span class="lang-en">Scroll the focused pane one screen of history</span>
+      </td></tr>
+      <tr><td><kbd>Shift+↑</kbd> / <kbd>Shift+↓</kbd></td><td>
+        <span class="lang-ja">フォーカス中のペインを 1 行ぶんスクロール</span>
+        <span class="lang-en">Scroll the focused pane one line of history</span>
+      </td></tr>
+      <tr><td><em style="color:var(--dim)"><span class="lang-ja">任意のキー入力</span><span class="lang-en">any keystroke</span></em></td><td>
+        <span class="lang-ja">ライブ末尾までスナップ（<code>set_scrollback(0)</code>）</span>
+        <span class="lang-en">Snaps the view back to the live tail (<code>set_scrollback(0)</code>)</span>
+      </td></tr>
+    </tbody>
+  </table>
+  <p style="color:var(--dim);font-size:0.92rem;margin-top:1.2rem;">
+    <span class="lang-ja">注意: <kbd>Ctrl+D</kbd> は捕捉されるため、<code>claude</code> に EOF は送られません。Claude を終わらせるには中で <code>/exit</code>、または <kbd>Ctrl+W</kbd> で外側からペインを閉じてください。素の <kbd>PageUp</kbd> / <kbd>PageDown</kbd> は <code>claude</code> へ素通しで、<kbd>Shift</kbd> 付きの場合だけ ccnest のスクロールバックを操作します。</span>
+    <span class="lang-en">Heads-up: <kbd>Ctrl+D</kbd> is captured, so it will not send EOF to <code>claude</code>. Use <code>/exit</code> inside Claude, or <kbd>Ctrl+W</kbd> to close the pane from the outside. Plain <kbd>PageUp</kbd> / <kbd>PageDown</kbd> still pass through to <code>claude</code> — only the <kbd>Shift</kbd>-modified variants drive ccnest's scrollback.</span>
+  </p>
+  <div style="margin-top:1.2rem;padding:1rem 1.2rem;background:var(--panel-2);border:1px solid var(--border-strong);border-left:3px solid var(--claude);border-radius:6px;font-size:0.92rem;color:#d0d0d8;">
+    <span class="lang-ja"><strong style="color:var(--claude);">Windows Terminal をお使いの方へ:</strong> WT のデフォルトキーバインドが <kbd>Ctrl+T</kbd>（新規タブ）、<kbd>Ctrl+D</kbd>（ペイン分割）、<kbd>Ctrl+W</kbd>（ペインを閉じる）、<kbd>Alt+←</kbd>/<kbd>Alt+→</kbd>（前/次タブ）を ccnest より先に捕捉します。<code>settings.json</code> でこれらを削除またはリバインドして、ccnest にキーが届くようにしてください。</span>
+    <span class="lang-en"><strong style="color:var(--claude);">Windows Terminal users:</strong> WT's default keybindings for <kbd>Ctrl+T</kbd> (new tab), <kbd>Ctrl+D</kbd> (split pane), <kbd>Ctrl+W</kbd> (close pane), and <kbd>Alt+←</kbd>/<kbd>Alt+→</kbd> (prev/next tab) intercept these keys before they reach ccnest. Remove or rebind them in <code>settings.json</code> so ccnest sees them.</span>
+  </div>
+</section>
+
+<section id="sidebar">
+  <h2><span class="lang-ja">サイドバー</span><span class="lang-en">The sidebar</span></h2>
+  <p>
+    <span class="lang-ja">左サイドバーは <strong>デフォルトで非表示</strong> です。<kbd>Ctrl+B</kbd> で全体をトグル、<kbd>Ctrl+F</kbd> でファイルツリーへダイレクトジャンプ。<kbd>Ctrl+1</kbd>..<kbd>Ctrl+4</kbd> で 4 つのセクションへジャンプできます:</span>
+    <span class="lang-en">The left sidebar is <strong>hidden by default</strong>. Press <kbd>Ctrl+B</kbd> to toggle the whole thing, or <kbd>Ctrl+F</kbd> to jump straight to the file tree. It has four sections you can jump to with <kbd>Ctrl+1</kbd>..<kbd>Ctrl+4</kbd>:</span>
+  </p>
+  <ul class="dot-list">
+    <li>
+      <span class="lang-ja"><strong>Files</strong> — <strong>エクスプローラ風の遅延ツリー</strong>。フォルダが先、ファイルが後で、それぞれグループ内はアルファベット順。トップ階層は即座に表示され、深い階層は <kbd>Enter</kbd> やクリックで遅延ロード。アイコンは emoji（📁 🦀 🐍 📝 …）なのでどこでも表示でき、Nerd Font 不要。<code>ignore</code> クレート経由で <code>.gitignore</code> も尊重。</span>
+      <span class="lang-en"><strong>Files</strong> — an <strong>explorer-style lazy tree</strong>: folders first, files second, alphabetical within each group. The top level shows immediately, deeper levels load on demand when you hit <kbd>Enter</kbd> or click a folder. Icons are emoji-based (📁 🦀 🐍 📝 …) so they render anywhere — no Nerd Font required. Honors <code>.gitignore</code> via the <code>ignore</code> crate.</span>
+    </li>
+    <li>
+      <span class="lang-ja"><strong>Claude</strong> — <code>~/.claude/projects/&lt;encoded-cwd&gt;/&lt;session-id&gt;.jsonl</code> をパースして得たペインごとのコンテキスト使用量を表示。各ペインは <code>claude --session-id &lt;uuid&gt;</code> で起動するので、ccnest がどのファイルを読むべきか判別できます。デフォルトの 200k トークンウィンドウは <code>CCNEST_CONTEXT_WINDOW=1000000</code> で 1M コンテキストモデル向けに上書き可能。</span>
+      <span class="lang-en"><strong>Claude</strong> — per-pane context usage parsed from <code>~/.claude/projects/&lt;encoded-cwd&gt;/&lt;session-id&gt;.jsonl</code>. Each pane is launched with <code>claude --session-id &lt;uuid&gt;</code>, so ccnest knows which file to read. Override the default 200k-token window with <code>CCNEST_CONTEXT_WINDOW=1000000</code> for 1M-context models.</span>
+    </li>
+    <li>
+      <span class="lang-ja"><strong>Git</strong> — フォーカスペインの cwd の現在ブランチと、<code>M / S / ?</code> カウントを <code>git2</code> で表示。</span>
+      <span class="lang-en"><strong>Git</strong> — current branch plus <code>M / S / ?</code> counts for the focused pane's cwd, via <code>git2</code>.</span>
+    </li>
+    <li>
+      <span class="lang-ja"><strong>Panes</strong> — 現在のタブ内の全ペインの一覧。アクティブなペインと、Claude が動いているかどうかを表示。</span>
+      <span class="lang-en"><strong>Panes</strong> — a list of every pane in the current tab, marking the active pane and whether Claude is running.</span>
+    </li>
+  </ul>
+  <p style="color:var(--dim);font-size:0.92rem;margin-top:1.2rem;">
+    <span class="lang-ja">選択カーソルは行全体に渡る反転白ブロック。これこそが ccnest を作った最初の動機でした。</span>
+    <span class="lang-en">The selection cursor is a solid reversed-white block, rendered across the full row. It was the original motivation for building ccnest.</span>
+  </p>
+</section>
+
+<section>
+  <h2><span class="lang-ja">ステータスとロードマップ</span><span class="lang-en">Status &amp; roadmap</span></h2>
+  <p>
+    <span class="lang-ja">ccnest は <strong>v0.1.1</strong> — Windows 優先、Rust 製、シングルバイナリです。コアループ（分割 / フォーカス / サイドバー / Claude JSONL パース）は安定しており、テスト済み。プロダクションソフトウェアではないので、Windows 以外のターミナルや変則的な PTY 構成では尖った挙動を予想してください。</span>
+    <span class="lang-en">ccnest is <strong>v0.1.1</strong> — Windows-first, Rust, single binary. The core loop (split / focus / sidebar / Claude JSONL parsing) is stable and tested. Not production software; expect sharp edges around non-Windows terminals and exotic PTY configurations.</span>
+  </p>
+  <ul class="dot-list">
+    <li>
+      <span class="lang-ja"><strong>v0.2</strong> — macOS / Linux 対応、設定ファイル、テーマ、セッションの保存と復元。</span>
+      <span class="lang-en"><strong>v0.2</strong> — macOS / Linux support, config file, themes, session save/restore.</span>
+    </li>
+    <li>
+      <span class="lang-ja"><strong>v0.3</strong> — リッチなマウス対応（ドラッグでリサイズ、クリックでフォーカス）、プラグイン、サイドバーへの git diff プレビュー。</span>
+      <span class="lang-en"><strong>v0.3</strong> — richer mouse support (drag-to-resize, click-to-focus), plugins, git diff preview in the sidebar.</span>
+    </li>
+  </ul>
+  <p style="margin-top:1.5rem;">
+    <span class="lang-ja">issue や PR は <a href="https://github.com/mitama987/ccnest" target="_blank" rel="noopener">GitHub</a> までどうぞ。</span>
+    <span class="lang-en">File issues and PRs on <a href="https://github.com/mitama987/ccnest" target="_blank" rel="noopener">GitHub</a>.</span>
+  </p>
+</section>
+
+</main>
+
+<footer>
+  <div class="links">
+    <a href="https://github.com/mitama987/ccnest" target="_blank" rel="noopener">GitHub</a>
+    <a href="https://github.com/mitama987/ccnest/blob/main/README.md" target="_blank" rel="noopener">README</a>
+    <a href="https://github.com/mitama987/ccnest/issues" target="_blank" rel="noopener">Issues</a>
+    <a href="https://www.anthropic.com/claude-code" target="_blank" rel="noopener">Claude Code</a>
+  </div>
+  <div>
+    <span class="lang-ja">ccnest — MIT ライセンス。Rust、ratatui、crossterm、portable-pty、vt100 で構築。</span>
+    <span class="lang-en">ccnest — MIT licensed. Built with Rust, ratatui, crossterm, portable-pty, and vt100.</span>
+  </div>
+</footer>
+
+<script>
+  (function () {
+    var KEY = 'ccnest-lang';
+
+    function applyMeta(lang) {
+      var el;
+      el = document.querySelector('title');
+      if (el && el.getAttribute('data-' + lang)) el.textContent = el.getAttribute('data-' + lang);
+      var metas = [
+        document.querySelector('meta[name="description"]'),
+        document.querySelector('meta[property="og:title"]'),
+        document.querySelector('meta[property="og:description"]')
+      ];
+      metas.forEach(function (m) {
+        if (m && m.getAttribute('data-' + lang)) {
+          m.setAttribute('content', m.getAttribute('data-' + lang));
+        }
+      });
+    }
+
+    function applyCopyBtn(lang) {
+      var btn = document.getElementById('install-copy-btn');
+      if (!btn) return;
+      var label = btn.getAttribute('data-' + lang + '-copy');
+      if (label) btn.textContent = label;
+    }
+
+    function setLang(lang, persist) {
+      document.documentElement.setAttribute('lang', lang);
+      document.documentElement.setAttribute('data-lang', lang);
+      applyMeta(lang);
+      applyCopyBtn(lang);
+      if (persist) {
+        try { localStorage.setItem(KEY, lang); } catch (e) {}
+      }
+    }
+
+    document.querySelectorAll('[data-lang-set]').forEach(function (btn) {
+      btn.addEventListener('click', function () {
+        setLang(btn.getAttribute('data-lang-set'), true);
+      });
+    });
+
+    var initial = document.documentElement.getAttribute('data-lang') || 'ja';
+    applyMeta(initial);
+    applyCopyBtn(initial);
+
+    var copyBtn = document.getElementById('install-copy-btn');
+    if (copyBtn) {
+      copyBtn.addEventListener('click', function () {
+        var lang = document.documentElement.getAttribute('data-lang') || 'ja';
+        var cmd = document.getElementById('install-cmd').textContent;
+        navigator.clipboard.writeText(cmd);
+        var copied = copyBtn.getAttribute('data-' + lang + '-copied') || 'Copied';
+        var copy = copyBtn.getAttribute('data-' + lang + '-copy') || 'Copy';
+        copyBtn.textContent = copied;
+        setTimeout(function () { copyBtn.textContent = copy; }, 1500);
+      });
+    }
+  })();
+</script>
+
+<!-- Version History
+     ver0.1 - 2026-04-25 - Documented iconized and colorized Files sidebar rows.
+     ver0.2 - 2026-04-25 - Updated mockup (collapsed lazy tree, status bar 2-line),
+                            sidebar default-hidden text, emoji icon callout, keybinding
+                            rows for folder-toggle and mouse click, Windows Terminal
+                            conflict callout, hero tagline tweak.
+     ver0.3 - 2026-04-25 - Replaced ASCII art hero logo with raster logo (logo.png),
+                            added og:image meta.
+     ver0.4 - 2026-04-25 - New logo with transparent background and tight crop
+                            (1186x321), updated img dimensions.
+     ver0.5 - 2026-04-25 - i18n 対応: 日本語デフォルト + JA|EN タブ切替。
+                            navigator.language で初回判定、localStorage で永続化。
+                            .lang-ja / .lang-en クラス併記方式、メタタグ data-ja/data-en 切替。 -->
+</body>
+</html>

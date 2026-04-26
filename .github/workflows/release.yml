@@ -1,0 +1,114 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+    inputs:
+      dry_run_tag:
+        description: 'Dry-run tag (artifacts only, no GitHub Release). Leave empty to skip.'
+        required: false
+        default: ''
+
+jobs:
+  build:
+    name: Build ${{ matrix.target }}
+    runs-on: ${{ matrix.os }}
+    permissions:
+      contents: write
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+            asset: ccnest-windows-x64.exe
+            src_bin: ccnest.exe
+          - os: macos-latest
+            target: aarch64-apple-darwin
+            asset: ccnest-macos-arm64
+            src_bin: ccnest
+          - os: macos-latest
+            target: x86_64-apple-darwin
+            asset: ccnest-macos-x64
+            src_bin: ccnest
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+            asset: ccnest-linux-x64
+            src_bin: ccnest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.target }}
+
+      - name: Build release binary
+        shell: bash
+        run: cargo build --release --target ${{ matrix.target }}
+
+      - name: Stage asset
+        shell: bash
+        run: |
+          mkdir -p dist
+          cp "target/${{ matrix.target }}/release/${{ matrix.src_bin }}" "dist/${{ matrix.asset }}"
+
+      - name: Compute SHA-256
+        shell: bash
+        run: |
+          cd dist
+          if command -v sha256sum >/dev/null 2>&1; then
+            sha256sum "${{ matrix.asset }}" > "${{ matrix.asset }}.sha256"
+          else
+            shasum -a 256 "${{ matrix.asset }}" > "${{ matrix.asset }}.sha256"
+          fi
+          cat "${{ matrix.asset }}.sha256"
+
+      - name: Upload as workflow artifact (always)
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.asset }}
+          path: |
+            dist/${{ matrix.asset }}
+            dist/${{ matrix.asset }}.sha256
+          if-no-files-found: error
+
+      - name: Upload to GitHub Release (tag pushes only)
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            dist/${{ matrix.asset }}
+            dist/${{ matrix.asset }}.sha256
+          generate_release_notes: true
+          fail_on_unmatched_files: true
+
+  checksums:
+    name: Aggregate checksums.txt
+    needs: build
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      - name: Build checksums.txt
+        run: |
+          mkdir -p out
+          find artifacts -name '*.sha256' -exec cat {} + | sort > out/checksums.txt
+          cat out/checksums.txt
+
+      - name: Upload checksums.txt to release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: out/checksums.txt
+          fail_on_unmatched_files: true
