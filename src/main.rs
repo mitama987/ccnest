@@ -91,7 +91,11 @@ fn write_crash_log(info: &std::panic::PanicHookInfo<'_>) -> Option<PathBuf> {
         .append(true)
         .open(&path)
         .ok()?;
-    let _ = writeln!(file, "ccnest panic at {}", chrono::Local::now().to_rfc3339());
+    let _ = writeln!(
+        file,
+        "ccnest panic at {}",
+        chrono::Local::now().to_rfc3339()
+    );
     let _ = writeln!(file, "version: {}", env!("CARGO_PKG_VERSION"));
     let _ = writeln!(file, "{info}");
     let _ = writeln!(file, "{}", Backtrace::force_capture());
