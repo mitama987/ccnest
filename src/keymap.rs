@@ -35,8 +35,8 @@ pub fn resolve(ev: &KeyEvent, sidebar_focused: bool) -> Action {
     let alt = ev.modifiers.contains(KeyModifiers::ALT);
     let shift = ev.modifiers.contains(KeyModifiers::SHIFT);
 
-    // F2 → begin rename (no modifier required).
-    if let KeyCode::F(2) = ev.code {
+    // Alt+F → begin rename. (Ctrl+F は ToggleFileTree なので衝突しない。)
+    if alt && matches!(ev.code, KeyCode::Char('f') | KeyCode::Char('F')) {
         return Action::BeginRenameTab;
     }
 
@@ -194,9 +194,13 @@ mod tests {
     }
 
     #[test]
-    fn f2_begins_rename() {
+    fn alt_f_begins_rename() {
         assert_eq!(
-            resolve(&key(KeyCode::F(2), KeyModifiers::NONE), false),
+            resolve(&key(KeyCode::Char('f'), KeyModifiers::ALT), false),
+            Action::BeginRenameTab
+        );
+        assert_eq!(
+            resolve(&key(KeyCode::Char('F'), KeyModifiers::ALT), false),
             Action::BeginRenameTab
         );
     }
