@@ -18,9 +18,18 @@ pub fn run_event_loop<B: Backend>(term: &mut Terminal<B>, mut app: App) -> Resul
     let refresh_every = Duration::from_secs(2);
     let mut pane_rects: HashMap<PaneId, Rect> = HashMap::new();
     let mut sidebar_file_rect: Option<Rect> = None;
+    let mut tab_rects: Vec<(Rect, usize)> = Vec::new();
 
     while !app.quit {
-        term.draw(|f| crate::ui::draw(&app, f, &mut pane_rects, &mut sidebar_file_rect))?;
+        term.draw(|f| {
+            crate::ui::draw(
+                &app,
+                f,
+                &mut pane_rects,
+                &mut sidebar_file_rect,
+                &mut tab_rects,
+            )
+        })?;
 
         if event::poll(tick)? {
             // 同一 tick 内に溜まっているイベントを一気に drain して batch 化する。
@@ -46,7 +55,7 @@ pub fn run_event_loop<B: Backend>(term: &mut Terminal<B>, mut app: App) -> Resul
                     break;
                 }
             }
-            process_batch(&mut app, batch, &pane_rects, sidebar_file_rect)?;
+            process_batch(&mut app, batch, &pane_rects, sidebar_file_rect, &tab_rects)?;
         }
 
         if last_refresh.elapsed() >= refresh_every {
@@ -62,6 +71,7 @@ fn process_batch(
     events: Vec<Event>,
     pane_rects: &HashMap<PaneId, Rect>,
     sidebar_file_rect: Option<Rect>,
+    tab_rects: &[(Rect, usize)],
 ) -> Result<()> {
     let mut i = 0;
     while i < events.len() {
@@ -81,7 +91,7 @@ fn process_batch(
                 handle_key(app, *key, pane_rects)?;
             }
             Event::Mouse(me) => {
-                handle_mouse(app, *me, pane_rects, sidebar_file_rect);
+                handle_mouse(app, *me, pane_rects, sidebar_file_rect, tab_rects);
             }
             Event::Resize(_, _) => {}
             _ => {}
@@ -421,6 +431,7 @@ fn handle_mouse(
     me: MouseEvent,
     pane_rects: &HashMap<PaneId, Rect>,
     sidebar_file_rect: Option<Rect>,
+    tab_rects: &[(Rect, usize)],
 ) {
     use crossterm::event::{MouseButton, MouseEventKind::*};
     let mx = me.column as i32;
@@ -440,6 +451,35 @@ fn handle_mouse(
             }
         }
         Down(MouseButton::Left) => {
+            // タブバー上のクリック → アクティブタブ切替。リネーム中は無視。
+            if app.renaming_tab.is_none() {
+                for (rect, idx) in tab_rects {
+                    if mx >= rect.x
+                        && mx < rect.x + rect.w
+                        && my >= rect.y
+                        && my < rect.y + rect.h
+                    {
+                        app.active_tab = *idx;
+                        app.selection = None;
+                        return;
+                    }
+                }
+            }
+            // Ctrl+Left クリック → クリック位置の URL をデフォルトブラウザで開く。
+            // 通常クリック (選択開始) より優先。
+            if me.modifiers.contains(KeyModifiers::CONTROL) {
+                if let Some((pid, rect)) = find_pane_at(pane_rects, mx, my) {
+                    let lx = (mx - rect.x).clamp(0, rect.w.saturating_sub(1)) as u16;
+                    let ly = (my - rect.y).clamp(0, rect.h.saturating_sub(1)) as u16;
+                    if let Some(pane) = app.panes.get(&pid) {
+                        if let Some(url) = url_at_cell(pane, lx, ly) {
+                            open_url(&url);
+                            app.selection = None;
+                            return;
+                        }
+                    }
+                }
+            }
             // サイドバー Files 領域のクリック → カーソル移動 + Enter と同じ activate を実行。
             // ペイン選択開始ロジックより先に判定し、当てはまれば early return。
             if let Some(rect) = sidebar_file_rect {
@@ -504,6 +544,119 @@ fn find_pane_at(pane_rects: &HashMap<PaneId, Rect>, mx: i32, my: i32) -> Option<
         .iter()
         .find(|(_, r)| mx >= r.x && mx < r.x + r.w && my >= r.y && my < r.y + r.h)
         .map(|(pid, r)| (*pid, *r))
+}
+
+/// クリック位置 (col,row) に重なる URL を、その行の vt100 セル列から検出して返す。
+/// 行内検出のみ (折り返し URL は対象外)。`http://` / `https://` をスキャンし、空白か
+/// 制御文字に当たるまで取り込む。末尾の句読点 (.,;:!?)]>") は URL 外として削る。
+fn url_at_cell(pane: &crate::pane::Pane, col: u16, row: u16) -> Option<String> {
+    let parser = pane.parser.lock().ok()?;
+    let screen = parser.screen();
+    let (_rows, cols) = screen.size();
+
+    // 行の文字列を (char, 表示列) 列として展開。空セルは半角スペース扱い。
+    // ワイド文字や合成は同じ表示列に複数 char が乗ることがあるため pair で持つ。
+    let mut chars: Vec<(char, u16)> = Vec::new();
+    for x in 0..cols {
+        let contents = screen
+            .cell(row, x)
+            .map(|c| c.contents())
+            .unwrap_or_default();
+        if contents.is_empty() {
+            chars.push((' ', x));
+        } else {
+            for ch in contents.chars() {
+                chars.push((ch, x));
+            }
+        }
+    }
+
+    let n = chars.len();
+    let mut i = 0;
+    while i < n {
+        if i + 4 > n {
+            break;
+        }
+        let starts_http = chars[i].0.eq_ignore_ascii_case(&'h')
+            && chars[i + 1].0.eq_ignore_ascii_case(&'t')
+            && chars[i + 2].0.eq_ignore_ascii_case(&'t')
+            && chars[i + 3].0.eq_ignore_ascii_case(&'p');
+        if !starts_http {
+            i += 1;
+            continue;
+        }
+        let scheme_end = if i + 8 <= n
+            && chars[i + 4].0.eq_ignore_ascii_case(&'s')
+            && chars[i + 5].0 == ':'
+            && chars[i + 6].0 == '/'
+            && chars[i + 7].0 == '/'
+        {
+            i + 8
+        } else if i + 7 <= n
+            && chars[i + 4].0 == ':'
+            && chars[i + 5].0 == '/'
+            && chars[i + 6].0 == '/'
+        {
+            i + 7
+        } else {
+            i += 1;
+            continue;
+        };
+
+        let mut end = scheme_end;
+        while end < n {
+            let c = chars[end].0;
+            if c.is_whitespace() || c.is_control() {
+                break;
+            }
+            end += 1;
+        }
+        // 末尾の句読点を URL 外として削る (URL の直後の `.` `,` `)` 等)。
+        while end > scheme_end {
+            let c = chars[end - 1].0;
+            if matches!(
+                c,
+                '.' | ',' | ';' | ':' | '!' | '?' | ')' | ']' | '}' | '>' | '"' | '\''
+            ) {
+                end -= 1;
+            } else {
+                break;
+            }
+        }
+
+        if end > i {
+            let col_start = chars[i].1;
+            let col_end = chars[end - 1].1;
+            if col >= col_start && col <= col_end {
+                let url: String = chars[i..end].iter().map(|(c, _)| *c).collect();
+                return Some(url);
+            }
+            i = end;
+        } else {
+            i += 1;
+        }
+    }
+    None
+}
+
+#[cfg(target_os = "windows")]
+fn open_url(url: &str) {
+    // `cmd /C start "" <url>` は ShellExecute 経由で既定ブラウザを起動する。
+    // 第 2 引数の空文字列は start のタイトル引数で、URL に空白がある場合に
+    // タイトルとして食われるのを防ぐためのプレースホルダ。
+    let _ = std::process::Command::new("cmd")
+        .args(["/C", "start", "", url])
+        .spawn();
+}
+
+#[cfg(target_os = "macos")]
+fn open_url(url: &str) {
+    let _ = std::process::Command::new("open").arg(url).spawn();
+}
+
+#[cfg(all(not(target_os = "windows"), not(target_os = "macos")))]
+fn open_url(url: &str) {
+    let _ = std::process::Command::new("xdg-open").arg(url).spawn();
 }
 
 /// 選択範囲内のテキストを vt100 スクリーンから抜き出す。行末のスペースは

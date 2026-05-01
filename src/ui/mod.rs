@@ -20,6 +20,7 @@ pub fn draw(
     frame: &mut Frame<'_>,
     pane_rects: &mut HashMap<PaneId, AppRect>,
     sidebar_file_rect: &mut Option<AppRect>,
+    tab_rects: &mut Vec<(AppRect, usize)>,
 ) {
     let size = frame.area();
     let theme = theme::default_theme();
@@ -53,13 +54,22 @@ pub fn draw(
             Constraint::Length(2),
         ])
         .split(main_area);
-    draw_tabbar(app, frame, vert[0], &theme);
+    draw_tabbar(app, frame, vert[0], &theme, tab_rects);
     draw_panes(app, frame, vert[1], pane_rects, &theme);
     draw_statusbar(app, frame, vert[2], &theme);
 }
 
-fn draw_tabbar(app: &App, frame: &mut Frame<'_>, area: Rect, theme: &theme::Theme) {
+fn draw_tabbar(
+    app: &App,
+    frame: &mut Frame<'_>,
+    area: Rect,
+    theme: &theme::Theme,
+    tab_rects: &mut Vec<(AppRect, usize)>,
+) {
+    tab_rects.clear();
     let mut spans = Vec::new();
+    let mut x_offset: u16 = 0;
+    let area_end = area.x.saturating_add(area.width);
     for (i, tab) in app.tabs.iter().enumerate() {
         let active = i == app.active_tab;
         let style = if active {
@@ -72,15 +82,31 @@ fn draw_tabbar(app: &App, frame: &mut Frame<'_>, area: Rect, theme: &theme::Them
         } else {
             format!(" {} ", tab.title)
         };
-        spans.push(Span::styled(label, style));
+        let span = Span::styled(label, style);
+        let width = span.width() as u16;
+        let abs_x = area.x.saturating_add(x_offset);
+        if abs_x < area_end {
+            let visible_w = area_end.saturating_sub(abs_x).min(width);
+            tab_rects.push((
+                AppRect {
+                    x: abs_x as i32,
+                    y: area.y as i32,
+                    w: visible_w as i32,
+                    h: 1,
+                },
+                i,
+            ));
+        }
+        spans.push(span);
         spans.push(Span::raw(" "));
+        x_offset = x_offset.saturating_add(width).saturating_add(1);
     }
     frame.render_widget(Paragraph::new(Line::from(spans)), area);
 }
 
 fn draw_statusbar(app: &App, frame: &mut Frame<'_>, area: Rect, theme: &theme::Theme) {
     let hint_text =
-        "Ctrl+D:┃  Ctrl+E:━  Ctrl+T:tab  Ctrl+W:close  Ctrl+F:files  F2:rename  Ctrl+C×2:shell  Ctrl+Q:quit";
+        "Ctrl+D:┃  Ctrl+E:━  Ctrl+T:tab  Ctrl+W:close  Ctrl+F:files  Alt+F:rename  Ctrl+C×2:shell  Ctrl+Q:quit";
     let status = app
         .status
         .clone()
