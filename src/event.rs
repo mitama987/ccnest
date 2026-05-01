@@ -87,7 +87,12 @@ fn process_batch(
         }
 
         match &events[i] {
-            Event::Key(key) if key.kind != KeyEventKind::Release => {
+            // KeyEventKind::Press のみ処理する。Windows ConPTY が wRepeatCount > 1 や
+            // KeyEventKind::Repeat を発行することがあり、Backspace 1 回で 2-3 文字
+            // 消える / Shift+Tab を 1 回押しただけで Claude のモードが 2 回切り替わる
+            // (= 元に戻る) といった「1 押下 = N 送信」バグが起きる。Repeat はここで
+            // 落とし、ホールド時のリピートは子プロセス (claude / cmd.exe) 側に任せる。
+            Event::Key(key) if key.kind == KeyEventKind::Press => {
                 handle_key(app, *key, pane_rects)?;
             }
             Event::Mouse(me) => {
@@ -515,13 +520,28 @@ fn handle_mouse(
                             && now.duration_since(t) <= Duration::from_millis(500)
                 );
                 if is_double {
-                    let last_col = rect.w.saturating_sub(1).max(0) as u16;
-                    app.selection = Some(crate::app::Selection {
-                        pane_id: pid,
-                        anchor: (0, ly),
-                        cursor: (last_col, ly),
-                        dragging: false,
+                    // 行全体ではなく「実テキスト範囲」だけを選択する。先頭の
+                    // whitespace / bullet (●○•・*-+) / 番号 (5.) / プロンプト (>❯▶)
+                    // をスキップし、末尾の trailing whitespace を除く。これにより
+                    // Claude Code のリスト表示行をダブルクリックしたときに `> 5. ●`
+                    // のマーカーが反転対象に入らず、コピー結果も本文だけになる。
+                    let range = app.panes.get(&pid).and_then(|pane| {
+                        pane.parser
+                            .lock()
+                            .ok()
+                            .and_then(|parser| line_text_range(parser.screen(), ly))
                     });
+                    if let Some((start_x, end_x)) = range {
+                        app.selection = Some(crate::app::Selection {
+                            pane_id: pid,
+                            anchor: (start_x, ly),
+                            cursor: (end_x, ly),
+                            dragging: false,
+                        });
+                    } else {
+                        // 空行など実テキストが無いときは選択しない。
+                        app.selection = None;
+                    }
                     // 連続トリプル化を防ぐためリセット。
                     app.last_left_click = None;
                 } else {
@@ -708,6 +728,12 @@ fn extract_selected_text(pane: &crate::pane::Pane, sel: crate::app::Selection) -
         let mut line = String::new();
         for x in x0..=x1.min(cols.saturating_sub(1)) {
             if let Some(cell) = screen.cell(y, x) {
+                // 全角文字 (CJK 等 wide char) の第 2 セルは contents() が空。
+                // 空セル全部を ' ' 詰めにすると「こ ん ち は」のように全角間に
+                // 半角スペースが混入するため、wide-continuation セルは skip。
+                if cell.is_wide_continuation() {
+                    continue;
+                }
                 let ch = cell.contents();
                 if ch.is_empty() {
                     line.push(' ');
@@ -721,6 +747,89 @@ fn extract_selected_text(pane: &crate::pane::Pane, sel: crate::app::Selection) -
         lines.push(line.trim_end().to_string());
     }
     lines.join("\n")
+}
+
+/// 行 y の「実テキスト範囲」を返す。
+///
+/// 先頭の whitespace / 箇条書きマーカー (●○•・*-+) / 番号 (`5.`) /
+/// プロンプト記号 (`>` `❯` `▶`) を skip し、末尾の trailing whitespace を
+/// 除いた最終可視 col までを `(start_x, end_x)` で返す。
+/// 行が空 (実テキストなし) の場合は `None`。
+///
+/// ダブルクリック時に Claude Code 風のリスト表示行 `> 5. ●こんちは…` から
+/// 「こんちは…」だけを選択するために使う。
+fn line_text_range(screen: &vt100::Screen, y: u16) -> Option<(u16, u16)> {
+    let (rows, cols) = screen.size();
+    if y >= rows || cols == 0 {
+        return None;
+    }
+    let last_col = cols.saturating_sub(1);
+
+    // 末尾の trailing whitespace を skip。空セル (contents 空) や wide-continuation
+    // も実体なしとして skip する。
+    let mut end_x = last_col;
+    loop {
+        let is_blank = match screen.cell(y, end_x) {
+            None => true,
+            Some(cell) if cell.is_wide_continuation() => true,
+            Some(cell) => {
+                let s = cell.contents();
+                s.is_empty() || s.chars().all(|c| c.is_whitespace())
+            }
+        };
+        if !is_blank {
+            break;
+        }
+        if end_x == 0 {
+            return None;
+        }
+        end_x -= 1;
+    }
+
+    // 先頭からマーカー文字を skip。
+    let mut start_x: u16 = 0;
+    while start_x <= end_x {
+        let cell = screen.cell(y, start_x);
+        let skip = match cell {
+            None => true,
+            Some(c) if c.is_wide_continuation() => true,
+            Some(c) => {
+                let s = c.contents();
+                if s.is_empty() {
+                    true
+                } else {
+                    s.chars().next().is_some_and(is_leading_marker_char)
+                }
+            }
+        };
+        if skip {
+            start_x += 1;
+        } else {
+            break;
+        }
+    }
+
+    if start_x > end_x {
+        return None;
+    }
+    Some((start_x, end_x))
+}
+
+/// 行頭でマーカーとして skip する文字判定。bullet, ASCII 数字 + 句読点,
+/// プロンプト矢印, ASCII 空白 + 全角空白を含む。本文に普通に出てくる
+/// 漢字・かな・英字・記号 (`!?…` 等) は skip 対象にしない。
+fn is_leading_marker_char(c: char) -> bool {
+    matches!(
+        c,
+        ' '
+        | '\t'
+        | '\u{00a0}' // NBSP
+        | '\u{3000}' // 全角スペース
+        | '>' | '❯' | '▶' | '▷' | '►' | '»'
+        | '●' | '○' | '•' | '・' | '◯' | '◦' | '◉' | '◎'
+        | '*' | '+' | '-' | '–' | '—' | '─'
+        | '0'..='9' | '.' | ',' | ':' | ')' | ']' | '|' | '#'
+    )
 }
 
 /// (anchor, cursor) を行優先で昇順に並べ替える。
@@ -1020,5 +1129,78 @@ mod tests {
             Event::Paste("ignored-by-segment".to_string()),
         ];
         assert_eq!(collect_paste_segment(&events), Some((1, "hi".to_string())));
+    }
+
+    fn screen_from(rows: u16, cols: u16, text: &str) -> vt100::Parser {
+        let mut parser = vt100::Parser::new(rows, cols, 0);
+        parser.process(text.as_bytes());
+        parser
+    }
+
+    #[test]
+    fn line_text_range_skips_bullet_and_numbering() {
+        // Claude Code 風の "> 5. ●こんちは！今日は何をやりましょうか？" 行を再現。
+        let parser = screen_from(2, 60, "> 5. ●こんちは！今日は何をやりましょうか？");
+        let (start, end) = line_text_range(parser.screen(), 0).expect("range");
+        // "> 5. ●" を skip して "こ" の cell から開始するはず。
+        let head = parser
+            .screen()
+            .cell(0, start)
+            .map(|c| c.contents())
+            .unwrap_or_default();
+        assert_eq!(head, "こ", "expected start at こ, got {:?}", head);
+        // 末尾は "？" の wide char 第 1 セル。
+        let tail = parser
+            .screen()
+            .cell(0, end)
+            .map(|c| c.contents())
+            .unwrap_or_default();
+        assert_eq!(tail, "？", "expected end at ？, got {:?}", tail);
+    }
+
+    #[test]
+    fn line_text_range_returns_none_for_empty_line() {
+        let parser = screen_from(2, 20, "");
+        assert_eq!(line_text_range(parser.screen(), 0), None);
+    }
+
+    #[test]
+    fn line_text_range_returns_none_for_whitespace_only() {
+        let parser = screen_from(2, 20, "          ");
+        assert_eq!(line_text_range(parser.screen(), 0), None);
+    }
+
+    #[test]
+    fn line_text_range_returns_none_for_marker_only() {
+        // 行全体が bullet/whitespace で実テキストが無いケース。
+        let parser = screen_from(2, 20, "  - ");
+        assert_eq!(line_text_range(parser.screen(), 0), None);
+    }
+
+    #[test]
+    fn line_text_range_keeps_text_starting_with_alphabet() {
+        let parser = screen_from(2, 30, "hello world");
+        let (start, end) = line_text_range(parser.screen(), 0).expect("range");
+        assert_eq!(start, 0);
+        assert_eq!(end, 10);
+    }
+
+    #[test]
+    fn is_leading_marker_char_recognizes_common_markers() {
+        for c in [' ', '\t', '●', '○', '・', '•', '-', '*', '+', '>', '❯', '#'] {
+            assert!(is_leading_marker_char(c), "expected marker: {:?}", c);
+        }
+        for c in [
+            '0', '1', '5', '9', '.', ':', // numbering / list-item separators
+        ] {
+            assert!(is_leading_marker_char(c), "expected marker: {:?}", c);
+        }
+    }
+
+    #[test]
+    fn is_leading_marker_char_rejects_text_chars() {
+        for c in ['こ', 'a', 'A', 'あ', '漢', '！', '？', '/', '\\'] {
+            assert!(!is_leading_marker_char(c), "expected non-marker: {:?}", c);
+        }
     }
 }
