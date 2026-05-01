@@ -501,25 +501,53 @@ fn handle_mouse(
             }
             // 新しいドラッグ選択を開始。クリック位置が pane 内なら selection を更新、
             // 外(サイドバー/タブバー/境界)なら既存選択はクリアする。
+            // ダブルクリック判定 (同じペイン・同じ row で 500ms 以内の再クリック) は
+            // その行を全選択する (コピペ用途)。
             if let Some((pid, rect)) = find_pane_at(pane_rects, mx, my) {
                 let lx = (mx - rect.x).clamp(0, rect.w.saturating_sub(1)) as u16;
                 let ly = (my - rect.y).clamp(0, rect.h.saturating_sub(1)) as u16;
-                app.selection = Some(crate::app::Selection {
-                    pane_id: pid,
-                    anchor: (lx, ly),
-                    cursor: (lx, ly),
-                    dragging: true,
-                });
+                let now = Instant::now();
+                let is_double = matches!(
+                    app.last_left_click,
+                    Some((t, last_pid, last_ly))
+                        if last_pid == pid
+                            && last_ly == ly
+                            && now.duration_since(t) <= Duration::from_millis(500)
+                );
+                if is_double {
+                    let last_col = rect.w.saturating_sub(1).max(0) as u16;
+                    app.selection = Some(crate::app::Selection {
+                        pane_id: pid,
+                        anchor: (0, ly),
+                        cursor: (last_col, ly),
+                        dragging: false,
+                    });
+                    // 連続トリプル化を防ぐためリセット。
+                    app.last_left_click = None;
+                } else {
+                    app.selection = Some(crate::app::Selection {
+                        pane_id: pid,
+                        anchor: (lx, ly),
+                        cursor: (lx, ly),
+                        dragging: true,
+                    });
+                    app.last_left_click = Some((now, pid, ly));
+                }
             } else {
                 app.selection = None;
+                app.last_left_click = None;
             }
         }
         Drag(MouseButton::Left) => {
             if let Some(sel) = app.selection.as_mut() {
-                if let Some(rect) = pane_rects.get(&sel.pane_id) {
-                    let lx = (mx - rect.x).clamp(0, rect.w.saturating_sub(1)) as u16;
-                    let ly = (my - rect.y).clamp(0, rect.h.saturating_sub(1)) as u16;
-                    sel.cursor = (lx, ly);
+                // ダブルクリックで作られた行選択 (dragging=false) は微細なマウス
+                // ジッタで壊さない。手動ドラッグ中 (dragging=true) のみ cursor 追従。
+                if sel.dragging {
+                    if let Some(rect) = pane_rects.get(&sel.pane_id) {
+                        let lx = (mx - rect.x).clamp(0, rect.w.saturating_sub(1)) as u16;
+                        let ly = (my - rect.y).clamp(0, rect.h.saturating_sub(1)) as u16;
+                        sel.cursor = (lx, ly);
+                    }
                 }
             }
         }

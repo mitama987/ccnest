@@ -32,6 +32,9 @@ pub struct App {
     /// マウスドラッグで作られた画面テキスト選択範囲。選択がある状態で Ctrl+C を
     /// 押すとクリップボードへコピーされる。
     pub selection: Option<Selection>,
+    /// 直近の左クリックの (押下時刻, ペイン, ペイン内 row)。閾値内に同じペインの
+    /// 同じ行で再クリックされたらダブルクリックと判定し、その行を全選択する。
+    pub last_left_click: Option<(Instant, PaneId, u16)>,
 }
 
 /// ペイン内のテキスト選択範囲。anchor/cursor はペイン内コンテンツ座標 (col,row)。
@@ -79,6 +82,7 @@ impl App {
             renaming_tab: None,
             last_ctrl_c: None,
             selection: None,
+            last_left_click: None,
         })
     }
 
