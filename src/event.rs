@@ -454,10 +454,7 @@ fn handle_mouse(
             // タブバー上のクリック → アクティブタブ切替。リネーム中は無視。
             if app.renaming_tab.is_none() {
                 for (rect, idx) in tab_rects {
-                    if mx >= rect.x
-                        && mx < rect.x + rect.w
-                        && my >= rect.y
-                        && my < rect.y + rect.h
+                    if mx >= rect.x && mx < rect.x + rect.w && my >= rect.y && my < rect.y + rect.h
                     {
                         app.active_tab = *idx;
                         app.selection = None;
