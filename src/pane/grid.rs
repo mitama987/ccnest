@@ -98,6 +98,30 @@ impl Layout {
             }
         }
     }
+
+    /// `target` を含む直近の Split の `ratio` を `delta` ぶん動かす。
+    /// `target` が a 側 (左/上) なら `ratio += delta`、b 側 (右/下) なら
+    /// `ratio -= delta` で、常に target が大きくなる方向に揃える。
+    /// `[0.1, 0.9]` でクランプ。target が見つからない/単一 Leaf のときは false。
+    pub fn adjust_ratio_for(&mut self, target: PaneId, delta: f32) -> bool {
+        match self {
+            Layout::Leaf(_) => false,
+            Layout::Split { ratio, a, b, .. } => {
+                if matches!(**a, Layout::Leaf(id) if id == target) {
+                    *ratio = (*ratio + delta).clamp(0.1, 0.9);
+                    return true;
+                }
+                if matches!(**b, Layout::Leaf(id) if id == target) {
+                    *ratio = (*ratio - delta).clamp(0.1, 0.9);
+                    return true;
+                }
+                if a.adjust_ratio_for(target, delta) {
+                    return true;
+                }
+                b.adjust_ratio_for(target, delta)
+            }
+        }
+    }
 }
 
 #[cfg(test)]
@@ -129,5 +153,63 @@ mod tests {
     fn close_last_leaf_returns_none() {
         let l = Layout::Leaf(1);
         assert!(l.close(1).is_none());
+    }
+
+    fn ratio_of(l: &Layout) -> f32 {
+        match l {
+            Layout::Split { ratio, .. } => *ratio,
+            _ => panic!("expected split"),
+        }
+    }
+
+    #[test]
+    fn adjust_ratio_a_side_increases() {
+        let mut l = Layout::Leaf(1).split(1, Direction::Right, 2);
+        assert!(l.adjust_ratio_for(1, 0.1));
+        assert!((ratio_of(&l) - 0.6).abs() < 1e-5);
+    }
+
+    #[test]
+    fn adjust_ratio_b_side_decreases() {
+        let mut l = Layout::Leaf(1).split(1, Direction::Right, 2);
+        assert!(l.adjust_ratio_for(2, 0.1));
+        assert!((ratio_of(&l) - 0.4).abs() < 1e-5);
+    }
+
+    #[test]
+    fn adjust_ratio_clamped() {
+        let mut l = Layout::Leaf(1).split(1, Direction::Right, 2);
+        for _ in 0..100 {
+            l.adjust_ratio_for(1, 0.1);
+        }
+        assert!((ratio_of(&l) - 0.9).abs() < 1e-5);
+        for _ in 0..100 {
+            l.adjust_ratio_for(1, -0.1);
+        }
+        assert!((ratio_of(&l) - 0.1).abs() < 1e-5);
+    }
+
+    #[test]
+    fn adjust_ratio_single_leaf_returns_false() {
+        let mut l = Layout::Leaf(1);
+        assert!(!l.adjust_ratio_for(1, 0.1));
+    }
+
+    #[test]
+    fn adjust_ratio_nested_picks_immediate_parent() {
+        // Layout: Split { a: Split { Leaf(1), Leaf(2) }, b: Leaf(3) }
+        let mut l = Layout::Leaf(1)
+            .split(1, Direction::Right, 3) // -> Split(Leaf 1, Leaf 3)
+            .split(1, Direction::Down, 2); // -> Split(Split(Leaf 1, Leaf 2), Leaf 3)
+                                           // target=1 を動かしたら、外側の Split(ratio=0.5) ではなく
+                                           // 直近親の内側 Split (1 vs 2) の ratio が変わる。
+        assert!(l.adjust_ratio_for(1, 0.1));
+        match &l {
+            Layout::Split { ratio, a, .. } => {
+                assert!((*ratio - 0.5).abs() < 1e-5, "outer ratio must be untouched");
+                assert!((ratio_of(a) - 0.6).abs() < 1e-5);
+            }
+            _ => panic!("expected split"),
+        }
     }
 }

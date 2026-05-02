@@ -73,6 +73,7 @@ ccnest path\to\project
 | `Shift+Tab` | Forwarded as back-tab (`CSI Z`) — drives Claude's mode cycle (default → auto-accept → plan) |
 | `Shift+Enter` / `Ctrl+Enter` | Insert a newline in the prompt instead of submitting (sent as `ESC + CR`) |
 | Mouse wheel | Scroll history in the pane under the cursor (3 lines per tick) |
+| `Ctrl` + Mouse wheel | Resize the focused split — the pane under the cursor grows on scroll-up, shrinks on scroll-down (5% per tick, clamped to 10–90%) |
 | `Shift+PageUp` / `Shift+PageDown` | Scroll the focused pane one screen of history |
 | `Shift+↑` / `Shift+↓` | Scroll the focused pane one line of history |
 | any keystroke | Snaps the view back to the live tail |

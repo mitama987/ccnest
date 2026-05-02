@@ -444,15 +444,28 @@ fn handle_mouse(
 
     match me.kind {
         ScrollUp | ScrollDown => {
-            let delta = if matches!(me.kind, ScrollUp) { 1 } else { -1 };
             let target = pane_rects
                 .iter()
                 .find_map(|(pid, r)| {
                     (mx >= r.x && mx < r.x + r.w && my >= r.y && my < r.y + r.h).then_some(*pid)
                 })
                 .unwrap_or(app.current_tab().focused);
-            if let Some(pane) = app.panes.get(&target) {
-                pane.scroll_by(delta * 3);
+            if me.modifiers.contains(KeyModifiers::CONTROL) {
+                // Ctrl + Wheel: target ペインのサイズを段階的に増減。
+                // 直近親 Split の ratio を ±0.05 動かす (target 側が大きく
+                // なる方向に揃える)。次フレームの ui::draw() で pty.resize
+                // が呼ばれ Claude Code 側にも自動でサイズ変更が伝わる。
+                let delta = if matches!(me.kind, ScrollUp) {
+                    0.05
+                } else {
+                    -0.05
+                };
+                app.current_tab_mut().layout.adjust_ratio_for(target, delta);
+            } else {
+                let delta = if matches!(me.kind, ScrollUp) { 1 } else { -1 };
+                if let Some(pane) = app.panes.get(&target) {
+                    pane.scroll_by(delta * 3);
+                }
             }
         }
         Down(MouseButton::Left) => {
