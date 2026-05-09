@@ -18,6 +18,12 @@ pub fn spawn_claude(
         let mut cmd = CommandBuilder::new(&bin);
         cmd.arg("--session-id");
         cmd.arg(session_id.to_string());
+        // ccnest からは毎回パーミッション確認なしで Claude を起動するのが既定動作。
+        // 将来公開する場合などに備え、`CCNEST_CLAUDE_NO_SKIP_PERMISSIONS=1` を設定
+        // すると opt-out できる安全弁を残してある。
+        if std::env::var_os("CCNEST_CLAUDE_NO_SKIP_PERMISSIONS").is_none() {
+            cmd.arg("--dangerously-skip-permissions");
+        }
         cmd.cwd(cwd);
         apply_env(&mut cmd);
         if let Ok(h) = PtyHandle::spawn(cmd, Arc::clone(&parser)) {

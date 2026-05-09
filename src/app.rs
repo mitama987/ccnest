@@ -38,14 +38,21 @@ pub struct App {
 }
 
 /// ペイン内のテキスト選択範囲。anchor/cursor はペイン内コンテンツ座標 (col,row)。
+///
+/// row は `i32` で持ち、負値は「現在の表示範囲よりさらに上 (スクロールバック内)」
+/// を表す。これによりドラッグ中の auto-scroll で表示外に出た anchor も追跡できる。
 #[derive(Debug, Clone, Copy)]
 pub struct Selection {
     pub pane_id: PaneId,
-    pub anchor: (u16, u16),
-    pub cursor: (u16, u16),
+    pub anchor: (u16, i32),
+    pub cursor: (u16, i32),
     /// マウスボタン押下中。false になっても選択は残し続け、Ctrl+C か
     /// 新規クリックでクリアされる。
     pub dragging: bool,
+    /// drag 中にペイン端を超えたときの auto-scroll 方向。
+    /// `-1` = 上端外 (古い行へ), `+1` = 下端外 (新しい行へ), `0` = ペイン内。
+    /// イベントループの tick で参照され、1 行/tick で scroll_by に反映される。
+    pub auto_scroll: i32,
 }
 
 /// Derive a tab title from the pane cwd (final path component).

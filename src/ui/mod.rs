@@ -359,7 +359,8 @@ fn render_layout(
 struct PaneCells<'a> {
     parser: &'a std::sync::Mutex<vt100::Parser>,
     /// (start, end) のペイン内座標(col,row)。start<=end で正規化済み。
-    selection: Option<((u16, u16), (u16, u16))>,
+    /// row は i32 で、負値 (画面外上方) は描画ループでは自動的に対象外となる。
+    selection: Option<((u16, i32), (u16, i32))>,
 }
 
 impl<'a> Widget for PaneCells<'a> {
@@ -374,7 +375,7 @@ impl<'a> Widget for PaneCells<'a> {
                     let ch = cell.contents();
                     let mut style = style_from_cell(cell);
                     if let Some((start, end)) = self.selection {
-                        if selection_contains((x, y), start, end) {
+                        if selection_contains((x as i32, y as i32), start, end) {
                             style = style.add_modifier(Modifier::REVERSED);
                         }
                     }
@@ -393,25 +394,25 @@ impl<'a> Widget for PaneCells<'a> {
     }
 }
 
-fn selection_contains(pos: (u16, u16), start: (u16, u16), end: (u16, u16)) -> bool {
+fn selection_contains(pos: (i32, i32), start: (u16, i32), end: (u16, i32)) -> bool {
     let (x, y) = pos;
     if y < start.1 || y > end.1 {
         return false;
     }
     if start.1 == end.1 {
-        return x >= start.0 && x <= end.0;
+        return x >= start.0 as i32 && x <= end.0 as i32;
     }
     if y == start.1 {
-        return x >= start.0;
+        return x >= start.0 as i32;
     }
     if y == end.1 {
-        return x <= end.0;
+        return x <= end.0 as i32;
     }
     true
 }
 
 /// (anchor, cursor) を行優先で昇順に並べ替える。event.rs 側と同一ルール。
-pub fn normalize_selection(a: (u16, u16), b: (u16, u16)) -> ((u16, u16), (u16, u16)) {
+pub fn normalize_selection(a: (u16, i32), b: (u16, i32)) -> ((u16, i32), (u16, i32)) {
     if a.1 < b.1 || (a.1 == b.1 && a.0 <= b.0) {
         (a, b)
     } else {
