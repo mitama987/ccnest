@@ -487,9 +487,13 @@ fn scroll_pane_with_selection(app: &mut App, pane_id: PaneId, delta: i32) {
 /// - `+1` (下端外) → 新しい行を見たい → vt100 の scrollback offset を `-1`。
 /// - `-1` (上端外) → 古い行を見たい → vt100 の scrollback offset を `+1`。
 ///
-/// scroll_by の delta と同じ符号で anchor.row を補正することで、スクロール後も
-/// 「最初にクリックした内容の行」を anchor が指し続ける (画面外に出れば負値になる)。
-/// cursor は端に張り付いたままなので調整しない。
+/// 実際に変化した scrollback 量と同じだけ anchor.row を補正することで、
+/// スクロール後も「最初にクリックした内容の行」を anchor が指し続ける
+/// (画面外に出れば負値になる)。cursor は端に張り付いたままなので調整しない。
+///
+/// 「実際の」変化量を使うのが重要: scrollback=0 で下端ドラッグ→新しい行を
+/// 要求しても vt100 はクランプして scroll しないが、要求 delta で anchor を
+/// 動かしてしまうと反転帯だけが上方向に伸びていく不具合になる。
 fn advance_drag_auto_scroll(app: &mut App) {
     let Some(sel) = app.selection.as_mut() else {
         return;
@@ -499,10 +503,27 @@ fn advance_drag_auto_scroll(app: &mut App) {
     }
     let scroll_delta = -sel.auto_scroll;
     let pane_id = sel.pane_id;
-    if let Some(pane) = app.panes.get(&pane_id) {
-        pane.scroll_by(scroll_delta);
+    let Some(pane) = app.panes.get(&pane_id) else {
+        return;
+    };
+    let before = pane
+        .parser
+        .lock()
+        .ok()
+        .map(|p| p.screen().scrollback() as i32)
+        .unwrap_or(0);
+    pane.scroll_by(scroll_delta);
+    let after = pane
+        .parser
+        .lock()
+        .ok()
+        .map(|p| p.screen().scrollback() as i32)
+        .unwrap_or(before);
+    let actual = after - before;
+    if actual == 0 {
+        return;
     }
-    sel.anchor.1 += scroll_delta;
+    sel.anchor.1 += actual;
 }
 
 fn handle_mouse(
