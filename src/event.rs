@@ -445,13 +445,18 @@ fn scroll_focused(app: &mut App, delta: i32) {
     scroll_pane_with_selection(app, focused_id, delta);
 }
 
-/// `pane.scroll_by` を呼びつつ、同じペインに非ドラッグの選択がある場合は
-/// 実際に変化した scrollback 量ぶん anchor/cursor の row を平行移動させる。
-/// これによりスクロール後も「選択中のテキスト」と反転帯がズレない。
+/// `pane.scroll_by` を呼びつつ、同じペインに選択がある場合は実際に変化した
+/// scrollback 量ぶん anchor / cursor を平行移動させる。
 ///
-/// scrollback クランプで実際は動かなかったケース (actual == 0) では selection も
-/// 動かさない。ドラッグ中 (`sel.dragging == true`) は `advance_drag_auto_scroll`
-/// が anchor のみ追従させる別ロジックを担当しているのでここでは触らない。
+/// - **非ドラッグ時**: anchor / cursor 両方を補正 → 反転帯が選択テキストに
+///   貼り付いたままスクロールできる。
+/// - **ドラッグ中**: anchor のみ補正、cursor は据え置き → マウス位置は動いて
+///   いないので cursor が指す content がスクロール量ぶん入れ替わり、結果と
+///   して選択範囲が「ホイール方向の新しい行」を取り込んで伸びる。`advance_drag_auto_scroll`
+///   と同じ哲学。
+///
+/// scrollback クランプで実際は動かなかったケース (actual == 0) では selection
+/// も動かさない（クランプ時の anchor 暴走バグの再発防止）。
 fn scroll_pane_with_selection(app: &mut App, pane_id: PaneId, delta: i32) {
     let Some(pane) = app.panes.get(&pane_id) else {
         return;
@@ -474,9 +479,11 @@ fn scroll_pane_with_selection(app: &mut App, pane_id: PaneId, delta: i32) {
         return;
     }
     if let Some(sel) = app.selection.as_mut() {
-        if sel.pane_id == pane_id && !sel.dragging {
+        if sel.pane_id == pane_id {
             sel.anchor.1 += actual;
-            sel.cursor.1 += actual;
+            if !sel.dragging {
+                sel.cursor.1 += actual;
+            }
         }
     }
 }
