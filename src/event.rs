@@ -440,9 +440,44 @@ fn handle_rename_key(app: &mut App, key: KeyEvent) {
     }
 }
 
-fn scroll_focused(app: &App, delta: i32) {
-    if let Some(pane) = app.panes.get(&app.current_tab().focused) {
-        pane.scroll_by(delta);
+fn scroll_focused(app: &mut App, delta: i32) {
+    let focused_id = app.current_tab().focused;
+    scroll_pane_with_selection(app, focused_id, delta);
+}
+
+/// `pane.scroll_by` を呼びつつ、同じペインに非ドラッグの選択がある場合は
+/// 実際に変化した scrollback 量ぶん anchor/cursor の row を平行移動させる。
+/// これによりスクロール後も「選択中のテキスト」と反転帯がズレない。
+///
+/// scrollback クランプで実際は動かなかったケース (actual == 0) では selection も
+/// 動かさない。ドラッグ中 (`sel.dragging == true`) は `advance_drag_auto_scroll`
+/// が anchor のみ追従させる別ロジックを担当しているのでここでは触らない。
+fn scroll_pane_with_selection(app: &mut App, pane_id: PaneId, delta: i32) {
+    let Some(pane) = app.panes.get(&pane_id) else {
+        return;
+    };
+    let before = pane
+        .parser
+        .lock()
+        .ok()
+        .map(|p| p.screen().scrollback() as i32)
+        .unwrap_or(0);
+    pane.scroll_by(delta);
+    let after = pane
+        .parser
+        .lock()
+        .ok()
+        .map(|p| p.screen().scrollback() as i32)
+        .unwrap_or(before);
+    let actual = after - before;
+    if actual == 0 {
+        return;
+    }
+    if let Some(sel) = app.selection.as_mut() {
+        if sel.pane_id == pane_id && !sel.dragging {
+            sel.anchor.1 += actual;
+            sel.cursor.1 += actual;
+        }
     }
 }
 
@@ -502,9 +537,7 @@ fn handle_mouse(
                 app.current_tab_mut().layout.adjust_ratio_for(target, delta);
             } else {
                 let delta = if matches!(me.kind, ScrollUp) { 1 } else { -1 };
-                if let Some(pane) = app.panes.get(&target) {
-                    pane.scroll_by(delta * 3);
-                }
+                scroll_pane_with_selection(app, target, delta * 3);
             }
         }
         Down(MouseButton::Left) => {
@@ -1350,9 +1383,7 @@ mod tests {
         let lines: Vec<&str> = text.lines().collect();
         assert_eq!(
             lines,
-            vec![
-                "line05", "line06", "line07", "line08", "line09", "line10", "line11", "line12",
-            ],
+            vec!["line05", "line06", "line07", "line08", "line09", "line10", "line11", "line12",],
             "got: {:#?}",
             lines
         );
