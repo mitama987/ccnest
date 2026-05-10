@@ -35,6 +35,11 @@ pub struct App {
     /// 直近の左クリックの (押下時刻, ペイン, ペイン内 row)。閾値内に同じペインの
     /// 同じ行で再クリックされたらダブルクリックと判定し、その行を全選択する。
     pub last_left_click: Option<(Instant, PaneId, u16)>,
+    /// 直近のマウスホイールイベント時刻。Windows ConPTY がホイール回転を Mouse
+    /// イベントと plain な Up/Down KeyEvent の両方として配信するケースで、
+    /// 後者を「ファントム矢印キー」として握りつぶすために使う。process_batch
+    /// 内で wheel を見たら更新し、handle_key 直前の判定で参照する。
+    pub last_wheel_at: Option<Instant>,
 }
 
 /// ペイン内のテキスト選択範囲。anchor/cursor はペイン内コンテンツ座標 (col,row)。
@@ -90,6 +95,7 @@ impl App {
             last_ctrl_c: None,
             selection: None,
             last_left_click: None,
+            last_wheel_at: None,
         })
     }
 

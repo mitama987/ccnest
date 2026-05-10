@@ -88,7 +88,15 @@ fn process_batch(
     sidebar_file_rect: Option<Rect>,
     tab_rects: &[(Rect, usize)],
 ) -> Result<()> {
+    use crossterm::event::MouseEventKind;
     let mut i = 0;
+    // Windows ConPTY はマウスホイール 1 回の回転を Mouse(ScrollUp|ScrollDown)
+    // イベントと、それに付随する plain な Up/Down KeyEvent の両方として配信
+    // することがある (legacy console 互換)。後者を握りつぶすために、直前イベ
+    // ントが wheel だったかと、最近のホイール時刻 (`app.last_wheel_at`) を組み
+    // 合わせて判定する。same-batch フラグだけだとバッチ跨ぎ配信を取り逃すため
+    // 50ms ウィンドウもフォールバックとして使う。
+    let mut prev_was_wheel = false;
     while i < events.len() {
         // 連続する paste 系イベント (Event::Paste と classify_run でマッチする
         // Char/Enter/Tab run) をまとめて 1 回の handle_paste にする。
@@ -98,6 +106,7 @@ fn process_batch(
         if let Some((consumed, text)) = collect_paste_segment(&events[i..]) {
             handle_paste(app, &text);
             i += consumed;
+            prev_was_wheel = false;
             continue;
         }
 
@@ -108,13 +117,37 @@ fn process_batch(
             // (= 元に戻る) といった「1 押下 = N 送信」バグが起きる。Repeat はここで
             // 落とし、ホールド時のリピートは子プロセス (claude / cmd.exe) 側に任せる。
             Event::Key(key) if key.kind == KeyEventKind::Press => {
+                if should_suppress_wheel_arrow(
+                    app.sidebar_focused,
+                    app.renaming_tab.is_some(),
+                    app.last_wheel_at,
+                    key,
+                    prev_was_wheel,
+                ) {
+                    i += 1;
+                    continue;
+                }
                 handle_key(app, *key, pane_rects)?;
+                prev_was_wheel = false;
             }
             Event::Mouse(me) => {
+                if matches!(
+                    me.kind,
+                    MouseEventKind::ScrollUp | MouseEventKind::ScrollDown
+                ) {
+                    app.last_wheel_at = Some(Instant::now());
+                    prev_was_wheel = true;
+                } else {
+                    prev_was_wheel = false;
+                }
                 handle_mouse(app, *me, pane_rects, sidebar_file_rect, tab_rects);
             }
-            Event::Resize(_, _) => {}
-            _ => {}
+            Event::Resize(_, _) => {
+                prev_was_wheel = false;
+            }
+            _ => {
+                prev_was_wheel = false;
+            }
         }
         i += 1;
     }
@@ -1057,6 +1090,40 @@ fn is_ctrl_c(k: &KeyEvent) -> bool {
         && matches!(k.code, KeyCode::Char('c') | KeyCode::Char('C'))
 }
 
+/// Windows ConPTY 等が「マウスホイール回転 = MouseEvent + plain Up/Down KeyEvent」
+/// の両方を配信してくる挙動に対し、後者の「ファントム矢印キー」を握りつぶす判定。
+///
+/// 抑制発動条件 (ALL):
+/// - サイドバーフォーカス中でない (サイドバーカーソル移動を絶対に壊さない)
+/// - rename 中でない
+/// - plain な `Up` / `Down` (Shift/Ctrl/Alt 修飾なし) — Shift+Up/Down は
+///   `ScrollLineUp/Down`、Ctrl+Up/Down は `FocusUp/Down` なので除外
+/// - 直前イベントが `ScrollUp`/`ScrollDown` だった OR `last_wheel_at` が 50ms 以内
+///
+/// 関数シグネチャは `&App` に依存させず、必要な field を bare に受ける。これにより
+/// `App::new` (内部で実 PTY を spawn) を呼ばずに単体テスト可能になる。
+fn should_suppress_wheel_arrow(
+    sidebar_focused: bool,
+    renaming: bool,
+    last_wheel_at: Option<Instant>,
+    key: &KeyEvent,
+    prev_was_wheel: bool,
+) -> bool {
+    if sidebar_focused || renaming {
+        return false;
+    }
+    if !key.modifiers.is_empty() {
+        return false;
+    }
+    if !matches!(key.code, KeyCode::Up | KeyCode::Down) {
+        return false;
+    }
+    if prev_was_wheel {
+        return true;
+    }
+    matches!(last_wheel_at, Some(t) if t.elapsed() < Duration::from_millis(50))
+}
+
 fn key_to_bytes(key: &KeyEvent) -> Vec<u8> {
     let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
     let alt = key.modifiers.contains(KeyModifiers::ALT);
@@ -1434,5 +1501,145 @@ mod tests {
         let text = extract_selected_text_from_parser(&mut parser, sel);
         let lines: Vec<&str> = text.lines().collect();
         assert_eq!(lines, vec!["alpha", "beta", "gamma"]);
+    }
+
+    // --- should_suppress_wheel_arrow ---------------------------------------
+    //
+    // Windows ConPTY が「マウスホイール = Mouse + plain Up/Down KeyEvent」の両方を
+    // 配信するケースで、後者だけを握りつぶす。Shift/Ctrl 修飾付きやサイドバーフォーカス
+    // 中の Up/Down は scroll / focus / sidebar ナビ用なので影響させない。
+
+    fn plain(code: KeyCode) -> KeyEvent {
+        KeyEvent::new(code, KeyModifiers::NONE)
+    }
+
+    #[test]
+    fn suppress_wheel_arrow_when_prev_was_wheel() {
+        assert!(should_suppress_wheel_arrow(
+            false,
+            false,
+            None,
+            &plain(KeyCode::Up),
+            true
+        ));
+        assert!(should_suppress_wheel_arrow(
+            false,
+            false,
+            None,
+            &plain(KeyCode::Down),
+            true
+        ));
+    }
+
+    #[test]
+    fn suppress_wheel_arrow_within_50ms_window() {
+        let now = Some(Instant::now());
+        assert!(should_suppress_wheel_arrow(
+            false,
+            false,
+            now,
+            &plain(KeyCode::Up),
+            false
+        ));
+    }
+
+    #[test]
+    fn dont_suppress_wheel_arrow_after_window() {
+        let old = Some(Instant::now() - Duration::from_millis(200));
+        assert!(!should_suppress_wheel_arrow(
+            false,
+            false,
+            old,
+            &plain(KeyCode::Up),
+            false
+        ));
+    }
+
+    #[test]
+    fn dont_suppress_shift_up() {
+        let key = KeyEvent::new(KeyCode::Up, KeyModifiers::SHIFT);
+        assert!(!should_suppress_wheel_arrow(false, false, None, &key, true));
+    }
+
+    #[test]
+    fn dont_suppress_ctrl_up() {
+        let key = KeyEvent::new(KeyCode::Up, KeyModifiers::CONTROL);
+        assert!(!should_suppress_wheel_arrow(false, false, None, &key, true));
+    }
+
+    #[test]
+    fn dont_suppress_alt_up() {
+        let key = KeyEvent::new(KeyCode::Up, KeyModifiers::ALT);
+        assert!(!should_suppress_wheel_arrow(false, false, None, &key, true));
+    }
+
+    #[test]
+    fn dont_suppress_when_sidebar_focused() {
+        assert!(!should_suppress_wheel_arrow(
+            true,
+            false,
+            None,
+            &plain(KeyCode::Up),
+            true
+        ));
+    }
+
+    #[test]
+    fn dont_suppress_when_renaming() {
+        assert!(!should_suppress_wheel_arrow(
+            false,
+            true,
+            None,
+            &plain(KeyCode::Up),
+            true
+        ));
+    }
+
+    #[test]
+    fn dont_suppress_left_or_right_arrow() {
+        assert!(!should_suppress_wheel_arrow(
+            false,
+            false,
+            None,
+            &plain(KeyCode::Left),
+            true
+        ));
+        assert!(!should_suppress_wheel_arrow(
+            false,
+            false,
+            None,
+            &plain(KeyCode::Right),
+            true
+        ));
+    }
+
+    #[test]
+    fn dont_suppress_other_keys() {
+        assert!(!should_suppress_wheel_arrow(
+            false,
+            false,
+            None,
+            &plain(KeyCode::Char('a')),
+            true
+        ));
+        assert!(!should_suppress_wheel_arrow(
+            false,
+            false,
+            None,
+            &plain(KeyCode::Enter),
+            true
+        ));
+    }
+
+    #[test]
+    fn dont_suppress_when_no_wheel_signal() {
+        // wheel が一度も来ていない場合は通常通り通過する。
+        assert!(!should_suppress_wheel_arrow(
+            false,
+            false,
+            None,
+            &plain(KeyCode::Up),
+            false
+        ));
     }
 }
