@@ -81,6 +81,64 @@ pub fn run_event_loop<B: Backend>(term: &mut Terminal<B>, mut app: App) -> Resul
     Ok(())
 }
 
+/// 単一イベントを診断ログ向けに 1 トークンへ整形する純粋関数。
+fn fmt_event(ev: &Event) -> String {
+    match ev {
+        Event::Key(k) => format!("Key({:?},{:?},{:?})", k.code, k.kind, k.modifiers),
+        Event::Mouse(m) => format!("Mouse({:?}@{},{})", m.kind, m.column, m.row),
+        Event::Paste(s) => format!("Paste(len={})", s.len()),
+        Event::Resize(w, h) => format!("Resize({w}x{h})"),
+        Event::FocusGained => "FocusGained".to_string(),
+        Event::FocusLost => "FocusLost".to_string(),
+    }
+}
+
+/// 1 バッチ分の入力イベント列を 1 行へ整形する純粋関数 (IO なし=単体テスト可能)。
+/// `budget=<n> | <ev> | <ev> ...` 形式。ホイール 1 回転で実機が何を配信して
+/// いるか (Mouse(ScrollUp/Down) が来るか / 矢印 Key が来るか / 同一バッチか) を
+/// 後から確定するための診断用。
+fn format_trace_line(events: &[Event], wheel_budget: u8) -> String {
+    let mut s = format!("budget={wheel_budget}");
+    for ev in events {
+        s.push_str(" | ");
+        s.push_str(&fmt_event(ev));
+    }
+    s
+}
+
+/// `CCNEST_INPUT_TRACE` 環境変数を初回だけ評価。未設定なら以降ゼロコスト。
+fn input_trace_enabled() -> bool {
+    use std::sync::OnceLock;
+    static ENABLED: OnceLock<bool> = OnceLock::new();
+    *ENABLED.get_or_init(|| std::env::var("CCNEST_INPUT_TRACE").is_ok())
+}
+
+/// 入力トレースが有効なときだけ、1 バッチを `%APPDATA%\ccnest\input-trace.log`
+/// (OS データディレクトリ配下) に追記する。既定では即 return し挙動・性能に
+/// 一切影響しない。全 IO は best-effort でエラー無視 (診断が本体を壊さない)。
+fn trace_input_batch(events: &[Event], wheel_budget: u8) {
+    if !input_trace_enabled() {
+        return;
+    }
+    let Some(base) = dirs::data_dir() else {
+        return;
+    };
+    let dir = base.join("ccnest");
+    if std::fs::create_dir_all(&dir).is_err() {
+        return;
+    }
+    let path = dir.join("input-trace.log");
+    if let Ok(mut f) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&path)
+    {
+        use std::io::Write as _;
+        let ts = chrono::Local::now().format("%Y-%m-%dT%H:%M:%S%.3f");
+        let _ = writeln!(f, "{} {}", ts, format_trace_line(events, wheel_budget));
+    }
+}
+
 fn process_batch(
     app: &mut App,
     events: Vec<Event>,
@@ -89,6 +147,7 @@ fn process_batch(
     tab_rects: &[(Rect, usize)],
 ) -> Result<()> {
     use crossterm::event::MouseEventKind;
+    trace_input_batch(&events, app.wheel_budget);
     let mut i = 0;
     // ホスト端末 / Windows ConPTY は alt 画面中のホイール 1 回転を
     // Mouse(ScrollUp|ScrollDown) と、それに付随する plain な Up/Down KeyEvent
@@ -1826,5 +1885,23 @@ mod tests {
             press(KeyCode::Up),
         ];
         assert!(batch_adjacent_wheel(&evs, 2));
+    }
+
+    // -- input trace formatting (診断) --
+
+    #[test]
+    fn format_trace_line_summarizes_batch() {
+        let evs = vec![
+            wheel_up(),
+            press(KeyCode::Up),
+            Event::Paste("hello".to_string()),
+            Event::Resize(80, 24),
+        ];
+        let line = format_trace_line(&evs, 3);
+        assert!(line.starts_with("budget=3"), "got: {line}");
+        assert!(line.contains("Mouse(ScrollUp@0,0)"), "got: {line}");
+        assert!(line.contains("Key(Up,Press,"), "got: {line}");
+        assert!(line.contains("Paste(len=5)"), "got: {line}");
+        assert!(line.contains("Resize(80x24)"), "got: {line}");
     }
 }
