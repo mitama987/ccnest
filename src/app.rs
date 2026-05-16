@@ -40,6 +40,12 @@ pub struct App {
     /// 後者を「ファントム矢印キー」として握りつぶすために使う。process_batch
     /// 内で wheel を見たら更新し、handle_key 直前の判定で参照する。
     pub last_wheel_at: Option<Instant>,
+    /// ホイール由来のファントム Up/Down を相殺するための予算。wheel イベント
+    /// ごとに飽和加算し、plain Up/Down を 1 つ握りつぶすたびに 1 消費する。
+    /// タイミング窓ではなく予算 + バッチ内隣接で判定するため、イベントループが
+    /// 重くて wheel とファントム矢印が別バッチに分離してもファントムを取り
+    /// 逃さない。`last_wheel_at` からの経過が decay を超えたら 0 に戻す。
+    pub wheel_budget: u8,
 }
 
 /// ペイン内のテキスト選択範囲。anchor/cursor はペイン内コンテンツ座標 (col,row)。
@@ -96,6 +102,7 @@ impl App {
             selection: None,
             last_left_click: None,
             last_wheel_at: None,
+            wheel_budget: 0,
         })
     }
 

@@ -33,6 +33,15 @@ fn main() -> Result<()> {
         EnableMouseCapture,
         EnableBracketedPaste
     )?;
+    // DECRST 1007 (Alternate Scroll Mode off): alt 画面中にホスト端末
+    // (Windows Terminal / conhost) がマウスホイール回転を `\x1b[A`/`\x1b[B`
+    // に変換して stdin に注入する挙動を止める。これがないと EnableMouseCapture
+    // で SGR マウスイベントは届くのに、同時に注入されるファントム矢印が子
+    // (Claude Code) に渡り「ホイールで履歴が呼ばれる」バグになる。crossterm の
+    // EnableMouseCapture は 1000/1002/1003/1006/1015h は送るが 1007 は触らない
+    // ため明示的に送る。CrosstermBackend が stdout を move する前に書く必要。
+    stdout.write_all(b"\x1b[?1007l")?;
+    stdout.flush()?;
     let backend = CrosstermBackend::new(stdout);
     let mut terminal = Terminal::new(backend)?;
 
@@ -59,6 +68,10 @@ fn restore_terminal() {
         DisableBracketedPaste
     )
     .ok();
+    // 起動時に落とした Alternate Scroll Mode をホスト既定 (alt 画面で 1007h)
+    // に戻す。本関数は全操作ベストエフォート / エラー無視の契約なので `let _`。
+    let _ = stdout.write_all(b"\x1b[?1007h");
+    let _ = stdout.flush();
 }
 
 /// Install a panic hook that:
