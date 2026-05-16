@@ -90,13 +90,15 @@ fn process_batch(
 ) -> Result<()> {
     use crossterm::event::MouseEventKind;
     let mut i = 0;
-    // Windows ConPTY はマウスホイール 1 回の回転を Mouse(ScrollUp|ScrollDown)
-    // イベントと、それに付随する plain な Up/Down KeyEvent の両方として配信
-    // することがある (legacy console 互換)。後者を握りつぶすために、直前イベ
-    // ントが wheel だったかと、最近のホイール時刻 (`app.last_wheel_at`) を組み
-    // 合わせて判定する。same-batch フラグだけだとバッチ跨ぎ配信を取り逃すため
-    // 50ms ウィンドウもフォールバックとして使う。
-    let mut prev_was_wheel = false;
+    // ホスト端末 / Windows ConPTY は alt 画面中のホイール 1 回転を
+    // Mouse(ScrollUp|ScrollDown) と、それに付随する plain な Up/Down KeyEvent
+    // の両方として配信することがある。後者「ファントム矢印」を握りつぶすため、
+    // wheel ごとに `app.wheel_budget` を飽和加算し、plain Up/Down で 1 消費する。
+    // 同一バッチでホイールに隣接 (順不同含む) する矢印は予算非依存で確実に落と
+    // す。イベントループが重く wheel とファントムが別バッチに分離しても decay
+    // 内なら予算で相殺できるため、旧来の 50ms タイミング窓のように負荷で破綻
+    // しない。ホスト側 alt-scroll は main.rs の DECSET 1007l で原則止めるが、
+    // 1007 を無視する端末向けにここを端末非依存の防御層として残す。
     while i < events.len() {
         // 連続する paste 系イベント (Event::Paste と classify_run でマッチする
         // Char/Enter/Tab run) をまとめて 1 回の handle_paste にする。
@@ -106,7 +108,6 @@ fn process_batch(
         if let Some((consumed, text)) = collect_paste_segment(&events[i..]) {
             handle_paste(app, &text);
             i += consumed;
-            prev_was_wheel = false;
             continue;
         }
 
@@ -117,18 +118,40 @@ fn process_batch(
             // (= 元に戻る) といった「1 押下 = N 送信」バグが起きる。Repeat はここで
             // 落とし、ホールド時のリピートは子プロセス (claude / cmd.exe) 側に任せる。
             Event::Key(key) if key.kind == KeyEventKind::Press => {
-                if should_suppress_wheel_arrow(
-                    app.sidebar_focused,
-                    app.renaming_tab.is_some(),
-                    app.last_wheel_at,
-                    key,
-                    prev_was_wheel,
-                ) {
-                    i += 1;
-                    continue;
+                if is_plain_updown_press(&events[i]) {
+                    let now = Instant::now();
+                    // 最後のホイールから decay を超えていたら予算は無効化する。
+                    let fresh = matches!(
+                        app.last_wheel_at,
+                        Some(t) if now.saturating_duration_since(t) <= WHEEL_BUDGET_DECAY
+                    );
+                    if !fresh {
+                        app.wheel_budget = 0;
+                    }
+                    let adjacent = batch_adjacent_wheel(&events, i);
+                    if should_suppress_wheel_arrow(
+                        app.sidebar_focused,
+                        app.renaming_tab.is_some(),
+                        key,
+                        app.wheel_budget,
+                        app.last_wheel_at,
+                        WHEEL_BUDGET_DECAY,
+                        now,
+                        adjacent,
+                    ) {
+                        // adjacency 由来の抑制は予算を使わない (後続バッチの
+                        // ファントムにも備えて温存)。budget 由来のときだけ消費。
+                        if !adjacent {
+                            app.wheel_budget = app.wheel_budget.saturating_sub(1);
+                        }
+                        i += 1;
+                        continue;
+                    }
                 }
+                // 抑制されなかった実キー入力。スクロール文脈は終わったとみなし
+                // 予算を捨て、誤抑制の窓を最小化する。
+                app.wheel_budget = 0;
                 handle_key(app, *key, pane_rects)?;
-                prev_was_wheel = false;
             }
             Event::Mouse(me) => {
                 if matches!(
@@ -136,18 +159,11 @@ fn process_batch(
                     MouseEventKind::ScrollUp | MouseEventKind::ScrollDown
                 ) {
                     app.last_wheel_at = Some(Instant::now());
-                    prev_was_wheel = true;
-                } else {
-                    prev_was_wheel = false;
+                    app.wheel_budget = app.wheel_budget.saturating_add(1).min(WHEEL_BUDGET_CAP);
                 }
                 handle_mouse(app, *me, pane_rects, sidebar_file_rect, tab_rects);
             }
-            Event::Resize(_, _) => {
-                prev_was_wheel = false;
-            }
-            _ => {
-                prev_was_wheel = false;
-            }
+            _ => {}
         }
         i += 1;
     }
@@ -1090,24 +1106,82 @@ fn is_ctrl_c(k: &KeyEvent) -> bool {
         && matches!(k.code, KeyCode::Char('c') | KeyCode::Char('C'))
 }
 
-/// Windows ConPTY 等が「マウスホイール回転 = MouseEvent + plain Up/Down KeyEvent」
-/// の両方を配信してくる挙動に対し、後者の「ファントム矢印キー」を握りつぶす判定。
+/// 1 回のホイール回転で蓄積するファントム予算の上限。素早いフリックでも
+/// バッチあたり数ノッチなので、これ以上は溜めない (溜まりすぎは decay で掃除)。
+const WHEEL_BUDGET_CAP: u8 = 8;
+
+/// 最後のホイールからこの時間を超えたら予算を 0 に戻す。イベントループの
+/// ストールを跨いでファントムを相殺できる程度に長く、スクロールをやめた後に
+/// ユーザーが意図して押す Up/Down を食い続けない程度に短く。
+const WHEEL_BUDGET_DECAY: Duration = Duration::from_millis(350);
+
+/// `ev` がホイール (ScrollUp/ScrollDown) の Mouse イベントか。
+fn is_wheel_event(ev: &Event) -> bool {
+    matches!(
+        ev,
+        Event::Mouse(me)
+            if matches!(
+                me.kind,
+                crossterm::event::MouseEventKind::ScrollUp
+                    | crossterm::event::MouseEventKind::ScrollDown
+            )
+    )
+}
+
+/// `ev` が修飾なしの Up/Down キー押下 (Press) か。ファントム矢印の候補判定に使う。
+/// Release/Repeat や Shift/Ctrl/Alt 付きは候補にしない (それぞれ別用途)。
+fn is_plain_updown_press(ev: &Event) -> bool {
+    matches!(
+        ev,
+        Event::Key(k)
+            if k.kind != KeyEventKind::Release
+                && k.modifiers.is_empty()
+                && matches!(k.code, KeyCode::Up | KeyCode::Down)
+    )
+}
+
+/// バッチ `events` の位置 `idx` の plain Up/Down が、直前 or 直後の「非 paste」
+/// 隣接イベントとしてホイールに挟まれているか。ホスト端末がホイールとファントム
+/// 矢印を順不同・同一バッチで配信するケース (矢印 → ホイール含む) を、予算に
+/// 依存せず確実に拾う。隣接判定は厳密に「最も近い非 paste イベント」のみを見る。
+fn batch_adjacent_wheel(events: &[Event], idx: usize) -> bool {
+    let nearest_before = events[..idx]
+        .iter()
+        .rev()
+        .find(|e| !matches!(e, Event::Paste(_)));
+    if nearest_before.is_some_and(is_wheel_event) {
+        return true;
+    }
+    let nearest_after = events
+        .get(idx + 1..)
+        .and_then(|s| s.iter().find(|e| !matches!(e, Event::Paste(_))));
+    nearest_after.is_some_and(is_wheel_event)
+}
+
+/// ホスト端末がホイール回転を `\x1b[A`/`\x1b[B` に変換して注入してくる
+/// 「ファントム矢印キー」を握りつぶす純粋述語。`&App` に依存させず bare field を
+/// 受けることで `App::new` (内部で実 PTY を spawn) なしに単体テスト可能。
 ///
-/// 抑制発動条件 (ALL):
+/// 抑制条件:
 /// - サイドバーフォーカス中でない (サイドバーカーソル移動を絶対に壊さない)
 /// - rename 中でない
-/// - plain な `Up` / `Down` (Shift/Ctrl/Alt 修飾なし) — Shift+Up/Down は
-///   `ScrollLineUp/Down`、Ctrl+Up/Down は `FocusUp/Down` なので除外
-/// - 直前イベントが `ScrollUp`/`ScrollDown` だった OR `last_wheel_at` が 50ms 以内
+/// - plain な `Up` / `Down` (Shift+Up/Down=ScrollLine, Ctrl+Up/Down=Focus,
+///   Alt は別用途なので修飾付きは除外)
+/// - かつ次のいずれか:
+///   - `adjacent_wheel` = 同一バッチでホイールに隣接 (予算非依存)
+///   - decay 内に積まれた `budget` が残っている (バッチ跨ぎ・順不同に強い)
 ///
-/// 関数シグネチャは `&App` に依存させず、必要な field を bare に受ける。これにより
-/// `App::new` (内部で実 PTY を spawn) を呼ばずに単体テスト可能になる。
+/// 予算の減算は呼び出し側 (process_batch) で行う。本関数は副作用なし。
+#[allow(clippy::too_many_arguments)]
 fn should_suppress_wheel_arrow(
     sidebar_focused: bool,
     renaming: bool,
-    last_wheel_at: Option<Instant>,
     key: &KeyEvent,
-    prev_was_wheel: bool,
+    budget: u8,
+    last_wheel_at: Option<Instant>,
+    decay: Duration,
+    now: Instant,
+    adjacent_wheel: bool,
 ) -> bool {
     if sidebar_focused || renaming {
         return false;
@@ -1118,10 +1192,11 @@ fn should_suppress_wheel_arrow(
     if !matches!(key.code, KeyCode::Up | KeyCode::Down) {
         return false;
     }
-    if prev_was_wheel {
+    if adjacent_wheel {
         return true;
     }
-    matches!(last_wheel_at, Some(t) if t.elapsed() < Duration::from_millis(50))
+    let fresh = matches!(last_wheel_at, Some(t) if now.saturating_duration_since(t) <= decay);
+    fresh && budget > 0
 }
 
 fn key_to_bytes(key: &KeyEvent) -> Vec<u8> {
@@ -1183,7 +1258,7 @@ fn key_to_bytes(key: &KeyEvent) -> Vec<u8> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
+    use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseEventKind};
 
     fn press(code: KeyCode) -> Event {
         Event::Key(KeyEvent::new_with_kind(
@@ -1503,143 +1578,253 @@ mod tests {
         assert_eq!(lines, vec!["alpha", "beta", "gamma"]);
     }
 
-    // --- should_suppress_wheel_arrow ---------------------------------------
+    // --- wheel-budget phantom-arrow suppression ----------------------------
     //
-    // Windows ConPTY が「マウスホイール = Mouse + plain Up/Down KeyEvent」の両方を
-    // 配信するケースで、後者だけを握りつぶす。Shift/Ctrl 修飾付きやサイドバーフォーカス
-    // 中の Up/Down は scroll / focus / sidebar ナビ用なので影響させない。
+    // ホスト端末が alt 画面中のホイールを `\x1b[A`/`\x1b[B` に変換注入してくる
+    // ケースで、その「ファントム矢印」だけを握りつぶす。タイミング窓ではなく
+    // 「予算 (wheel ごと加算 / 矢印で消費)」+「同一バッチ隣接」で判定するため、
+    // イベントループが重く wheel とファントムが別バッチ・順不同で来ても堅牢。
+
+    const D: Duration = Duration::from_millis(350);
 
     fn plain(code: KeyCode) -> KeyEvent {
         KeyEvent::new(code, KeyModifiers::NONE)
     }
 
-    #[test]
-    fn suppress_wheel_arrow_when_prev_was_wheel() {
-        assert!(should_suppress_wheel_arrow(
-            false,
-            false,
-            None,
-            &plain(KeyCode::Up),
-            true
-        ));
-        assert!(should_suppress_wheel_arrow(
-            false,
-            false,
-            None,
-            &plain(KeyCode::Down),
-            true
-        ));
+    fn wheel(kind: MouseEventKind) -> Event {
+        Event::Mouse(MouseEvent {
+            kind,
+            column: 0,
+            row: 0,
+            modifiers: KeyModifiers::NONE,
+        })
+    }
+    fn wheel_up() -> Event {
+        wheel(MouseEventKind::ScrollUp)
+    }
+    fn wheel_down() -> Event {
+        wheel(MouseEventKind::ScrollDown)
     }
 
+    // -- should_suppress_wheel_arrow --
+
     #[test]
-    fn suppress_wheel_arrow_within_50ms_window() {
-        let now = Some(Instant::now());
+    fn suppress_when_budget_and_recent_wheel() {
+        let now = Instant::now();
         assert!(should_suppress_wheel_arrow(
             false,
             false,
+            &plain(KeyCode::Up),
+            1,
+            Some(now),
+            D,
             now,
-            &plain(KeyCode::Up),
-            false
+            false,
         ));
     }
 
     #[test]
-    fn dont_suppress_wheel_arrow_after_window() {
-        let old = Some(Instant::now() - Duration::from_millis(200));
+    fn dont_suppress_when_no_budget_no_adjacency_no_wheel() {
+        let now = Instant::now();
         assert!(!should_suppress_wheel_arrow(
             false,
             false,
-            old,
-            &plain(KeyCode::Up),
-            false
+            &plain(KeyCode::Down),
+            0,
+            None,
+            D,
+            now,
+            false,
         ));
     }
 
     #[test]
-    fn dont_suppress_shift_up() {
-        let key = KeyEvent::new(KeyCode::Up, KeyModifiers::SHIFT);
-        assert!(!should_suppress_wheel_arrow(false, false, None, &key, true));
+    fn suppress_when_adjacent_even_without_budget() {
+        let now = Instant::now();
+        assert!(should_suppress_wheel_arrow(
+            false,
+            false,
+            &plain(KeyCode::Up),
+            0,
+            None,
+            D,
+            now,
+            true,
+        ));
     }
 
     #[test]
-    fn dont_suppress_ctrl_up() {
-        let key = KeyEvent::new(KeyCode::Up, KeyModifiers::CONTROL);
-        assert!(!should_suppress_wheel_arrow(false, false, None, &key, true));
+    fn dont_suppress_when_budget_but_wheel_stale() {
+        let now = Instant::now();
+        let stale = now - Duration::from_millis(400); // > D(350)
+        assert!(!should_suppress_wheel_arrow(
+            false,
+            false,
+            &plain(KeyCode::Up),
+            3,
+            Some(stale),
+            D,
+            now,
+            false,
+        ));
     }
 
     #[test]
-    fn dont_suppress_alt_up() {
-        let key = KeyEvent::new(KeyCode::Up, KeyModifiers::ALT);
-        assert!(!should_suppress_wheel_arrow(false, false, None, &key, true));
+    fn suppress_when_budget_and_wheel_within_decay() {
+        let now = Instant::now();
+        let recent = now - Duration::from_millis(100); // <= D
+        assert!(should_suppress_wheel_arrow(
+            false,
+            false,
+            &plain(KeyCode::Up),
+            3,
+            Some(recent),
+            D,
+            now,
+            false,
+        ));
     }
 
     #[test]
     fn dont_suppress_when_sidebar_focused() {
+        let now = Instant::now();
         assert!(!should_suppress_wheel_arrow(
             true,
             false,
-            None,
             &plain(KeyCode::Up),
-            true
+            5,
+            Some(now),
+            D,
+            now,
+            true,
         ));
     }
 
     #[test]
     fn dont_suppress_when_renaming() {
+        let now = Instant::now();
         assert!(!should_suppress_wheel_arrow(
             false,
             true,
-            None,
             &plain(KeyCode::Up),
-            true
+            5,
+            Some(now),
+            D,
+            now,
+            true,
         ));
     }
 
     #[test]
-    fn dont_suppress_left_or_right_arrow() {
+    fn dont_suppress_ctrl_up() {
+        let now = Instant::now();
+        let key = KeyEvent::new(KeyCode::Up, KeyModifiers::CONTROL);
         assert!(!should_suppress_wheel_arrow(
             false,
             false,
-            None,
+            &key,
+            5,
+            Some(now),
+            D,
+            now,
+            true,
+        ));
+    }
+
+    #[test]
+    fn dont_suppress_shift_down() {
+        let now = Instant::now();
+        let key = KeyEvent::new(KeyCode::Down, KeyModifiers::SHIFT);
+        assert!(!should_suppress_wheel_arrow(
+            false,
+            false,
+            &key,
+            5,
+            Some(now),
+            D,
+            now,
+            true,
+        ));
+    }
+
+    #[test]
+    fn dont_suppress_left_or_right() {
+        let now = Instant::now();
+        assert!(!should_suppress_wheel_arrow(
+            false,
+            false,
             &plain(KeyCode::Left),
-            true
+            5,
+            Some(now),
+            D,
+            now,
+            true,
         ));
         assert!(!should_suppress_wheel_arrow(
             false,
             false,
-            None,
             &plain(KeyCode::Right),
-            true
+            5,
+            Some(now),
+            D,
+            now,
+            true,
         ));
     }
 
+    // -- helper predicates --
+
     #[test]
-    fn dont_suppress_other_keys() {
-        assert!(!should_suppress_wheel_arrow(
-            false,
-            false,
-            None,
-            &plain(KeyCode::Char('a')),
-            true
-        ));
-        assert!(!should_suppress_wheel_arrow(
-            false,
-            false,
-            None,
-            &plain(KeyCode::Enter),
-            true
-        ));
+    fn is_wheel_event_detects_scroll_only() {
+        assert!(is_wheel_event(&wheel_up()));
+        assert!(is_wheel_event(&wheel_down()));
+        assert!(!is_wheel_event(&press(KeyCode::Up)));
     }
 
     #[test]
-    fn dont_suppress_when_no_wheel_signal() {
-        // wheel が一度も来ていない場合は通常通り通過する。
-        assert!(!should_suppress_wheel_arrow(
-            false,
-            false,
-            None,
-            &plain(KeyCode::Up),
-            false
-        ));
+    fn is_plain_updown_press_classifies() {
+        assert!(is_plain_updown_press(&press(KeyCode::Up)));
+        assert!(is_plain_updown_press(&press(KeyCode::Down)));
+        assert!(!is_plain_updown_press(&ctrl_press(KeyCode::Up)));
+        assert!(!is_plain_updown_press(&press(KeyCode::Left)));
+        assert!(!is_plain_updown_press(&release(KeyCode::Up)));
+    }
+
+    // -- batch_adjacent_wheel --
+
+    #[test]
+    fn batch_adjacent_wheel_prev_is_wheel() {
+        let evs = vec![wheel_up(), press(KeyCode::Up)];
+        assert!(batch_adjacent_wheel(&evs, 1));
+    }
+
+    #[test]
+    fn batch_adjacent_wheel_next_is_wheel_reordered() {
+        // ファントム矢印がホイールより先に届くケース。
+        let evs = vec![press(KeyCode::Up), wheel_up()];
+        assert!(batch_adjacent_wheel(&evs, 0));
+    }
+
+    #[test]
+    fn batch_adjacent_wheel_lone_arrow_is_false() {
+        let evs = vec![press(KeyCode::Up)];
+        assert!(!batch_adjacent_wheel(&evs, 0));
+    }
+
+    #[test]
+    fn batch_adjacent_wheel_non_immediate_is_false() {
+        // 隣接は厳密に「最も近い非 paste イベント」。間に実キーが挟まれば false。
+        let evs = vec![wheel_up(), press(KeyCode::Char('a')), press(KeyCode::Up)];
+        assert!(!batch_adjacent_wheel(&evs, 2));
+    }
+
+    #[test]
+    fn batch_adjacent_wheel_skips_paste() {
+        let evs = vec![
+            Event::Paste("x".to_string()),
+            wheel_up(),
+            press(KeyCode::Up),
+        ];
+        assert!(batch_adjacent_wheel(&evs, 2));
     }
 }

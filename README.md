@@ -147,3 +147,4 @@ MIT
 ## Version History
 
 ver0.1 - 2026-04-25 - Documented iconized and colorized Files sidebar rows.
+ver0.1.4 - 2026-05-16 - Disabled host alternate-scroll (DECSET 1007) and added stall-robust wheel-budget phantom-arrow suppression so the mouse wheel no longer recalls Claude prompt history.
