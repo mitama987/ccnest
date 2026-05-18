@@ -46,6 +46,22 @@ pub struct App {
     /// 重くて wheel とファントム矢印が別バッチに分離してもファントムを取り
     /// 逃さない。`last_wheel_at` からの経過が decay を超えたら 0 に戻す。
     pub wheel_budget: u8,
+    /// マウスモード ON のペインで左ボタンを押した直後の保留状態。
+    /// 「クリック (= アプリへ転送)」か「ドラッグ (= ccnest ローカル選択)」かを
+    /// 次イベントで判定するまで Down を転送せずここに溜める。
+    pub pending_mouse: Option<PendingMouse>,
+    /// マウスモード ON のペインで素ドラッグによる ccnest ローカル選択が進行中。
+    /// この間 Drag/Up は転送せず既存ローカル選択アームへ流す。
+    pub mouse_local_drag: bool,
+}
+
+/// 左 Down 押下の保留 (press/drag 判定待ち)。座標はペインローカル (0 始まり)。
+#[derive(Debug, Clone, Copy)]
+pub struct PendingMouse {
+    pub pid: PaneId,
+    pub lx: u16,
+    pub ly: u16,
+    pub at: Instant,
 }
 
 /// ペイン内のテキスト選択範囲。anchor/cursor はペイン内コンテンツ座標 (col,row)。
@@ -103,6 +119,8 @@ impl App {
             last_left_click: None,
             last_wheel_at: None,
             wheel_budget: 0,
+            pending_mouse: None,
+            mouse_local_drag: false,
         })
     }
 
