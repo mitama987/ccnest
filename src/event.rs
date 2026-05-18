@@ -652,6 +652,14 @@ fn handle_mouse(
     let mx = me.column as i32;
     let my = me.row as i32;
 
+    // フォーカス先ペインの内側アプリがマウス報告を要求しているなら、
+    // crossterm の MouseEvent をそのアプリ向けレポートに変換して PTY へ
+    // 転送する。転送した (or アプリが掴んでいて飲み込んだ) ら以降の
+    // ccnest 内部 UI 処理 (選択/スクロール/タブ等) はスキップする。
+    if try_forward_mouse(app, &me, pane_rects) {
+        return;
+    }
+
     match me.kind {
         ScrollUp | ScrollDown => {
             let target = pane_rects
@@ -816,6 +824,207 @@ fn handle_mouse(
         }
         _ => {}
     }
+}
+
+/// マウスモードを考慮してイベントをフォーカス先ペインの PTY へ転送する。
+///
+/// 戻り値 `true` = このイベントは処理済み (転送した / アプリが掴んでいる
+/// ので飲み込んだ / ローカルドラッグ進行中で既存アームへ委譲した) なので
+/// `handle_mouse` は即 return すべき。`false` = マウスモード非該当なので
+/// 従来の ccnest 内部 UI 処理を続行する。
+///
+/// ジェスチャ判定 (ユーザ要望): マウスモード ON ペインで左ボタンを押したら
+/// Down を即転送せず保留し、次が別セルへの Drag なら ccnest ローカルの
+/// テキスト選択 (Shift 不要)、次が同セルでの Up ならクリック確定として
+/// アプリへ合成 Down+Up を転送する。Shift / Ctrl は強制ローカル
+/// (テキスト選択 / Ctrl+wheel リサイズ / Ctrl+クリック URL を温存)。
+/// 右/中/ホイール/Moved はジェスチャ判定せず即転送。
+fn try_forward_mouse(app: &mut App, me: &MouseEvent, pane_rects: &HashMap<PaneId, Rect>) -> bool {
+    use crate::mouse::MouseProtocolMode;
+    use crossterm::event::{MouseButton, MouseEventKind::*};
+
+    let mx = me.column as i32;
+    let my = me.row as i32;
+
+    // (1) ローカルドラッグ選択進行中: Drag/Up は既存ローカルアームへ委譲。
+    if app.mouse_local_drag {
+        if matches!(me.kind, Up(MouseButton::Left)) {
+            app.mouse_local_drag = false;
+        }
+        return false;
+    }
+
+    // (flush) 保留クリックがあり続きが Drag(Left)/Up(Left) でない別イベント
+    // なら、保留をクリックとして転送フラッシュしてから現イベントを処理する
+    // (Down のまま Up を取り逃してクリックが消えるのを防ぐ)。
+    let is_left_continuation = matches!(me.kind, Drag(MouseButton::Left) | Up(MouseButton::Left));
+    if app.pending_mouse.is_some() && !is_left_continuation {
+        flush_pending_click(app);
+    }
+
+    // (2) ペイン上か (タブバー/サイドバー/境界は None → ローカル)。
+    let Some((pid, rect)) = find_pane_at(pane_rects, mx, my) else {
+        return false;
+    };
+    // (3)(4) このペインの内側アプリのマウスモード/エンコーディングを取得。
+    let Some((mode, enc)) = app.panes.get(&pid).and_then(|p| {
+        p.parser.lock().ok().map(|g| {
+            (
+                g.screen().mouse_protocol_mode(),
+                g.screen().mouse_protocol_encoding(),
+            )
+        })
+    }) else {
+        return false;
+    };
+    // (5) マウスモード None: 通常ペイン → 既存挙動を完全温存。
+    if mode == MouseProtocolMode::None {
+        return false;
+    }
+    // (6) ペインローカル座標 (既存クランプイディオムを踏襲)。
+    let lx = (mx - rect.x).clamp(0, rect.w.saturating_sub(1)) as u16;
+    let ly = (my - rect.y).clamp(0, rect.h.saturating_sub(1)) as u16;
+    // (7) Shift / Ctrl は強制ローカル。
+    if me
+        .modifiers
+        .intersects(KeyModifiers::SHIFT | KeyModifiers::CONTROL)
+    {
+        return false;
+    }
+
+    // (8) ジェスチャ判定。
+    match me.kind {
+        Down(MouseButton::Left) => {
+            // 即フォーカス + 保留 (press/drag 判定待ち)。何も転送しない。
+            app.current_tab_mut().focused = pid;
+            app.selection = None;
+            app.sidebar_focused = false;
+            app.pending_mouse = Some(crate::app::PendingMouse {
+                pid,
+                lx,
+                ly,
+                at: Instant::now(),
+            });
+            true
+        }
+        Drag(MouseButton::Left) => {
+            if let Some(p) = app.pending_mouse {
+                if p.pid == pid && (p.lx != lx || p.ly != ly) {
+                    // 別セルへ移動 = ドラッグ選択確定。ローカルへ委譲する。
+                    // 既存 Drag(Left) アームは selection 既存前提なのでここで生成。
+                    app.pending_mouse = None;
+                    app.mouse_local_drag = true;
+                    app.current_tab_mut().focused = pid;
+                    app.selection = Some(crate::app::Selection {
+                        pane_id: pid,
+                        anchor: (p.lx, p.ly as i32),
+                        cursor: (lx, ly as i32),
+                        dragging: true,
+                        auto_scroll: 0,
+                    });
+                    app.last_left_click = Some((Instant::now(), pid, p.ly));
+                    return false; // 同 Drag を既存アームで cursor 追従
+                }
+                // 同セル: まだクリックの可能性。保留継続。
+                return true;
+            }
+            forward_or_swallow(app, pid, mode, enc, me, lx, ly)
+        }
+        Up(MouseButton::Left) => {
+            if let Some(p) = app.pending_mouse.take() {
+                // ドラッグ未発生 = クリック確定 → 合成 Down+Up を転送。
+                app.current_tab_mut().focused = pid;
+                app.selection = None;
+                app.sidebar_focused = false;
+                send_synth_click(app, pid, mode, enc, me.modifiers, p.lx, p.ly);
+                return true;
+            }
+            forward_or_swallow(app, pid, mode, enc, me, lx, ly)
+        }
+        _ => {
+            // 右/中ボタン・ホイール・Moved はジェスチャ判定せず即転送。
+            forward_or_swallow(app, pid, mode, enc, me, lx, ly)
+        }
+    }
+}
+
+/// エンコードして PTY へ書く。`mode` の gating で報告対象外のときも、
+/// アプリがマウスを掴んでいる以上ローカル UI を誤発火させないため
+/// 飲み込む (常に `true`)。
+fn forward_or_swallow(
+    app: &mut App,
+    pid: PaneId,
+    mode: crate::mouse::MouseProtocolMode,
+    enc: crate::mouse::MouseProtocolEncoding,
+    me: &MouseEvent,
+    lx: u16,
+    ly: u16,
+) -> bool {
+    if let Some(bytes) = crate::mouse::encode_mouse_report(mode, enc, me, lx, ly) {
+        if let Some(p) = app.panes.get(&pid) {
+            p.write(&bytes);
+        }
+    }
+    true
+}
+
+/// クリック確定時にアプリへ送る合成 press+release。`Press` モードでは
+/// release レポートが None になるので press のみ送られる (X10 互換)。
+fn send_synth_click(
+    app: &mut App,
+    pid: PaneId,
+    mode: crate::mouse::MouseProtocolMode,
+    enc: crate::mouse::MouseProtocolEncoding,
+    modifiers: KeyModifiers,
+    lx: u16,
+    ly: u16,
+) {
+    use crossterm::event::{MouseButton, MouseEvent, MouseEventKind};
+    let down = MouseEvent {
+        kind: MouseEventKind::Down(MouseButton::Left),
+        column: lx,
+        row: ly,
+        modifiers,
+    };
+    let up = MouseEvent {
+        kind: MouseEventKind::Up(MouseButton::Left),
+        column: lx,
+        row: ly,
+        modifiers,
+    };
+    let mut out = Vec::new();
+    if let Some(b) = crate::mouse::encode_mouse_report(mode, enc, &down, lx, ly) {
+        out.extend_from_slice(&b);
+    }
+    if let Some(b) = crate::mouse::encode_mouse_report(mode, enc, &up, lx, ly) {
+        out.extend_from_slice(&b);
+    }
+    if !out.is_empty() {
+        if let Some(p) = app.panes.get(&pid) {
+            p.write(&out);
+        }
+    }
+}
+
+/// 保留中の Down を「クリック」として確定し転送する (Up を取り逃した時の保険)。
+fn flush_pending_click(app: &mut App) {
+    let Some(p) = app.pending_mouse.take() else {
+        return;
+    };
+    let Some((mode, enc)) = app.panes.get(&p.pid).and_then(|pane| {
+        pane.parser.lock().ok().map(|g| {
+            (
+                g.screen().mouse_protocol_mode(),
+                g.screen().mouse_protocol_encoding(),
+            )
+        })
+    }) else {
+        return;
+    };
+    if mode == crate::mouse::MouseProtocolMode::None {
+        return;
+    }
+    send_synth_click(app, p.pid, mode, enc, KeyModifiers::NONE, p.lx, p.ly);
 }
 
 fn find_pane_at(pane_rects: &HashMap<PaneId, Rect>, mx: i32, my: i32) -> Option<(PaneId, Rect)> {
