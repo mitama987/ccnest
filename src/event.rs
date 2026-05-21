@@ -1034,27 +1034,50 @@ fn find_pane_at(pane_rects: &HashMap<PaneId, Rect>, mx: i32, my: i32) -> Option<
         .map(|(pid, r)| (*pid, *r))
 }
 
-/// クリック位置 (col,row) に重なる URL を、その行の vt100 セル列から検出して返す。
-/// 行内検出のみ (折り返し URL は対象外)。`http://` / `https://` をスキャンし、空白か
-/// 制御文字に当たるまで取り込む。末尾の句読点 (.,;:!?)]>") は URL 外として削る。
+/// クリック位置 (col,row) に重なる URL を vt100 セル列から検出して返す。
+///
+/// クリック行と前後の **ソフトラップ連鎖行** (vt100 の `row_wrapped` で連結
+/// された行群) を 1 本の文字列として扱う。狭いペインで折り返された URL でも、
+/// 連鎖全体を 1 つの URL として正しく取り出せる。
+///
+/// 検出規則: `http://` / `https://` をスキャンし、空白か制御文字に当たるまで
+/// 取り込む。末尾の句読点 (`.` `,` `;` `:` `!` `?` `)` `]` `}` `>` `"` `'`)
+/// は URL 外として削る。
 fn url_at_cell(pane: &crate::pane::Pane, col: u16, row: u16) -> Option<String> {
     let parser = pane.parser.lock().ok()?;
-    let screen = parser.screen();
-    let (_rows, cols) = screen.size();
+    url_at_cell_in_screen(parser.screen(), col, row)
+}
 
-    // 行の文字列を (char, 表示列) 列として展開。空セルは半角スペース扱い。
-    // ワイド文字や合成は同じ表示列に複数 char が乗ることがあるため pair で持つ。
-    let mut chars: Vec<(char, u16)> = Vec::new();
-    for x in 0..cols {
-        let contents = screen
-            .cell(row, x)
-            .map(|c| c.contents())
-            .unwrap_or_default();
-        if contents.is_empty() {
-            chars.push((' ', x));
-        } else {
-            for ch in contents.chars() {
-                chars.push((ch, x));
+fn url_at_cell_in_screen(screen: &vt100::Screen, col: u16, row: u16) -> Option<String> {
+    let (rows, cols) = screen.size();
+    if row >= rows {
+        return None;
+    }
+
+    // クリック行を含むソフトラップ連鎖を [chain_start, chain_end] で求める。
+    // chain_start = row から後退して row_wrapped(prev) が true の間まで遡る。
+    // chain_end   = row から前進して row_wrapped(cur)  が true の間まで進む。
+    let mut chain_start = row;
+    while chain_start > 0 && screen.row_wrapped(chain_start - 1) {
+        chain_start -= 1;
+    }
+    let mut chain_end = row;
+    while chain_end + 1 < rows && screen.row_wrapped(chain_end) {
+        chain_end += 1;
+    }
+
+    // 連鎖行の文字列を (char, 表示列, 行) として展開。空セルは半角スペース扱い。
+    // ワイド文字や合成は同じセルに複数 char が乗るため triple で持つ。
+    let mut chars: Vec<(char, u16, u16)> = Vec::new();
+    for r in chain_start..=chain_end {
+        for x in 0..cols {
+            let contents = screen.cell(r, x).map(|c| c.contents()).unwrap_or_default();
+            if contents.is_empty() {
+                chars.push((' ', x, r));
+            } else {
+                for ch in contents.chars() {
+                    chars.push((ch, x, r));
+                }
             }
         }
     }
@@ -1113,10 +1136,14 @@ fn url_at_cell(pane: &crate::pane::Pane, col: u16, row: u16) -> Option<String> {
         }
 
         if end > i {
-            let col_start = chars[i].1;
-            let col_end = chars[end - 1].1;
-            if col >= col_start && col <= col_end {
-                let url: String = chars[i..end].iter().map(|(c, _)| *c).collect();
+            // ヒット判定: URL を構成するいずれかのセルがクリック位置 (col,row)
+            // と一致すれば、その URL を返す。連鎖行間も判定対象なので、
+            // 折り返した URL の 2 行目をクリックしても拾える。
+            let hit = chars[i..end]
+                .iter()
+                .any(|(_, c_col, c_row)| *c_col == col && *c_row == row);
+            if hit {
+                let url: String = chars[i..end].iter().map(|(c, _, _)| *c).collect();
                 return Some(url);
             }
             i = end;
@@ -1167,7 +1194,10 @@ fn extract_selected_text_from_parser(
     let saved_scrollback = parser.screen().scrollback() as i32;
     let (start, end) = normalize_range(sel.anchor, sel.cursor);
 
-    let mut lines: Vec<String> = Vec::new();
+    // (text, wrapped_to_next): wrapped_to_next が true の行は次行と
+    // ソフトラップで連結しているので、コピー時に '\n' を挟まず、末尾の
+    // trim_end も行わない (URL 末尾文字が削れないように)。
+    let mut rows: Vec<(String, bool)> = Vec::new();
     let mut row = start.1;
 
     // 各反復で「row が画面 y=0 に来るような scrollback offset」をセットし、
@@ -1227,7 +1257,14 @@ fn extract_selected_text_from_parser(
                     }
                 }
             }
-            lines.push(line.trim_end().to_string());
+            // ソフトラップ判定。
+            // 1) vt100 がこの行を wrapped と markしている (右端まで埋まり次行へ続く)。
+            // 2) かつ、行末まで切れずに読み取れている (x1 が cols-1)。
+            //    範囲末尾の `end` を含む行で x1 が短く切られている場合は
+            //    URL 文字列としての連続性を保証できないので結合扱いにしない。
+            let wrapped_to_next =
+                screen.row_wrapped(y_u16) && upper == cols_now.saturating_sub(1) && our_row < end.1;
+            rows.push((line, wrapped_to_next));
             row = our_row + 1;
             progressed = true;
             y += 1;
@@ -1239,7 +1276,23 @@ fn extract_selected_text_from_parser(
     }
 
     parser.set_scrollback(saved_scrollback.max(0) as usize);
-    lines.join("\n")
+
+    // ソフトラップ行は改行・末尾trim無しで結合。それ以外は trim_end + '\n'。
+    let mut out = String::new();
+    let last_idx = rows.len().saturating_sub(1);
+    for (i, (line, wrapped)) in rows.iter().enumerate() {
+        let is_last = i == last_idx;
+        if *wrapped {
+            // 折り返し行: 末尾の URL/英数字が削れないよう trim せず連結し、改行も挟まない。
+            out.push_str(line);
+        } else {
+            out.push_str(line.trim_end());
+            if !is_last {
+                out.push('\n');
+            }
+        }
+    }
+    out
 }
 
 /// 行 y の「実テキスト範囲」を返す。
@@ -1846,6 +1899,90 @@ mod tests {
         assert_eq!(lines, vec!["alpha", "beta", "gamma"]);
     }
 
+    /// 狭い PTY (cols=20) で long URL を出すと、vt100 がソフトラップで
+    /// 次行へ折り返す。コピー時にこの折り返しを '\n' で結合してしまうと
+    /// URL が壊れる (実際のユーザ報告: %E2%94%82%E2%94%82 ≒ 罫線 / 改行混入)。
+    /// row_wrapped() を見て、ソフトラップ行は改行を入れずに連結することを確認。
+    #[test]
+    fn extract_selected_text_joins_wrapped_url_without_newline() {
+        let mut parser = vt100::Parser::new(5, 20, 100);
+        // 20 列に収まらない長さの URL。先頭行 20 文字 + 折り返し 20 文字 + 残り。
+        let url = "https://example.com/api/v1/long-path?token=abc123xyz&product=cli";
+        parser.process(url.as_bytes());
+
+        // URL が収まる行までを選択 (anchor=(0,0), cursor=(19, 3))。
+        // 64 文字 / 20 cols = 行 0..3 に跨る。
+        let sel = crate::app::Selection {
+            pane_id: 1,
+            anchor: (0, 0),
+            cursor: (19, 3),
+            dragging: false,
+            auto_scroll: 0,
+        };
+        let text = extract_selected_text_from_parser(&mut parser, sel);
+        // 改行が混入していないこと。URL がそのまま再構成されていること。
+        assert!(
+            !text.contains('\n'),
+            "expected no newline in wrapped URL copy, got: {text:?}"
+        );
+        assert_eq!(text, url);
+    }
+
+    /// ハードラップ (明示的な \r\n) は従来どおり '\n' で結合される
+    /// (ソフトラップ修正がハードラップを壊していないことの回帰テスト)。
+    #[test]
+    fn extract_selected_text_preserves_newline_for_hard_wrap() {
+        let mut parser = vt100::Parser::new(5, 20, 100);
+        parser.process(b"first\r\nsecond\r\nthird");
+        let sel = crate::app::Selection {
+            pane_id: 1,
+            anchor: (0, 0),
+            cursor: (19, 2),
+            dragging: false,
+            auto_scroll: 0,
+        };
+        let text = extract_selected_text_from_parser(&mut parser, sel);
+        assert_eq!(text, "first\nsecond\nthird");
+    }
+
+    /// 折り返した URL のどの行をクリックしても、URL 全体が取れる。
+    /// 1 行目クリック / 2 行目クリック / 3 行目クリックを順に検証。
+    #[test]
+    fn url_at_cell_detects_wrapped_url() {
+        let mut parser = vt100::Parser::new(5, 20, 100);
+        let url = "https://example.com/api/v1/long-path?x=1";
+        parser.process(url.as_bytes());
+
+        // 1 行目 (URL の先頭付近) をクリック。
+        let got = url_at_cell_in_screen(parser.screen(), 5, 0);
+        assert_eq!(got.as_deref(), Some(url));
+
+        // 2 行目 (折り返し続き) をクリック。
+        let got = url_at_cell_in_screen(parser.screen(), 3, 1);
+        assert_eq!(got.as_deref(), Some(url));
+
+        // URL の最終文字セル (url.len() = 40, cols = 20 → row 1, col 19) をクリック。
+        let last_idx = url.len() - 1;
+        let last_row = (last_idx / 20) as u16;
+        let last_col = (last_idx % 20) as u16;
+        let got = url_at_cell_in_screen(parser.screen(), last_col, last_row);
+        assert_eq!(got.as_deref(), Some(url));
+    }
+
+    /// URL の外をクリックしたら None。連鎖行内でも URL の cell を踏んでなければ拾わない。
+    #[test]
+    fn url_at_cell_misses_when_outside_url() {
+        let mut parser = vt100::Parser::new(5, 20, 100);
+        parser.process(b"prefix https://example.com/x suffix");
+        // 先頭 "prefix" の `p` (col=0, row=0) はヒットしない。
+        let got = url_at_cell_in_screen(parser.screen(), 0, 0);
+        assert!(got.is_none(), "got: {got:?}");
+        // URL 範囲内 (col=10, row=0 付近) はヒット。
+        let got = url_at_cell_in_screen(parser.screen(), 10, 0);
+        assert!(got.is_some());
+        assert!(got.as_deref().unwrap().starts_with("https://example.com"));
+    }
+
     // --- wheel-budget phantom-arrow suppression ----------------------------
     //
     // ホスト端末が alt 画面中のホイールを `\x1b[A`/`\x1b[B` に変換注入してくる
@@ -2114,3 +2251,8 @@ mod tests {
         assert!(line.contains("Resize(80x24)"), "got: {line}");
     }
 }
+
+// Version History
+// ver0.1 - 2026-05-21 - Honor vt100 row_wrapped() so soft-wrapped URLs survive
+//                       drag+Ctrl+C copy and Ctrl+click open without stray newlines
+//                       or border-char injection in narrow panes.
