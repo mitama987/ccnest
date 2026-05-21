@@ -862,6 +862,13 @@ fn try_forward_mouse(app: &mut App, me: &MouseEvent, pane_rects: &HashMap<PaneId
         flush_pending_click(app);
     }
 
+    // Vertical wheel always belongs to ccnest: it drives scrollback, or
+    // Ctrl+wheel split resize. Forwarding it to Claude Code can turn the
+    // host's companion Up/Down events into prompt-history navigation.
+    if mouse_event_reserved_for_local_scrollback(me) {
+        return false;
+    }
+
     // (2) ペイン上か (タブバー/サイドバー/境界は None → ローカル)。
     let Some((pid, rect)) = find_pane_at(pane_rects, mx, my) else {
         return false;
@@ -1434,7 +1441,7 @@ const WHEEL_BUDGET_CAP: u8 = 8;
 /// 最後のホイールからこの時間を超えたら予算を 0 に戻す。イベントループの
 /// ストールを跨いでファントムを相殺できる程度に長く、スクロールをやめた後に
 /// ユーザーが意図して押す Up/Down を食い続けない程度に短く。
-const WHEEL_BUDGET_DECAY: Duration = Duration::from_millis(350);
+const WHEEL_BUDGET_DECAY: Duration = Duration::from_millis(1500);
 
 /// `ev` がホイール (ScrollUp/ScrollDown) の Mouse イベントか。
 fn is_wheel_event(ev: &Event) -> bool {
@@ -1446,6 +1453,14 @@ fn is_wheel_event(ev: &Event) -> bool {
                 crossterm::event::MouseEventKind::ScrollUp
                     | crossterm::event::MouseEventKind::ScrollDown
             )
+    )
+}
+
+/// 子 PTY がマウスモードを有効化していても ccnest 側で処理するマウス入力。
+fn mouse_event_reserved_for_local_scrollback(me: &MouseEvent) -> bool {
+    matches!(
+        me.kind,
+        crossterm::event::MouseEventKind::ScrollUp | crossterm::event::MouseEventKind::ScrollDown
     )
 }
 
@@ -2091,6 +2106,22 @@ mod tests {
     }
 
     #[test]
+    fn suppress_when_render_stall_delays_phantom_arrow() {
+        let now = Instant::now();
+        let delayed = now - Duration::from_millis(1200);
+        assert!(should_suppress_wheel_arrow(
+            false,
+            false,
+            &plain(KeyCode::Up),
+            3,
+            Some(delayed),
+            WHEEL_BUDGET_DECAY,
+            now,
+            false,
+        ));
+    }
+
+    #[test]
     fn dont_suppress_when_sidebar_focused() {
         let now = Instant::now();
         assert!(!should_suppress_wheel_arrow(
@@ -2195,6 +2226,25 @@ mod tests {
         assert!(!is_plain_updown_press(&release(KeyCode::Up)));
     }
 
+    #[test]
+    fn vertical_wheel_is_reserved_for_local_scrollback() {
+        use crossterm::event::{MouseEvent, MouseEventKind};
+        let scroll_up = MouseEvent {
+            kind: MouseEventKind::ScrollUp,
+            column: 1,
+            row: 1,
+            modifiers: KeyModifiers::NONE,
+        };
+        let scroll_down = MouseEvent {
+            kind: MouseEventKind::ScrollDown,
+            column: 1,
+            row: 1,
+            modifiers: KeyModifiers::NONE,
+        };
+        assert!(mouse_event_reserved_for_local_scrollback(&scroll_up));
+        assert!(mouse_event_reserved_for_local_scrollback(&scroll_down));
+    }
+
     // -- batch_adjacent_wheel --
 
     #[test]
@@ -2256,3 +2306,7 @@ mod tests {
 // ver0.1 - 2026-05-21 - Honor vt100 row_wrapped() so soft-wrapped URLs survive
 //                       drag+Ctrl+C copy and Ctrl+click open without stray newlines
 //                       or border-char injection in narrow panes.
+// ver0.2 - 2026-05-21 - Reserve vertical mouse wheel events for ccnest local
+//                       scrollback/resize even when the child PTY requests mouse
+//                       reporting, and keep phantom-arrow suppression alive across
+//                       longer render stalls.
