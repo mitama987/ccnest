@@ -487,9 +487,21 @@ fn handle_key(app: &mut App, key: KeyEvent, pane_rects: &HashMap<PaneId, Rect>) 
                 // Ignore character input while sidebar has focus.
                 return Ok(());
             }
-            let bytes = key_to_bytes(&key);
+            let focused_id = app.current_tab().focused;
+            // 子の DECCKM 状態を読んで矢印/Home/End の形式 (CSI/SS3) を決める。
+            let app_cursor = app
+                .panes
+                .get(&focused_id)
+                .and_then(|p| {
+                    p.parser
+                        .lock()
+                        .ok()
+                        .map(|g| g.screen().application_cursor())
+                })
+                .unwrap_or(false);
+            let bytes = key_to_bytes(&key, app_cursor);
             if !bytes.is_empty() {
-                if let Some(pane) = app.panes.get(&app.current_tab().focused) {
+                if let Some(pane) = app.panes.get(&focused_id) {
                     pane.scroll_to_bottom();
                     pane.write(&bytes);
                 }
@@ -1566,10 +1578,19 @@ fn classify_arrow(
     ArrowAction::Defer
 }
 
-fn key_to_bytes(key: &KeyEvent) -> Vec<u8> {
+/// `key` を子 PTY へ送るバイト列へ変換する。
+///
+/// `app_cursor` は子の DECCKM (アプリケーションカーソルキーモード, DECSET ?1)
+/// 状態。true のとき矢印 / Home / End を CSI (`ESC [ X`) ではなく SS3
+/// (`ESC O X`) で送る。Claude Code 等の TUI は DECCKM を有効化して SS3 形式を
+/// 期待することがあり、CSI のまま送ると左右キーでカーソルが動かない。
+/// false のときは従来どおり CSI 形式 (互換動作、回帰なし)。
+fn key_to_bytes(key: &KeyEvent, app_cursor: bool) -> Vec<u8> {
     let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
     let alt = key.modifiers.contains(KeyModifiers::ALT);
     let shift = key.modifiers.contains(KeyModifiers::SHIFT);
+    // DECCKM: カーソル/編集キーの導入子を CSI(`\x1b[`) と SS3(`\x1bO`) で切替。
+    let intro: &[u8] = if app_cursor { b"\x1bO" } else { b"\x1b[" };
     let mut buf = Vec::new();
     match key.code {
         KeyCode::Char(c) => {
@@ -1607,12 +1628,32 @@ fn key_to_bytes(key: &KeyEvent) -> Vec<u8> {
         KeyCode::BackTab => buf.extend_from_slice(b"\x1b[Z"),
         KeyCode::Backspace => buf.push(0x7f),
         KeyCode::Esc => buf.push(0x1b),
-        KeyCode::Left => buf.extend_from_slice(b"\x1b[D"),
-        KeyCode::Right => buf.extend_from_slice(b"\x1b[C"),
-        KeyCode::Up => buf.extend_from_slice(b"\x1b[A"),
-        KeyCode::Down => buf.extend_from_slice(b"\x1b[B"),
-        KeyCode::Home => buf.extend_from_slice(b"\x1b[H"),
-        KeyCode::End => buf.extend_from_slice(b"\x1b[F"),
+        // 矢印 / Home / End は DECCKM に応じて導入子を切替 (CSI or SS3)。
+        // 終端文字 (A/B/C/D/H/F) は両形式で共通。
+        KeyCode::Left => {
+            buf.extend_from_slice(intro);
+            buf.push(b'D');
+        }
+        KeyCode::Right => {
+            buf.extend_from_slice(intro);
+            buf.push(b'C');
+        }
+        KeyCode::Up => {
+            buf.extend_from_slice(intro);
+            buf.push(b'A');
+        }
+        KeyCode::Down => {
+            buf.extend_from_slice(intro);
+            buf.push(b'B');
+        }
+        KeyCode::Home => {
+            buf.extend_from_slice(intro);
+            buf.push(b'H');
+        }
+        KeyCode::End => {
+            buf.extend_from_slice(intro);
+            buf.push(b'F');
+        }
         KeyCode::PageUp => buf.extend_from_slice(b"\x1b[5~"),
         KeyCode::PageDown => buf.extend_from_slice(b"\x1b[6~"),
         KeyCode::Delete => buf.extend_from_slice(b"\x1b[3~"),
@@ -2253,6 +2294,39 @@ mod tests {
 
     // -- input trace formatting (診断) --
 
+    // --- key_to_bytes: DECCKM (アプリケーションカーソルキーモード) 切替 ------
+
+    #[test]
+    fn key_to_bytes_arrows_csi_in_normal_mode() {
+        // app_cursor=false: 従来どおり CSI (ESC [ X)。
+        assert_eq!(key_to_bytes(&plain(KeyCode::Left), false), b"\x1b[D");
+        assert_eq!(key_to_bytes(&plain(KeyCode::Right), false), b"\x1b[C");
+        assert_eq!(key_to_bytes(&plain(KeyCode::Up), false), b"\x1b[A");
+        assert_eq!(key_to_bytes(&plain(KeyCode::Down), false), b"\x1b[B");
+        assert_eq!(key_to_bytes(&plain(KeyCode::Home), false), b"\x1b[H");
+        assert_eq!(key_to_bytes(&plain(KeyCode::End), false), b"\x1b[F");
+    }
+
+    #[test]
+    fn key_to_bytes_arrows_ss3_in_application_mode() {
+        // app_cursor=true: SS3 (ESC O X)。Claude Code 等が期待する形式。
+        assert_eq!(key_to_bytes(&plain(KeyCode::Left), true), b"\x1bOD");
+        assert_eq!(key_to_bytes(&plain(KeyCode::Right), true), b"\x1bOC");
+        assert_eq!(key_to_bytes(&plain(KeyCode::Up), true), b"\x1bOA");
+        assert_eq!(key_to_bytes(&plain(KeyCode::Down), true), b"\x1bOB");
+        assert_eq!(key_to_bytes(&plain(KeyCode::Home), true), b"\x1bOH");
+        assert_eq!(key_to_bytes(&plain(KeyCode::End), true), b"\x1bOF");
+    }
+
+    #[test]
+    fn key_to_bytes_non_cursor_keys_unaffected_by_app_cursor() {
+        // 文字・Enter・PageUp などは DECCKM の影響を受けない。
+        assert_eq!(key_to_bytes(&plain(KeyCode::Char('a')), true), b"a");
+        assert_eq!(key_to_bytes(&plain(KeyCode::Enter), true), b"\r");
+        assert_eq!(key_to_bytes(&plain(KeyCode::PageUp), true), b"\x1b[5~");
+        assert_eq!(key_to_bytes(&plain(KeyCode::PageUp), false), b"\x1b[5~");
+    }
+
     #[test]
     fn format_trace_line_summarizes_batch() {
         let evs = vec![
@@ -2286,3 +2360,8 @@ mod tests {
 //                       navigation at gesture edges (wheel/phantom split across
 //                       batches or arriving out of order). Trace prefix is now
 //                       pending_arrow=<bool>.
+// ver0.4 - 2026-06-06 - Encode arrows / Home / End as SS3 (ESC O X) instead of CSI
+//                       (ESC [ X) when the focused child has DECCKM (application
+//                       cursor keys) enabled, so Left/Right actually move the
+//                       cursor in apps like Claude Code. Normal mode keeps CSI
+//                       (no regression).
