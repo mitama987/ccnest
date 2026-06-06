@@ -149,3 +149,4 @@ MIT
 ver0.1 - 2026-04-25 - Documented iconized and colorized Files sidebar rows.
 ver0.1.4 - 2026-05-16 - Disabled host alternate-scroll (DECSET 1007) and added stall-robust wheel-budget phantom-arrow suppression so the mouse wheel no longer recalls Claude prompt history.
 ver0.1.5 - 2026-05-16 - Reverted the host alternate-scroll disable (DECSET 1007) that broke wheel scrolling on Windows Terminal; kept the wheel-budget phantom-arrow suppression and added an opt-in input trace (CCNEST_INPUT_TRACE) for diagnostics.
+ver0.1.6 - 2026-05-21 - Kept vertical mouse wheel scrolling local to ccnest even when Claude Code enables mouse reporting, and extended phantom-arrow suppression across heavy render stalls.

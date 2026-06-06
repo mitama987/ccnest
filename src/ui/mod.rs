@@ -329,6 +329,29 @@ fn render_layout(
                     selection,
                 };
                 frame.render_widget(widget, inner);
+
+                // フォーカス中ペインのみ、子 vt100 のカーソル位置に実 (ハード
+                // ウェア) カーソルを置く。ccnest は従来カーソルを一切描いて
+                // おらず、子 (Claude Code 等) が自前で反転ブロックを描いていた
+                // 時代はそれで見えていた。だが子が本物のカーソル (DECTCEM 表示)
+                // に依存すると、画面上にカーソルが出ず、左右キーで移動しても
+                // 見えない / 形が以前と変わったように見える。
+                // 非表示 (DECTCEM off) / スクロールバック表示中 / 範囲外では
+                // 出さない。サイドバーにフォーカスがあるときも出さない。
+                if is_focus && !app.sidebar_focused {
+                    if let Ok(parser) = pane.parser.lock() {
+                        let screen = parser.screen();
+                        if let Some((cx, cy)) = cursor_draw_pos(
+                            inner,
+                            screen.cursor_position(),
+                            screen.hide_cursor(),
+                            screen.scrollback(),
+                        ) {
+                            frame.set_cursor_position((cx, cy));
+                        }
+                    }
+                }
+
                 // Ensure pty is sized to the rendering area.
                 pane.resize(inner.height.max(1), inner.width.max(1));
             }
@@ -411,6 +434,30 @@ fn selection_contains(pos: (i32, i32), start: (u16, i32), end: (u16, i32)) -> bo
     true
 }
 
+/// フォーカス中ペインの子 vt100 カーソル状態と描画領域 `inner` から、ratatui に
+/// 設定すべき実カーソルの絶対座標 `(x, y)` を返す純粋関数 (IO なし=単体テスト可能)。
+///
+/// 非表示 (`hidden` = DECTCEM off) / スクロールバック表示中 (`scrollback > 0`、
+/// live カーソルが可視領域外を指すため) / 領域外のときは `None` (= カーソルを
+/// 出さない)。`cursor` は vt100 の `(row, col)` (0 始まり)。vt100 parser は
+/// `pane.resize` で `inner` と同じサイズへ揃えられるため、通常 row < height /
+/// col < width に収まるが、リサイズ直後の 1 フレームずれに備えて範囲チェックする。
+fn cursor_draw_pos(
+    inner: Rect,
+    cursor: (u16, u16),
+    hidden: bool,
+    scrollback: usize,
+) -> Option<(u16, u16)> {
+    if hidden || scrollback > 0 {
+        return None;
+    }
+    let (crow, ccol) = cursor;
+    if crow >= inner.height || ccol >= inner.width {
+        return None;
+    }
+    Some((inner.x + ccol, inner.y + crow))
+}
+
 /// (anchor, cursor) を行優先で昇順に並べ替える。event.rs 側と同一ルール。
 pub fn normalize_selection(a: (u16, i32), b: (u16, i32)) -> ((u16, i32), (u16, i32)) {
     if a.1 < b.1 || (a.1 == b.1 && a.0 <= b.0) {
@@ -448,5 +495,60 @@ fn color_from(c: vt100::Color) -> Color {
     }
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use ratatui::layout::Rect;
+
+    fn inner() -> Rect {
+        Rect {
+            x: 5,
+            y: 2,
+            width: 80,
+            height: 24,
+        }
+    }
+
+    #[test]
+    fn cursor_draw_pos_maps_to_absolute() {
+        // vt100 (row=3, col=4) → 絶対 (x = inner.x + col = 9, y = inner.y + row = 5)。
+        assert_eq!(cursor_draw_pos(inner(), (3, 4), false, 0), Some((9, 5)));
+    }
+
+    #[test]
+    fn cursor_draw_pos_origin() {
+        assert_eq!(cursor_draw_pos(inner(), (0, 0), false, 0), Some((5, 2)));
+    }
+
+    #[test]
+    fn cursor_draw_pos_hidden_is_none() {
+        // DECTCEM off (子がカーソルを隠している) → 出さない。
+        assert_eq!(cursor_draw_pos(inner(), (3, 4), true, 0), None);
+    }
+
+    #[test]
+    fn cursor_draw_pos_scrollback_is_none() {
+        // スクロールバック表示中は live カーソルが可視外 → 出さない。
+        assert_eq!(cursor_draw_pos(inner(), (3, 4), false, 7), None);
+    }
+
+    #[test]
+    fn cursor_draw_pos_out_of_bounds_is_none() {
+        // 行が領域高さ以上 / 列が領域幅以上 → 出さない (リサイズ直後の保険)。
+        assert_eq!(cursor_draw_pos(inner(), (24, 0), false, 0), None);
+        assert_eq!(cursor_draw_pos(inner(), (0, 80), false, 0), None);
+    }
+
+    #[test]
+    fn cursor_draw_pos_bottom_right_corner() {
+        // 領域内最右下 (row=23, col=79) は有効。
+        assert_eq!(cursor_draw_pos(inner(), (23, 79), false, 0), Some((84, 25)));
+    }
+}
+
 // Version History
 // ver0.1 - 2026-04-25 - Rendered file tree entries with type-specific icons and colors.
+// ver0.2 - 2026-06-06 - Render the hardware cursor at the focused pane's child
+//                       vt100 cursor position (respecting DECTCEM hide + scrollback),
+//                       so apps relying on the real terminal cursor (e.g. Claude
+//                       Code) show a visible, correctly-shaped, moving cursor.

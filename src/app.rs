@@ -35,17 +35,16 @@ pub struct App {
     /// 直近の左クリックの (押下時刻, ペイン, ペイン内 row)。閾値内に同じペインの
     /// 同じ行で再クリックされたらダブルクリックと判定し、その行を全選択する。
     pub last_left_click: Option<(Instant, PaneId, u16)>,
-    /// 直近のマウスホイールイベント時刻。Windows ConPTY がホイール回転を Mouse
-    /// イベントと plain な Up/Down KeyEvent の両方として配信するケースで、
-    /// 後者を「ファントム矢印キー」として握りつぶすために使う。process_batch
-    /// 内で wheel を見たら更新し、handle_key 直前の判定で参照する。
+    /// 直近のマウスホイールイベント時刻。Windows ConPTY がホイール 1 回転を
+    /// Mouse(ScrollUp/Down) と plain な Up/Down KeyEvent の両方として
+    /// (順不同・別バッチで) 配信するため、後者「ファントム矢印」を相殺する
+    /// 突き合わせに使う。process_batch でホイールを見たら更新する。
     pub last_wheel_at: Option<Instant>,
-    /// ホイール由来のファントム Up/Down を相殺するための予算。wheel イベント
-    /// ごとに飽和加算し、plain Up/Down を 1 つ握りつぶすたびに 1 消費する。
-    /// タイミング窓ではなく予算 + バッチ内隣接で判定するため、イベントループが
-    /// 重くて wheel とファントム矢印が別バッチに分離してもファントムを取り
-    /// 逃さない。`last_wheel_at` からの経過が decay を超えたら 0 に戻す。
-    pub wheel_budget: u8,
+    /// 非隣接で届いた plain Up/Down の保留。直後に対のホイールが来れば
+    /// ファントムとして破棄し、`PAIR_WINDOW` を超えても来なければ実キーとして
+    /// 子へフラッシュする。これによりホイールとファントムが別バッチ・逆順で
+    /// 来てもジェスチャ端で取りこぼさない (決定論的コアレス)。
+    pub pending_arrow: Option<(crossterm::event::KeyEvent, Instant)>,
     /// マウスモード ON のペインで左ボタンを押した直後の保留状態。
     /// 「クリック (= アプリへ転送)」か「ドラッグ (= ccnest ローカル選択)」かを
     /// 次イベントで判定するまで Down を転送せずここに溜める。
@@ -118,7 +117,7 @@ impl App {
             selection: None,
             last_left_click: None,
             last_wheel_at: None,
-            wheel_budget: 0,
+            pending_arrow: None,
             pending_mouse: None,
             mouse_local_drag: false,
         })
