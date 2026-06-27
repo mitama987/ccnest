@@ -897,23 +897,17 @@ fn try_forward_mouse(app: &mut App, me: &MouseEvent, pane_rects: &HashMap<PaneId
         flush_pending_click(app);
     }
 
-    // Vertical wheel always belongs to ccnest: it drives scrollback, or
-    // Ctrl+wheel split resize. Forwarding it to Claude Code can turn the
-    // host's companion Up/Down events into prompt-history navigation.
-    if mouse_event_reserved_for_local_scrollback(me) {
-        return false;
-    }
-
     // (2) ペイン上か (タブバー/サイドバー/境界は None → ローカル)。
     let Some((pid, rect)) = find_pane_at(pane_rects, mx, my) else {
         return false;
     };
-    // (3)(4) このペインの内側アプリのマウスモード/エンコーディングを取得。
-    let Some((mode, enc)) = app.panes.get(&pid).and_then(|p| {
+    // (3)(4) このペインの内側アプリのマウスモード/エンコーディング/alt 画面状態を取得。
+    let Some((mode, enc, alt)) = app.panes.get(&pid).and_then(|p| {
         p.parser.lock().ok().map(|g| {
             (
                 g.screen().mouse_protocol_mode(),
                 g.screen().mouse_protocol_encoding(),
+                g.screen().alternate_screen(),
             )
         })
     }) else {
@@ -930,6 +924,15 @@ fn try_forward_mouse(app: &mut App, me: &MouseEvent, pane_rects: &HashMap<PaneId
     if me
         .modifiers
         .intersects(KeyModifiers::SHIFT | KeyModifiers::CONTROL)
+    {
+        return false;
+    }
+
+    // (7.5) 縦ホイール: PRIMARY 画面ではローカル scrollback に温存。ALTERNATE 画面の
+    // mouse-mode アプリ (Claude Code 等。alt grid は scrollback 容量 0 でローカル不可)
+    // でのみ子へ SGR ホイールレポートとして転送する。None と Shift/Ctrl は上で除外済み。
+    if mouse_event_reserved_for_local_scrollback(me)
+        && !forward_vertical_wheel(mode, alt, me.modifiers)
     {
         return false;
     }
@@ -1494,6 +1497,20 @@ fn mouse_event_reserved_for_local_scrollback(me: &MouseEvent) -> bool {
         me.kind,
         crossterm::event::MouseEventKind::ScrollUp | crossterm::event::MouseEventKind::ScrollDown
     )
+}
+
+/// 縦ホイールを子 PTY へ転送すべき (true) か ccnest ローカル scrollback に
+/// 留める (false) かの純粋判定。ALTERNATE 画面の mouse-mode アプリ
+/// (Claude Code 等。alt grid は scrollback 容量 0 でローカルスクロール不可) 上で、
+/// Shift/Ctrl 修飾なしのときだけ転送する。`App` 非依存で table-test 可能。
+fn forward_vertical_wheel(
+    mode: crate::mouse::MouseProtocolMode,
+    alt: bool,
+    mods: KeyModifiers,
+) -> bool {
+    mode != crate::mouse::MouseProtocolMode::None
+        && alt
+        && !mods.intersects(KeyModifiers::SHIFT | KeyModifiers::CONTROL)
 }
 
 /// `ev` が修飾なしの Up/Down キー押下 (Press) か。ファントム矢印の候補判定に使う。
@@ -2252,6 +2269,30 @@ mod tests {
         };
         assert!(mouse_event_reserved_for_local_scrollback(&scroll_up));
         assert!(mouse_event_reserved_for_local_scrollback(&scroll_down));
+    }
+
+    #[test]
+    fn forward_vertical_wheel_only_on_alt_mouse_mode() {
+        use crate::mouse::MouseProtocolMode as M;
+        let n = KeyModifiers::NONE;
+        // alt + mouse-mode + 修飾なし → 子へ転送 (Claude Code が自前ビューをスクロール)。
+        assert!(forward_vertical_wheel(M::AnyMotion, true, n));
+        assert!(forward_vertical_wheel(M::Press, true, n)); // Press でもホイールは報告対象。
+                                                            // プライマリ画面 → ローカル scrollback に温存。
+        assert!(!forward_vertical_wheel(M::AnyMotion, false, n));
+        // mouse-mode 無し (通常ペイン) → ローカル。
+        assert!(!forward_vertical_wheel(M::None, true, n));
+        // Shift / Ctrl は強制ローカル (ローカル強制 / 分割リサイズを温存)。
+        assert!(!forward_vertical_wheel(
+            M::AnyMotion,
+            true,
+            KeyModifiers::SHIFT
+        ));
+        assert!(!forward_vertical_wheel(
+            M::AnyMotion,
+            true,
+            KeyModifiers::CONTROL
+        ));
     }
 
     // -- batch_adjacent_wheel --
