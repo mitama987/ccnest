@@ -14,6 +14,11 @@ pub fn spawn_claude(
     session_id: Uuid,
     parser: Arc<Mutex<vt100::Parser>>,
 ) -> Result<(PtyHandle, String, bool)> {
+    // Parallel ccnest panes share ~/.claude.json; a force-quit mid-write can
+    // corrupt it. Self-heal right before launching so the new claude starts
+    // from a valid file. Best-effort — never block the spawn.
+    let _ = crate::claude::config::heal_claude_config();
+
     if let Some(bin) = resolve_claude_bin() {
         let mut cmd = CommandBuilder::new(&bin);
         cmd.arg("--session-id");
