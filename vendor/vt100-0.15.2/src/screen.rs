@@ -138,6 +138,20 @@ impl Screen {
         self.grid_mut().set_scrollback(rows);
     }
 
+    /// Returns the total number of rows ever scrolled off the top of the
+    /// screen into the scrollback buffer (monotonic; unaffected by scrollback
+    /// eviction). Always 0 while the alternate screen is in use.
+    #[must_use]
+    pub fn total_scrolled_off(&self) -> u64 {
+        self.grid().total_scrolled_off()
+    }
+
+    /// Returns the number of rows currently held in the scrollback buffer.
+    #[must_use]
+    pub fn scrollback_rows(&self) -> usize {
+        self.grid().scrollback_rows()
+    }
+
     /// Returns the text contents of the terminal.
     ///
     /// This will not include any formatting information, and will be in plain

@@ -23,6 +23,9 @@ pub fn run_event_loop<B: Backend>(term: &mut Terminal<B>, mut app: App) -> Resul
     let mut tab_rects: Vec<(Rect, usize)> = Vec::new();
 
     while !app.quit {
+        // 選択の前提 (ペイン存在 / alt 画面状態) が崩れていたら描画前に破棄する。
+        validate_selection(&mut app);
+
         term.draw(|f| {
             crate::ui::draw(
                 &app,
@@ -34,15 +37,16 @@ pub fn run_event_loop<B: Backend>(term: &mut Terminal<B>, mut app: App) -> Resul
         })?;
 
         // ドラッグ端 auto-scroll: ペイン外側まで持っていかれたドラッグを 30ms 毎に
-        // 1 行ずつ scroll しながら anchor を内容に追従させる。これによりスクロール
-        // バック内 (上端外) や未表示の最新行 (下端外) を 1 ドラッグで選択できる。
+        // 1 行ずつ scroll する。anchor は絶対座標で内容に張り付いており、cursor を
+        // ペイン端へ再ピンすることでスクロールバック内 (上端外) や未表示の最新行
+        // (下端外) を 1 ドラッグで選択できる。
         if app
             .selection
             .as_ref()
             .is_some_and(|s| s.dragging && s.auto_scroll != 0)
             && last_auto_scroll.elapsed() >= auto_scroll_interval
         {
-            advance_drag_auto_scroll(&mut app);
+            advance_drag_auto_scroll(&mut app, &pane_rects);
             last_auto_scroll = Instant::now();
         }
 
@@ -245,6 +249,11 @@ fn process_batch(
                 }
                 handle_mouse(app, *me, pane_rects, sidebar_file_rect, tab_rects);
             }
+            Event::Resize(..) => {
+                // ホストリサイズは全ペインの再フロー (行の折り返し直し) を引き起こし、
+                // 選択の座標が指す内容が変わるため破棄する。
+                app.selection = None;
+            }
             _ => {}
         }
         i += 1;
@@ -367,9 +376,19 @@ fn handle_key(app: &mut App, key: KeyEvent, pane_rects: &HashMap<PaneId, Rect>) 
     if let Some(sel) = app.selection {
         if is_ctrl_c(&key) {
             if let Some(pane) = app.panes.get(&sel.pane_id) {
-                let text = extract_selected_text(pane, sel);
-                if !text.is_empty() {
-                    copy_to_clipboard(&text);
+                // 同一バッチ内で alt 画面が切り替わった直後の異常系ガード
+                // (通常は validate_selection が毎 tick 先に破棄している)。
+                let alt_ok = pane
+                    .parser
+                    .lock()
+                    .ok()
+                    .map(|p| p.screen().alternate_screen() == sel.alt)
+                    .unwrap_or(false);
+                if alt_ok {
+                    let text = extract_selected_text(pane, sel);
+                    if !text.is_empty() {
+                        copy_to_clipboard(&text);
+                    }
                 }
             }
             app.selection = None;
@@ -588,47 +607,34 @@ fn scroll_focused(app: &mut App, delta: i32) {
     scroll_pane_with_selection(app, focused_id, delta);
 }
 
-/// `pane.scroll_by` を呼びつつ、同じペインに選択がある場合は実際に変化した
-/// scrollback 量ぶん anchor / cursor を平行移動させる。
-///
-/// - **非ドラッグ時**: anchor / cursor 両方を補正 → 反転帯が選択テキストに
-///   貼り付いたままスクロールできる。
-/// - **ドラッグ中**: anchor のみ補正、cursor は据え置き → マウス位置は動いて
-///   いないので cursor が指す content がスクロール量ぶん入れ替わり、結果と
-///   して選択範囲が「ホイール方向の新しい行」を取り込んで伸びる。`advance_drag_auto_scroll`
-///   と同じ哲学。
-///
-/// scrollback クランプで実際は動かなかったケース (actual == 0) では selection
-/// も動かさない（クランプ時の anchor 暴走バグの再発防止）。
+/// `pane.scroll_by` を呼ぶ。選択は絶対座標なので非ドラッグ時の補正は不要
+/// (反転帯は構造的に内容へ張り付く)。ドラッグ中のみ、マウス直下に cursor を
+/// 留めるため viewport 先頭の移動量ぶん cursor を平行移動する
+/// (= 反転がホイール方向の新しい行を取り込んで伸びる。ブラウザの選択と同じ)。
 fn scroll_pane_with_selection(app: &mut App, pane_id: PaneId, delta: i32) {
     let Some(pane) = app.panes.get(&pane_id) else {
         return;
     };
-    let before = pane
-        .parser
-        .lock()
-        .ok()
-        .map(|p| p.screen().scrollback() as i32)
-        .unwrap_or(0);
+    let top_before = pane.top_abs();
     pane.scroll_by(delta);
-    let after = pane
-        .parser
-        .lock()
-        .ok()
-        .map(|p| p.screen().scrollback() as i32)
-        .unwrap_or(before);
-    let actual = after - before;
-    if actual == 0 {
+    let shift = pane.top_abs() - top_before;
+    if shift == 0 {
         return;
     }
     if let Some(sel) = app.selection.as_mut() {
-        if sel.pane_id == pane_id {
-            sel.anchor.1 += actual;
-            if !sel.dragging {
-                sel.cursor.1 += actual;
-            }
+        if sel.pane_id == pane_id && sel.dragging {
+            sel.cursor.1 += shift;
         }
     }
+}
+
+/// (viewport 先頭の abs 行, alternate screen 中か) を 1 回のロックで取得する。
+/// 選択の作成・更新時に画面座標 → 絶対座標へ変換するために使う。
+fn pane_view_state(app: &App, pid: PaneId) -> Option<(i64, bool)> {
+    let pane = app.panes.get(&pid)?;
+    let parser = pane.parser.lock().ok()?;
+    let s = parser.screen();
+    Some((crate::pane::viewport_top_abs(s), s.alternate_screen()))
 }
 
 /// ドラッグ中の auto-scroll を 1 行進める。
@@ -637,43 +643,57 @@ fn scroll_pane_with_selection(app: &mut App, pane_id: PaneId, delta: i32) {
 /// - `+1` (下端外) → 新しい行を見たい → vt100 の scrollback offset を `-1`。
 /// - `-1` (上端外) → 古い行を見たい → vt100 の scrollback offset を `+1`。
 ///
-/// 実際に変化した scrollback 量と同じだけ anchor.row を補正することで、
-/// スクロール後も「最初にクリックした内容の行」を anchor が指し続ける
-/// (画面外に出れば負値になる)。cursor は端に張り付いたままなので調整しない。
-///
-/// 「実際の」変化量を使うのが重要: scrollback=0 で下端ドラッグ→新しい行を
-/// 要求しても vt100 はクランプして scroll しないが、要求 delta で anchor を
-/// 動かしてしまうと反転帯だけが上方向に伸びていく不具合になる。
-fn advance_drag_auto_scroll(app: &mut App) {
-    let Some(sel) = app.selection.as_mut() else {
+/// anchor は絶対座標で内容に張り付いているため補正不要。cursor はペイン端に
+/// 張り付き続ける必要があるため、スクロール後の viewport 先頭から毎 tick
+/// 端の abs 行を計算し直してピンする。scrollback がクランプされて動かなくても、
+/// ストリーミング出力で viewport が動いていれば追従する。
+fn advance_drag_auto_scroll(app: &mut App, pane_rects: &HashMap<PaneId, Rect>) {
+    let Some(sel) = app.selection else {
         return;
     };
     if !sel.dragging || sel.auto_scroll == 0 {
         return;
     }
     let scroll_delta = -sel.auto_scroll;
-    let pane_id = sel.pane_id;
-    let Some(pane) = app.panes.get(&pane_id) else {
+    let Some(pane) = app.panes.get(&sel.pane_id) else {
         return;
     };
-    let before = pane
-        .parser
-        .lock()
-        .ok()
-        .map(|p| p.screen().scrollback() as i32)
-        .unwrap_or(0);
     pane.scroll_by(scroll_delta);
-    let after = pane
-        .parser
-        .lock()
-        .ok()
-        .map(|p| p.screen().scrollback() as i32)
-        .unwrap_or(before);
-    let actual = after - before;
-    if actual == 0 {
-        return;
+    let top = pane.top_abs();
+    let h = pane_rects
+        .get(&sel.pane_id)
+        .map(|r| r.h.max(1) as i64)
+        .unwrap_or(24);
+    let pinned = if sel.auto_scroll < 0 {
+        top
+    } else {
+        top + h - 1
+    };
+    if let Some(s) = app.selection.as_mut() {
+        s.cursor.1 = pinned;
     }
-    sel.anchor.1 += actual;
+}
+
+/// 選択の前提が崩れていたら破棄する。ペイン消滅、または子アプリの alternate
+/// screen 状態が選択作成時と食い違った (グリッドが入れ替わり、abs 座標が別の
+/// 内容を指してしまう) ケース。選択が存在するときだけロックを取る。
+fn validate_selection(app: &mut App) {
+    let Some(sel) = app.selection else {
+        return;
+    };
+    let ok = app
+        .panes
+        .get(&sel.pane_id)
+        .and_then(|p| {
+            p.parser
+                .lock()
+                .ok()
+                .map(|pr| pr.screen().alternate_screen() == sel.alt)
+        })
+        .unwrap_or(false);
+    if !ok {
+        app.selection = None;
+    }
 }
 
 fn handle_mouse(
@@ -714,6 +734,9 @@ fn handle_mouse(
                     -0.05
                 };
                 app.current_tab_mut().layout.adjust_ratio_for(target, delta);
+                // ペインリサイズは pty 再フローで行の折り返しが変わり、選択の
+                // 座標が指す内容とズレるため破棄する。
+                app.selection = None;
             } else {
                 let delta = if matches!(me.kind, ScrollUp) { 1 } else { -1 };
                 scroll_pane_with_selection(app, target, delta * 3);
@@ -789,19 +812,25 @@ fn handle_mouse(
                     // をスキップし、末尾の trailing whitespace を除く。これにより
                     // Claude Code のリスト表示行をダブルクリックしたときに `> 5. ●`
                     // のマーカーが反転対象に入らず、コピー結果も本文だけになる。
-                    let range = app.panes.get(&pid).and_then(|pane| {
-                        pane.parser
-                            .lock()
-                            .ok()
-                            .and_then(|parser| line_text_range(parser.screen(), ly))
+                    // 同じロックで viewport 先頭 / alt 状態も取得して abs 変換する。
+                    let info = app.panes.get(&pid).and_then(|pane| {
+                        pane.parser.lock().ok().map(|parser| {
+                            let s = parser.screen();
+                            (
+                                line_text_range(s, ly),
+                                crate::pane::viewport_top_abs(s),
+                                s.alternate_screen(),
+                            )
+                        })
                     });
-                    if let Some((start_x, end_x)) = range {
+                    if let Some((Some((start_x, end_x)), top, alt)) = info {
                         app.selection = Some(crate::app::Selection {
                             pane_id: pid,
-                            anchor: (start_x, ly as i32),
-                            cursor: (end_x, ly as i32),
+                            anchor: (start_x, top + ly as i64),
+                            cursor: (end_x, top + ly as i64),
                             dragging: false,
                             auto_scroll: 0,
+                            alt,
                         });
                     } else {
                         // 空行など実テキストが無いときは選択しない。
@@ -809,15 +838,19 @@ fn handle_mouse(
                     }
                     // 連続トリプル化を防ぐためリセット。
                     app.last_left_click = None;
-                } else {
+                } else if let Some((top, alt)) = pane_view_state(app, pid) {
                     app.selection = Some(crate::app::Selection {
                         pane_id: pid,
-                        anchor: (lx, ly as i32),
-                        cursor: (lx, ly as i32),
+                        anchor: (lx, top + ly as i64),
+                        cursor: (lx, top + ly as i64),
                         dragging: true,
                         auto_scroll: 0,
+                        alt,
                     });
                     app.last_left_click = Some((now, pid, ly));
+                } else {
+                    app.selection = None;
+                    app.last_left_click = None;
                 }
             } else {
                 app.selection = None;
@@ -825,24 +858,27 @@ fn handle_mouse(
             }
         }
         Drag(MouseButton::Left) => {
-            if let Some(sel) = app.selection.as_mut() {
-                // ダブルクリックで作られた行選択 (dragging=false) は微細なマウス
-                // ジッタで壊さない。手動ドラッグ中 (dragging=true) のみ cursor 追従。
-                if sel.dragging {
-                    if let Some(rect) = pane_rects.get(&sel.pane_id) {
-                        let lx = (mx - rect.x).clamp(0, rect.w.saturating_sub(1)) as u16;
-                        // ペイン外側 (上端より上 / 下端より下) では cursor を端に
-                        // 張り付かせつつ auto_scroll 方向を立てる。tick 駆動で
-                        // 1 行/30ms スクロールしながら anchor を追従させる。
-                        let (ly, dir) = if my < rect.y {
-                            (0i32, -1)
-                        } else if my >= rect.y + rect.h {
-                            (rect.h.saturating_sub(1).max(0), 1)
-                        } else {
-                            (my - rect.y, 0)
-                        };
-                        sel.cursor = (lx, ly);
-                        sel.auto_scroll = dir;
+            // ダブルクリックで作られた行選択 (dragging=false) は微細なマウス
+            // ジッタで壊さない。手動ドラッグ中 (dragging=true) のみ cursor 追従。
+            if let Some(sel) = app.selection.filter(|s| s.dragging) {
+                if let Some(rect) = pane_rects.get(&sel.pane_id) {
+                    let lx = (mx - rect.x).clamp(0, rect.w.saturating_sub(1)) as u16;
+                    // ペイン外側 (上端より上 / 下端より下) では cursor を端に
+                    // 張り付かせつつ auto_scroll 方向を立てる。tick 駆動で
+                    // 1 行/30ms スクロールしながら選択を伸ばす。
+                    let (ly, dir) = if my < rect.y {
+                        (0i32, -1)
+                    } else if my >= rect.y + rect.h {
+                        (rect.h.saturating_sub(1).max(0), 1)
+                    } else {
+                        (my - rect.y, 0)
+                    };
+                    // 現在の viewport 先頭で画面 row → abs row に変換。
+                    if let Some((top, _)) = pane_view_state(app, sel.pane_id) {
+                        if let Some(s) = app.selection.as_mut() {
+                            s.cursor = (lx, top + ly as i64);
+                            s.auto_scroll = dir;
+                        }
                     }
                 }
             }
@@ -901,13 +937,16 @@ fn try_forward_mouse(app: &mut App, me: &MouseEvent, pane_rects: &HashMap<PaneId
     let Some((pid, rect)) = find_pane_at(pane_rects, mx, my) else {
         return false;
     };
-    // (3)(4) このペインの内側アプリのマウスモード/エンコーディング/alt 画面状態を取得。
-    let Some((mode, enc, alt)) = app.panes.get(&pid).and_then(|p| {
+    // (3)(4) このペインの内側アプリのマウスモード/エンコーディング/alt 画面状態と
+    // viewport 先頭 abs 行 (選択の abs 変換用) を 1 回のロックで取得。
+    let Some((mode, enc, alt, top)) = app.panes.get(&pid).and_then(|p| {
         p.parser.lock().ok().map(|g| {
+            let s = g.screen();
             (
-                g.screen().mouse_protocol_mode(),
-                g.screen().mouse_protocol_encoding(),
-                g.screen().alternate_screen(),
+                s.mouse_protocol_mode(),
+                s.mouse_protocol_encoding(),
+                s.alternate_screen(),
+                crate::pane::viewport_top_abs(s),
             )
         })
     }) else {
@@ -937,6 +976,15 @@ fn try_forward_mouse(app: &mut App, me: &MouseEvent, pane_rects: &HashMap<PaneId
         return false;
     }
 
+    // 縦ホイールをここまで通過した = alt 画面の子へ転送される。子は自前で内容を
+    // 動かす (フル再描画) ため ccnest からは追跡不能で、ローカル選択は内容から
+    // 剥離して画面に取り残される。転送前に破棄する (any-key-clears と同じ哲学)。
+    if mouse_event_reserved_for_local_scrollback(me)
+        && app.selection.as_ref().is_some_and(|s| s.pane_id == pid)
+    {
+        app.selection = None;
+    }
+
     // (8) ジェスチャ判定。
     match me.kind {
         Down(MouseButton::Left) => {
@@ -957,15 +1005,19 @@ fn try_forward_mouse(app: &mut App, me: &MouseEvent, pane_rects: &HashMap<PaneId
                 if p.pid == pid && (p.lx != lx || p.ly != ly) {
                     // 別セルへ移動 = ドラッグ選択確定。ローカルへ委譲する。
                     // 既存 Drag(Left) アームは selection 既存前提なのでここで生成。
+                    // top は現在値を使う (Down〜Drag の間にストリーミング出力が
+                    // 行を押し流した場合 anchor がその分ズレるのは許容。alt 画面
+                    // では top 恒常 0 で正確)。
                     app.pending_mouse = None;
                     app.mouse_local_drag = true;
                     app.current_tab_mut().focused = pid;
                     app.selection = Some(crate::app::Selection {
                         pane_id: pid,
-                        anchor: (p.lx, p.ly as i32),
-                        cursor: (lx, ly as i32),
+                        anchor: (p.lx, top + p.ly as i64),
+                        cursor: (lx, top + ly as i64),
                         dragging: true,
                         auto_scroll: 0,
+                        alt,
                     });
                     app.last_left_click = Some((Instant::now(), pid, p.ly));
                     return false; // 同 Drag を既存アームで cursor 追従
@@ -1222,9 +1274,8 @@ fn open_url(url: &str) {
 /// 選択範囲内のテキストを vt100 スクリーンから抜き出す。行末のスペースは
 /// trim し、行間は '\n' で結合。
 ///
-/// 選択開始 (anchor) がドラッグ中の auto-scroll で表示外 (row < 0) に追い出されて
-/// いるケースに対応するため、必要に応じて vt100 の scrollback offset を一時的に
-/// 動かして該当行を可視化し、抜き出し終わったら元の offset に復元する。
+/// 選択行はバッファ絶対座標なので、各行を「その行が画面 y=0 に来る scrollback
+/// offset」で可視化しながら読み取り、抜き出し終わったら元の offset に復元する。
 fn extract_selected_text(pane: &crate::pane::Pane, sel: crate::app::Selection) -> String {
     let Ok(mut parser) = pane.parser.lock() else {
         return String::new();
@@ -1236,7 +1287,10 @@ fn extract_selected_text_from_parser(
     parser: &mut vt100::Parser,
     sel: crate::app::Selection,
 ) -> String {
-    let saved_scrollback = parser.screen().scrollback() as i32;
+    let saved_scrollback = parser.screen().scrollback();
+    // parser を &mut で掴んでいる間 reader スレッドは process できないため、
+    // total_scrolled_off は抜き出し中不変とみなせる。
+    let total = parser.screen().total_scrolled_off() as i64;
     let (start, end) = normalize_range(sel.anchor, sel.cursor);
 
     // (text, wrapped_to_next): wrapped_to_next が true の行は次行と
@@ -1245,18 +1299,18 @@ fn extract_selected_text_from_parser(
     let mut rows: Vec<(String, bool)> = Vec::new();
     let mut row = start.1;
 
-    // 各反復で「row が画面 y=0 に来るような scrollback offset」をセットし、
-    // 連続する可視行 (最大 h 行) を読み取って row を進める。
-    // row > end.1 になるか、scrollback floor (= 0) でこれ以上進めなくなったら終了。
+    // 各反復で「abs 行 row が画面 y=0 に来るような scrollback offset」をセットし、
+    // 連続する可視行 (最大 h 行) を読み取って row を進める。offset は vt100 側で
+    // 現在の scrollback 行数にクランプされるため、キャップで追い出された古い行は
+    // 保持されている最古の行から読み始める (floor クランプ)。
     while row <= end.1 {
-        let want_scrollback = saved_scrollback - row;
-        let actual_scrollback = want_scrollback.max(0);
-        parser.set_scrollback(actual_scrollback as usize);
+        let want_scrollback = (total - row).max(0);
+        parser.set_scrollback(want_scrollback as usize);
         let screen = parser.screen();
         let (h_now, cols_now) = screen.size();
-        let h_now = h_now as i32;
-        // 現在の scrollback で screen y=0 が指す「論理 row」(saved 時点での row)。
-        let base = saved_scrollback - actual_scrollback;
+        let h_now = h_now as i64;
+        // 現在の scrollback で screen y=0 が指す abs 行。
+        let base = total - screen.scrollback() as i64;
         // この iteration で読み始める screen y。
         let start_y = (row - base).max(0);
         let mut progressed = false;
@@ -1320,7 +1374,7 @@ fn extract_selected_text_from_parser(
         }
     }
 
-    parser.set_scrollback(saved_scrollback.max(0) as usize);
+    parser.set_scrollback(saved_scrollback);
 
     // ソフトラップ行は改行・末尾trim無しで結合。それ以外は trim_end + '\n'。
     let mut out = String::new();
@@ -1424,7 +1478,7 @@ fn is_leading_marker_char(c: char) -> bool {
 }
 
 /// (anchor, cursor) を行優先で昇順に並べ替える。
-fn normalize_range(a: (u16, i32), b: (u16, i32)) -> ((u16, i32), (u16, i32)) {
+fn normalize_range(a: (u16, i64), b: (u16, i64)) -> ((u16, i64), (u16, i64)) {
     if a.1 < b.1 || (a.1 == b.1 && a.0 <= b.0) {
         (a, b)
     } else {
@@ -1947,32 +2001,34 @@ mod tests {
         }
     }
 
-    /// rows = 5 の vt100 にスクロールバックを発生させた上で、anchor を可視外
-    /// (row < 0 = スクロールバック内) に置いた選択範囲が scrollback 内の行も
-    /// 正しくコピーできることを確認する。下端ドラッグ auto-scroll が完了した
-    /// 直後の状態に相当。
+    /// rows = 5 の vt100 にスクロールバックを発生させた上で、可視範囲より上
+    /// (スクロールバック内) から始まる abs 座標の選択範囲が scrollback 内の
+    /// 行も正しくコピーできることを確認する。下端ドラッグ auto-scroll が
+    /// 完了した直後の状態に相当。
     #[test]
     fn extract_selected_text_walks_into_scrollback() {
         let mut parser = vt100::Parser::new(5, 20, 100);
         // line01..line11 を改行付きで、line12 を最後に改行なしで流す。
         // こうすると line12 が live grid の row 4 に座る (末尾空行なし)。
         // 結果: 可視 5 行 = [line08, line09, line10, line11, line12],
-        //       scrollback = [line01..line07] (7 行)。
+        //       scrollback = [line01..line07] (7 行, total_scrolled_off = 7)。
         let mut payload = String::new();
         for i in 1..=11 {
             payload.push_str(&format!("line{:02}\r\n", i));
         }
         payload.push_str("line12");
         parser.process(payload.as_bytes());
+        assert_eq!(parser.screen().total_scrolled_off(), 7);
 
-        // 可視 top (y=0) = line08 なので、anchor row=-3 → line05、
-        // cursor row=4 → line12 を選択範囲に含める。
+        // lineNN の abs 行 = NN-1 (line01 が最初に流れた行 = abs 0)。
+        // anchor = line05 (abs 4, 可視 top より 3 行上), cursor = line12 (abs 11)。
         let sel = crate::app::Selection {
             pane_id: 1,
-            anchor: (0, -3),
-            cursor: (19, 4),
+            anchor: (0, 4),
+            cursor: (19, 11),
             dragging: false,
             auto_scroll: 0,
+            alt: false,
         };
         let text = extract_selected_text_from_parser(&mut parser, sel);
         let lines: Vec<&str> = text.lines().collect();
@@ -1997,6 +2053,7 @@ mod tests {
             cursor: (19, 2),
             dragging: false,
             auto_scroll: 0,
+            alt: false,
         };
         let text = extract_selected_text_from_parser(&mut parser, sel);
         let lines: Vec<&str> = text.lines().collect();
@@ -2022,6 +2079,7 @@ mod tests {
             cursor: (19, 3),
             dragging: false,
             auto_scroll: 0,
+            alt: false,
         };
         let text = extract_selected_text_from_parser(&mut parser, sel);
         // 改行が混入していないこと。URL がそのまま再構成されていること。
@@ -2044,9 +2102,77 @@ mod tests {
             cursor: (19, 2),
             dragging: false,
             auto_scroll: 0,
+            alt: false,
         };
         let text = extract_selected_text_from_parser(&mut parser, sel);
         assert_eq!(text, "first\nsecond\nthird");
+    }
+
+    /// スクロールバック容量のキャップで追い出された行を含む選択は、保持されて
+    /// いる最古の行から floor クランプで抽出される (追い出し済みの行は静かに
+    /// スキップし、パニックも空返しもしない)。
+    #[test]
+    fn extract_selected_text_clamps_to_evicted_floor() {
+        let mut parser = vt100::Parser::new(3, 20, 4); // 容量 4
+        let mut payload = String::new();
+        for i in 1..=9 {
+            payload.push_str(&format!("line{:02}\r\n", i));
+        }
+        payload.push_str("line10");
+        parser.process(payload.as_bytes());
+        // total=7。保持: scrollback = line04..line07, 可視 = line08..line10。
+        // lineNN の abs 行 = NN-1。line01 (abs 0) は追い出し済み。
+        let sel = crate::app::Selection {
+            pane_id: 1,
+            anchor: (0, 0),  // line01 (evicted)
+            cursor: (19, 9), // line10
+            dragging: false,
+            auto_scroll: 0,
+            alt: false,
+        };
+        let text = extract_selected_text_from_parser(&mut parser, sel);
+        let lines: Vec<&str> = text.lines().collect();
+        assert_eq!(
+            lines,
+            vec!["line04", "line05", "line06", "line07", "line08", "line09", "line10"],
+            "got: {:#?}",
+            lines
+        );
+        assert_eq!(parser.screen().scrollback(), 0);
+    }
+
+    /// live grid の行を指す選択が、保存時 scrollback offset > 0 (ユーザが履歴を
+    /// 見ている状態) でも正しく読めて、offset が元どおり復元される。
+    #[test]
+    fn extract_selected_text_reads_live_rows_with_saved_offset() {
+        let mut parser = vt100::Parser::new(3, 20, 100);
+        let mut payload = String::new();
+        for i in 1..=5 {
+            payload.push_str(&format!("line{:02}\r\n", i));
+        }
+        payload.push_str("line06");
+        parser.process(payload.as_bytes());
+        // total=3。可視 = [line04, line05, line06] (abs 3..5)。
+        parser.set_scrollback(2);
+        let sel = crate::app::Selection {
+            pane_id: 1,
+            anchor: (0, 4),  // line05 (live grid)
+            cursor: (19, 5), // line06 (live grid)
+            dragging: false,
+            auto_scroll: 0,
+            alt: false,
+        };
+        let text = extract_selected_text_from_parser(&mut parser, sel);
+        assert_eq!(text, "line05\nline06");
+        assert_eq!(parser.screen().scrollback(), 2, "offset は元値へ復元される");
+    }
+
+    /// normalize_range は行優先・同一行では col 昇順に並べ替える (i64 版)。
+    #[test]
+    fn normalize_range_orders_row_major() {
+        assert_eq!(normalize_range((5, 10), (2, 3)), ((2, 3), (5, 10)));
+        assert_eq!(normalize_range((7, 4), (1, 4)), ((1, 4), (7, 4)));
+        assert_eq!(normalize_range((0, 2), (9, 8)), ((0, 2), (9, 8)));
     }
 
     /// 折り返した URL のどの行をクリックしても、URL 全体が取れる。
