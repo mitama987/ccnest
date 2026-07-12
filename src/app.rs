@@ -51,7 +51,13 @@ pub struct App {
     pub pending_mouse: Option<PendingMouse>,
     /// マウスモード ON のペインで素ドラッグによる ccnest ローカル選択が進行中。
     /// この間 Drag/Up は転送せず既存ローカル選択アームへ流す。
+    /// もう 1 つの用途: コンテキストメニューが Down(Left) を消費した直後に立てる
+    /// ことで、対の Up(Left) が press なしの release としてマウスモードの子へ
+    /// 転送されるのを防ぐ (Up はローカルの無害なアームで消化される)。
     pub mouse_local_drag: bool,
+    /// 右クリックで開くコンテキストメニュー。開いている間はキー/マウス入力を
+    /// モーダルに横取りする (renaming_tab と同じ Option モーダルパターン)。
+    pub context_menu: Option<ContextMenu>,
 }
 
 /// 左 Down 押下の保留 (press/drag 判定待ち)。座標はペインローカル (0 始まり)。
@@ -98,6 +104,34 @@ pub struct Selection {
     pub grid_gen: u64,
 }
 
+/// 右クリックで開くコンテキストメニュー。
+#[derive(Debug, Clone)]
+pub struct ContextMenu {
+    /// 右クリックされたペイン。コピー/貼り付けはこのペインを対象にする
+    /// (フォーカス中ペインではない点に注意)。
+    pub pane_id: PaneId,
+    /// 右クリックされたスクリーンセル (端末絶対座標)。描画時にここを基準に
+    /// 端末内へクランプしたメニュー矩形を組み立てる。
+    pub anchor: (u16, u16),
+    pub items: Vec<MenuItem>,
+    /// ハイライト中の項目 index (items への添字)。
+    pub highlighted: usize,
+}
+
+#[derive(Debug, Clone)]
+pub struct MenuItem {
+    pub label: &'static str,
+    pub action: MenuAction,
+    /// false = 淡色表示・実行不可 (例: 選択が無いペインでのコピー)。
+    pub enabled: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MenuAction {
+    Copy,
+    Paste,
+}
+
 /// Derive a tab title from the pane cwd (final path component).
 pub fn folder_title(cwd: &Path) -> String {
     cwd.file_name()
@@ -137,6 +171,7 @@ impl App {
             pending_arrow: None,
             pending_mouse: None,
             mouse_local_drag: false,
+            context_menu: None,
         })
     }
 
