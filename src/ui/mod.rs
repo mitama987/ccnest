@@ -7,7 +7,7 @@ use ratatui::buffer::Buffer;
 use ratatui::layout::{Constraint, Direction as LDir, Layout as LLayout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, Borders, Paragraph, Widget};
+use ratatui::widgets::{Block, Borders, Clear, Paragraph, Widget};
 use ratatui::Frame;
 
 use crate::app::{App, Rect as AppRect};
@@ -21,6 +21,7 @@ pub fn draw(
     pane_rects: &mut HashMap<PaneId, AppRect>,
     sidebar_file_rect: &mut Option<AppRect>,
     tab_rects: &mut Vec<(AppRect, usize)>,
+    menu_rect: &mut Option<AppRect>,
 ) {
     let size = frame.area();
     let theme = theme::default_theme();
@@ -57,6 +58,110 @@ pub fn draw(
     draw_tabbar(app, frame, vert[0], &theme, tab_rects);
     draw_panes(app, frame, vert[1], pane_rects, &theme);
     draw_statusbar(app, frame, vert[2], &theme);
+
+    // コンテキストメニューは最後に描いて最前面に重ねる。実際に描いた矩形を
+    // イベント側へ返し、マウスヒットテストは常に「画面に出ているもの」と
+    // 一致させる (sidebar_file_rect と同じパターン)。
+    *menu_rect = None;
+    if let Some(menu) = &app.context_menu {
+        *menu_rect = Some(draw_context_menu(menu, frame, size, &theme));
+    }
+}
+
+/// クリックセル (ax, ay) を基準に、端末 (term_w × term_h) 内へ必ず収まる
+/// メニュー矩形を返す純粋関数。幅は「最大ラベル表示幅 + 左右パディング 2
+/// と枠 2」、高さは「項目数 + 枠 2」。基本はクリック直下 (ay+1) に出し、
+/// 右端はクランプ、下に入らなければクリックの上へ反転、それも入らない極小
+/// 端末では下端寄せする。返り値は常に端末内 (ratatui の範囲外描画を防ぐ)。
+fn context_menu_rect(
+    ax: u16,
+    ay: u16,
+    n_items: u16,
+    max_label_w: u16,
+    term_w: u16,
+    term_h: u16,
+) -> Rect {
+    let w = (max_label_w + 4).min(term_w);
+    let h = (n_items + 2).min(term_h);
+    let x = if ax + w <= term_w {
+        ax
+    } else {
+        term_w.saturating_sub(w)
+    };
+    let y = if ay + 1 + h <= term_h {
+        ay + 1
+    } else if ay >= h {
+        ay - h
+    } else {
+        term_h.saturating_sub(h)
+    };
+    Rect {
+        x,
+        y,
+        width: w,
+        height: h,
+    }
+}
+
+/// コンテキストメニューを最前面に描き、実際に使った矩形 (枠込み) を返す。
+fn draw_context_menu(
+    menu: &crate::app::ContextMenu,
+    frame: &mut Frame<'_>,
+    term: Rect,
+    theme: &theme::Theme,
+) -> AppRect {
+    let max_label_w = menu
+        .items
+        .iter()
+        .map(|i| Span::raw(i.label).width() as u16)
+        .max()
+        .unwrap_or(0);
+    let rect = context_menu_rect(
+        menu.anchor.0,
+        menu.anchor.1,
+        menu.items.len() as u16,
+        max_label_w,
+        term.width,
+        term.height,
+    );
+
+    let inner_w = rect.width.saturating_sub(2) as usize;
+    let lines: Vec<Line<'_>> = menu
+        .items
+        .iter()
+        .enumerate()
+        .map(|(i, item)| {
+            // ハイライト帯が行全域に伸びるよう内側幅までスペースで埋める。
+            let text = format!(" {}", item.label);
+            let pad = inner_w.saturating_sub(Span::raw(text.as_str()).width());
+            let padded = format!("{}{}", text, " ".repeat(pad));
+            let style = if !item.enabled {
+                theme.menu_disabled
+            } else if i == menu.highlighted {
+                theme.menu_highlight
+            } else {
+                Style::default()
+            };
+            Line::from(Span::styled(padded, style))
+        })
+        .collect();
+
+    frame.render_widget(Clear, rect);
+    frame.render_widget(
+        Paragraph::new(lines).block(
+            Block::default()
+                .borders(Borders::ALL)
+                .border_style(theme.border_focused),
+        ),
+        rect,
+    );
+
+    AppRect {
+        x: rect.x as i32,
+        y: rect.y as i32,
+        w: rect.width as i32,
+        h: rect.height as i32,
+    }
 }
 
 fn draw_tabbar(
@@ -591,6 +696,45 @@ mod tests {
         assert!(selection_contains((79, 4), s, e));
         assert!(selection_contains((4, 6), s, e));
         assert!(!selection_contains((5, 6), s, e));
+    }
+
+    #[test]
+    fn context_menu_rect_opens_below_click() {
+        // anchor (10,5), 2 項目, 最大ラベル幅 8 → 12x4 がクリック直下に出る。
+        assert_eq!(
+            context_menu_rect(10, 5, 2, 8, 80, 24),
+            Rect {
+                x: 10,
+                y: 6,
+                width: 12,
+                height: 4
+            }
+        );
+    }
+
+    #[test]
+    fn context_menu_rect_clamps_right_edge() {
+        // 右端に収まらない場合は左へ寄せる (80 - 12 = 68)。
+        assert_eq!(context_menu_rect(75, 5, 2, 8, 80, 24).x, 68);
+    }
+
+    #[test]
+    fn context_menu_rect_flips_above_at_bottom() {
+        // 下に入らない場合はクリックの上へ反転 (22 - 4 = 18)。
+        assert_eq!(context_menu_rect(10, 22, 2, 8, 80, 24).y, 18);
+    }
+
+    #[test]
+    fn context_menu_rect_fits_tiny_terminal() {
+        let r = context_menu_rect(9, 2, 2, 8, 10, 3);
+        assert!(r.x + r.width <= 10, "rect must fit horizontally: {r:?}");
+        assert!(r.y + r.height <= 3, "rect must fit vertically: {r:?}");
+    }
+
+    #[test]
+    fn context_menu_rect_zero_terminal_no_panic() {
+        let r = context_menu_rect(0, 0, 2, 8, 0, 0);
+        assert_eq!((r.width, r.height), (0, 0));
     }
 
     #[test]

@@ -28,6 +28,10 @@ pub struct Theme {
     pub file_other: Style,
     /// The headline "white block reversed" cursor for the sidebar selection.
     pub cursor_row: Style,
+    /// コンテキストメニューのハイライト行 (tab_active と同系の白帯)。
+    pub menu_highlight: Style,
+    /// コンテキストメニューの無効項目 (グレーアウト)。
+    pub menu_disabled: Style,
 }
 
 pub fn default_theme() -> Theme {
@@ -70,8 +74,14 @@ pub fn default_theme() -> Theme {
             .fg(Color::Black)
             .bg(Color::White)
             .add_modifier(Modifier::REVERSED | Modifier::BOLD),
+        menu_highlight: Style::default()
+            .fg(Color::Black)
+            .bg(Color::White)
+            .add_modifier(Modifier::BOLD),
+        menu_disabled: Style::default().fg(Color::DarkGray),
     }
 }
 
 // Version History
 // ver0.1 - 2026-04-25 - Added file tree category colors for iconized sidebar rows.
+// ver0.2 - 2026-07-12 - Added context-menu styles (menu_highlight / menu_disabled).
