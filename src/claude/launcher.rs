@@ -31,6 +31,15 @@ pub fn spawn_claude(
         }
         cmd.cwd(cwd);
         apply_env(&mut cmd);
+        // fullscreen (alt 画面) の Claude Code は自前で画面を描き直すため、
+        // ccnest のローカル選択 (反転) がスクロールに追従できない。ccnest 内では
+        // classic モード (ネイティブスクロールバック描画) で起動し、選択・ホイール
+        // スクロールをシェルペインと同じ vt100 scrollback ベースに揃える。
+        // settings.json の "tui": "fullscreen" よりこの env が優先される。
+        // 旧挙動に戻したい場合は CCNEST_CLAUDE_ALT_SCREEN=1 で opt-out。
+        if std::env::var_os("CCNEST_CLAUDE_ALT_SCREEN").is_none() {
+            cmd.env("CLAUDE_CODE_DISABLE_ALTERNATE_SCREEN", "1");
+        }
         if let Ok(h) = PtyHandle::spawn(cmd, Arc::clone(&parser)) {
             let label = bin
                 .file_name()

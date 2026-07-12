@@ -80,6 +80,8 @@ pub struct Screen {
     visual_bell_count: usize,
 
     errors: usize,
+
+    reset_generation: u64,
 }
 
 impl Screen {
@@ -107,6 +109,8 @@ impl Screen {
             visual_bell_count: 0,
 
             errors: 0,
+
+            reset_generation: 0,
         }
     }
 
@@ -136,6 +140,29 @@ impl Screen {
 
     pub(crate) fn set_scrollback(&mut self, rows: usize) {
         self.grid_mut().set_scrollback(rows);
+    }
+
+    /// Returns the total number of rows ever scrolled off the top of the
+    /// screen into the scrollback buffer (monotonic; unaffected by scrollback
+    /// eviction). Always 0 while the alternate screen is in use.
+    #[must_use]
+    pub fn total_scrolled_off(&self) -> u64 {
+        self.grid().total_scrolled_off()
+    }
+
+    /// Returns the number of rows currently held in the scrollback buffer.
+    #[must_use]
+    pub fn scrollback_rows(&self) -> usize {
+        self.grid().scrollback_rows()
+    }
+
+    /// Incremented each time the screen is fully reset (RIS / `ESC c`), which
+    /// rebuilds both grids and restarts `total_scrolled_off` from 0. Callers
+    /// holding buffer-absolute coordinates can compare generations to detect
+    /// that their coordinate space is no longer valid.
+    #[must_use]
+    pub fn reset_generation(&self) -> u64 {
+        self.reset_generation
     }
 
     /// Returns the text contents of the terminal.
@@ -1112,6 +1139,7 @@ impl Screen {
         let audible_bell_count = self.audible_bell_count;
         let visual_bell_count = self.visual_bell_count;
         let errors = self.errors;
+        let reset_generation = self.reset_generation;
 
         *self = Self::new(self.grid.size(), self.grid.scrollback_len());
 
@@ -1120,6 +1148,9 @@ impl Screen {
         self.audible_bell_count = audible_bell_count;
         self.visual_bell_count = visual_bell_count;
         self.errors = errors;
+        // RIS はグリッドと total_scrolled_off を丸ごと作り直す。座標系の連続性が
+        // 切れたことを外部 (ccnest の選択座標) が検知できるよう世代を進める。
+        self.reset_generation = reset_generation + 1;
     }
 
     // ESC g

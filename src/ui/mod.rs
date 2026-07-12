@@ -320,10 +320,14 @@ fn render_layout(
             );
 
             if let Some(pane) = app.panes.get(pid) {
-                let selection = app
-                    .selection
-                    .filter(|s| s.pane_id == *pid)
-                    .map(|s| normalize_selection(s.anchor, s.cursor));
+                let selection = app.selection.filter(|s| s.pane_id == *pid).map(|s| {
+                    let (start, end) = normalize_selection(s.anchor, s.cursor);
+                    SelectionDraw {
+                        start,
+                        end,
+                        grid: (s.alt, s.grid_gen),
+                    }
+                });
                 let widget = PaneCells {
                     parser: &pane.parser,
                     selection,
@@ -379,11 +383,21 @@ fn render_layout(
     }
 }
 
+/// PaneCells へ渡す選択の描画情報。座標は正規化済みのバッファ絶対座標
+/// (start <= end)。描画時に現在の viewport_top_abs を引いて画面座標へ変換する。
+/// 変換結果が負 / 画面高以上の行は描画ループの範囲外となり自動的に対象外。
+struct SelectionDraw {
+    start: (u16, i64),
+    end: (u16, i64),
+    /// 選択作成時のグリッド識別 (alternate_screen, reset_generation)。
+    /// 描画時点の状態と食い違っていたら (validate_selection が破棄する前の
+    /// 1 フレーム) 反転を出さない。変換と同一ロック下で判定する。
+    grid: (bool, u64),
+}
+
 struct PaneCells<'a> {
     parser: &'a std::sync::Mutex<vt100::Parser>,
-    /// (start, end) のペイン内座標(col,row)。start<=end で正規化済み。
-    /// row は i32 で、負値 (画面外上方) は描画ループでは自動的に対象外となる。
-    selection: Option<((u16, i32), (u16, i32))>,
+    selection: Option<SelectionDraw>,
 }
 
 impl<'a> Widget for PaneCells<'a> {
@@ -392,13 +406,25 @@ impl<'a> Widget for PaneCells<'a> {
             return;
         };
         let screen = parser.screen();
+        // abs -> screen 変換はフレームごとに 1 回。以降は従来どおり画面座標で判定。
+        // グリッド識別が食い違う選択 (直前に alt 切替 / RIS が起きた) は描かない。
+        let selection = self
+            .selection
+            .filter(|sel| (screen.alternate_screen(), screen.reset_generation()) == sel.grid)
+            .map(|sel| {
+                let top = crate::pane::viewport_top_abs(screen);
+                (
+                    (sel.start.0, sel.start.1 - top),
+                    (sel.end.0, sel.end.1 - top),
+                )
+            });
         for y in 0..area.height {
             for x in 0..area.width {
                 if let Some(cell) = screen.cell(y, x) {
                     let ch = cell.contents();
                     let mut style = style_from_cell(cell);
-                    if let Some((start, end)) = self.selection {
-                        if selection_contains((x as i32, y as i32), start, end) {
+                    if let Some((start, end)) = selection {
+                        if selection_contains((x as i64, y as i64), start, end) {
                             style = style.add_modifier(Modifier::REVERSED);
                         }
                     }
@@ -417,19 +443,19 @@ impl<'a> Widget for PaneCells<'a> {
     }
 }
 
-fn selection_contains(pos: (i32, i32), start: (u16, i32), end: (u16, i32)) -> bool {
+fn selection_contains(pos: (i64, i64), start: (u16, i64), end: (u16, i64)) -> bool {
     let (x, y) = pos;
     if y < start.1 || y > end.1 {
         return false;
     }
     if start.1 == end.1 {
-        return x >= start.0 as i32 && x <= end.0 as i32;
+        return x >= start.0 as i64 && x <= end.0 as i64;
     }
     if y == start.1 {
-        return x >= start.0 as i32;
+        return x >= start.0 as i64;
     }
     if y == end.1 {
-        return x <= end.0 as i32;
+        return x <= end.0 as i64;
     }
     true
 }
@@ -459,7 +485,7 @@ fn cursor_draw_pos(
 }
 
 /// (anchor, cursor) を行優先で昇順に並べ替える。event.rs 側と同一ルール。
-pub fn normalize_selection(a: (u16, i32), b: (u16, i32)) -> ((u16, i32), (u16, i32)) {
+pub fn normalize_selection(a: (u16, i64), b: (u16, i64)) -> ((u16, i64), (u16, i64)) {
     if a.1 < b.1 || (a.1 == b.1 && a.0 <= b.0) {
         (a, b)
     } else {
@@ -544,6 +570,38 @@ mod tests {
         // 領域内最右下 (row=23, col=79) は有効。
         assert_eq!(cursor_draw_pos(inner(), (23, 79), false, 0), Some((84, 25)));
     }
+
+    #[test]
+    fn selection_contains_single_row_span() {
+        let (s, e) = ((3u16, 5i64), (7u16, 5i64));
+        assert!(selection_contains((3, 5), s, e));
+        assert!(selection_contains((7, 5), s, e));
+        assert!(!selection_contains((2, 5), s, e));
+        assert!(!selection_contains((8, 5), s, e));
+        assert!(!selection_contains((5, 4), s, e));
+    }
+
+    #[test]
+    fn selection_contains_multi_row_rules() {
+        // 先頭行は start.0 以降、末尾行は end.0 以前、中間行は全域。
+        let (s, e) = ((10u16, 2i64), (4u16, 6i64));
+        assert!(!selection_contains((9, 2), s, e));
+        assert!(selection_contains((10, 2), s, e));
+        assert!(selection_contains((0, 4), s, e));
+        assert!(selection_contains((79, 4), s, e));
+        assert!(selection_contains((4, 6), s, e));
+        assert!(!selection_contains((5, 6), s, e));
+    }
+
+    #[test]
+    fn selection_contains_rejects_out_of_range_rows() {
+        // abs→screen 変換後に負 (可視より上) / 画面高以上 (可視より下) となった
+        // 選択行は、描画ループの y (0..h) と一致しないため自動的に対象外。
+        let (s, e) = ((0u16, -5i64), (10u16, -2i64));
+        for y in 0..24i64 {
+            assert!(!selection_contains((5, y), s, e));
+        }
+    }
 }
 
 // Version History
@@ -552,3 +610,6 @@ mod tests {
 //                       vt100 cursor position (respecting DECTCEM hide + scrollback),
 //                       so apps relying on the real terminal cursor (e.g. Claude
 //                       Code) show a visible, correctly-shaped, moving cursor.
+// ver0.3 - 2026-07-12 - Selection rows are buffer-absolute; convert to screen rows
+//                       once per frame in PaneCells::render so the highlight stays
+//                       glued to content across scrolling and streaming output.

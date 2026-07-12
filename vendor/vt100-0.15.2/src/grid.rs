@@ -13,6 +13,7 @@ pub struct Grid {
     scrollback: std::collections::VecDeque<crate::row::Row>,
     scrollback_len: usize,
     scrollback_offset: usize,
+    total_scrolled_off: u64,
 }
 
 impl Grid {
@@ -29,6 +30,7 @@ impl Grid {
             scrollback: std::collections::VecDeque::new(),
             scrollback_len,
             scrollback_offset: 0,
+            total_scrolled_off: 0,
         }
     }
 
@@ -122,7 +124,11 @@ impl Grid {
         self.scrollback
             .iter()
             .skip(scrollback_len - self.scrollback_offset)
-            .chain(self.rows.iter().take(rows_len - self.scrollback_offset))
+            .chain(
+                self.rows
+                    .iter()
+                    .take(rows_len.saturating_sub(self.scrollback_offset)),
+            )
     }
 
     pub fn drawing_rows(&self) -> impl Iterator<Item = &crate::row::Row> {
@@ -178,6 +184,18 @@ impl Grid {
 
     pub fn scrollback(&self) -> usize {
         self.scrollback_offset
+    }
+
+    /// Total number of rows ever pushed from the live grid into scrollback.
+    /// Monotonic: unaffected by scrollback eviction at the capacity cap.
+    /// Always 0 for grids created with `scrollback_len == 0` (alternate grid).
+    pub fn total_scrolled_off(&self) -> u64 {
+        self.total_scrolled_off
+    }
+
+    /// Number of rows currently held in the scrollback buffer.
+    pub fn scrollback_rows(&self) -> usize {
+        self.scrollback.len()
     }
 
     pub fn set_scrollback(&mut self, rows: usize) {
@@ -550,6 +568,7 @@ impl Grid {
             let removed = self.rows.remove(usize::from(self.scroll_top));
             if self.scrollback_len > 0 && !self.scroll_region_active() {
                 self.scrollback.push_back(removed);
+                self.total_scrolled_off += 1;
                 while self.scrollback.len() > self.scrollback_len {
                     self.scrollback.pop_front();
                 }

@@ -12,6 +12,16 @@ use crate::claude::launcher::{spawn_claude, spawn_shell};
 
 pub type PaneId = u64;
 
+/// 画面 y=0 に表示されている行のバッファ絶対 row。
+///
+/// `abs = total_scrolled_off - scrollback_offset` 。選択 (`Selection`) の
+/// 絶対座標系の基準で、`abs行 = viewport_top_abs + screen_y`、
+/// `screen_y = abs行 - viewport_top_abs` の相互変換に使う。
+/// alternate screen 中は両項とも常に 0 → abs == screen_y。
+pub fn viewport_top_abs(screen: &vt100::Screen) -> i64 {
+    screen.total_scrolled_off() as i64 - screen.scrollback() as i64
+}
+
 pub struct Pane {
     pub id: PaneId,
     pub cwd: PathBuf,
@@ -86,5 +96,15 @@ impl Pane {
         if let Ok(mut p) = self.parser.lock() {
             p.set_scrollback(0);
         }
+    }
+
+    /// 現在のビューポート先頭 (画面 y=0) のバッファ絶対 row。
+    /// ロック失敗時は 0 を返す（呼び出し側は差分 0 = no-op として扱える）。
+    pub fn top_abs(&self) -> i64 {
+        self.parser
+            .lock()
+            .ok()
+            .map(|p| viewport_top_abs(p.screen()))
+            .unwrap_or(0)
     }
 }

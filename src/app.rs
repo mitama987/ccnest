@@ -63,15 +63,25 @@ pub struct PendingMouse {
     pub at: Instant,
 }
 
-/// ペイン内のテキスト選択範囲。anchor/cursor はペイン内コンテンツ座標 (col,row)。
+/// ペイン内のテキスト選択範囲。anchor/cursor は (col, バッファ絶対 row)。
 ///
-/// row は `i32` で持ち、負値は「現在の表示範囲よりさらに上 (スクロールバック内)」
-/// を表す。これによりドラッグ中の auto-scroll で表示外に出た anchor も追跡できる。
+/// row はバッファ絶対座標:
+/// `abs = viewport_top_abs + screen_y`（`viewport_top_abs = total_scrolled_off - scrollback_offset`）。
+/// コンテンツがスクロールバックへ流れても・ホイールで表示位置が変わっても、
+/// 同じ内容行は同じ abs を保つため、選択は構造的に内容へ張り付く（描画時に
+/// 現在の viewport_top を引いて画面座標へ変換する）。表示範囲より上の行は
+/// 変換結果が負になるだけで、値そのものは常に非負とは限らない i64 で持つ。
+///
+/// 例外はドラッグ中の cursor のみ: マウス直下に留まる必要があるため、
+/// ビューポートが動いたら明示的に補正する（scroll_pane_with_selection /
+/// advance_drag_auto_scroll）。マウス静止中にストリーミング出力で内容が
+/// 流れた場合の cursor は内容側へ張り付いたままとなり、次の Drag イベントで
+/// 自然に補正される（意図的なトレードオフ）。
 #[derive(Debug, Clone, Copy)]
 pub struct Selection {
     pub pane_id: PaneId,
-    pub anchor: (u16, i32),
-    pub cursor: (u16, i32),
+    pub anchor: (u16, i64),
+    pub cursor: (u16, i64),
     /// マウスボタン押下中。false になっても選択は残し続け、Ctrl+C か
     /// 新規クリックでクリアされる。
     pub dragging: bool,
@@ -79,6 +89,13 @@ pub struct Selection {
     /// `-1` = 上端外 (古い行へ), `+1` = 下端外 (新しい行へ), `0` = ペイン内。
     /// イベントループの tick で参照され、1 行/tick で scroll_by に反映される。
     pub auto_scroll: i32,
+    /// 選択作成時に子アプリが alternate screen だったか。現在の状態と食い違ったら
+    /// (グリッドが入れ替わったら) その選択は無効 → validate_selection が破棄する。
+    pub alt: bool,
+    /// 選択作成時の vt100 reset 世代 (RIS = ESC c で増える)。RIS はグリッドと
+    /// total_scrolled_off を作り直し abs 座標の連続性が切れるため、世代が
+    /// 食い違った選択は無効 → validate_selection / 抽出ガードが破棄する。
+    pub grid_gen: u64,
 }
 
 /// Derive a tab title from the pane cwd (final path component).
