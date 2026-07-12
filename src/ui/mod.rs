@@ -320,10 +320,14 @@ fn render_layout(
             );
 
             if let Some(pane) = app.panes.get(pid) {
-                let selection = app
-                    .selection
-                    .filter(|s| s.pane_id == *pid)
-                    .map(|s| normalize_selection(s.anchor, s.cursor));
+                let selection = app.selection.filter(|s| s.pane_id == *pid).map(|s| {
+                    let (start, end) = normalize_selection(s.anchor, s.cursor);
+                    SelectionDraw {
+                        start,
+                        end,
+                        grid: (s.alt, s.grid_gen),
+                    }
+                });
                 let widget = PaneCells {
                     parser: &pane.parser,
                     selection,
@@ -379,12 +383,21 @@ fn render_layout(
     }
 }
 
+/// PaneCells へ渡す選択の描画情報。座標は正規化済みのバッファ絶対座標
+/// (start <= end)。描画時に現在の viewport_top_abs を引いて画面座標へ変換する。
+/// 変換結果が負 / 画面高以上の行は描画ループの範囲外となり自動的に対象外。
+struct SelectionDraw {
+    start: (u16, i64),
+    end: (u16, i64),
+    /// 選択作成時のグリッド識別 (alternate_screen, reset_generation)。
+    /// 描画時点の状態と食い違っていたら (validate_selection が破棄する前の
+    /// 1 フレーム) 反転を出さない。変換と同一ロック下で判定する。
+    grid: (bool, u64),
+}
+
 struct PaneCells<'a> {
     parser: &'a std::sync::Mutex<vt100::Parser>,
-    /// (start, end) のバッファ絶対座標 (col, abs row)。start<=end で正規化済み。
-    /// 描画時に現在の viewport_top_abs を引いて画面座標へ変換する。変換結果が
-    /// 負 / 画面高以上の行は描画ループの範囲外となり自動的に対象外。
-    selection: Option<((u16, i64), (u16, i64))>,
+    selection: Option<SelectionDraw>,
 }
 
 impl<'a> Widget for PaneCells<'a> {
@@ -394,10 +407,17 @@ impl<'a> Widget for PaneCells<'a> {
         };
         let screen = parser.screen();
         // abs -> screen 変換はフレームごとに 1 回。以降は従来どおり画面座標で判定。
-        let selection = self.selection.map(|(s, e)| {
-            let top = crate::pane::viewport_top_abs(screen);
-            ((s.0, s.1 - top), (e.0, e.1 - top))
-        });
+        // グリッド識別が食い違う選択 (直前に alt 切替 / RIS が起きた) は描かない。
+        let selection = self
+            .selection
+            .filter(|sel| (screen.alternate_screen(), screen.reset_generation()) == sel.grid)
+            .map(|sel| {
+                let top = crate::pane::viewport_top_abs(screen);
+                (
+                    (sel.start.0, sel.start.1 - top),
+                    (sel.end.0, sel.end.1 - top),
+                )
+            });
         for y in 0..area.height {
             for x in 0..area.width {
                 if let Some(cell) = screen.cell(y, x) {

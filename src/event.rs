@@ -373,22 +373,14 @@ fn handle_key(app: &mut App, key: KeyEvent, pane_rects: &HashMap<PaneId, Rect>) 
 
     // 選択範囲が存在する状態で Ctrl+C → クリップボードへコピーして選択解除。
     // reshell / pass-through より優先。その他のキーは選択をクリアしてから通常処理。
+    // グリッド識別 (alt / reset 世代) のガードは extract 側が抽出と同一ロック下で
+    // 行う (別ロックでの事前チェックは reader スレッドと TOCTOU になるため)。
     if let Some(sel) = app.selection {
         if is_ctrl_c(&key) {
             if let Some(pane) = app.panes.get(&sel.pane_id) {
-                // 同一バッチ内で alt 画面が切り替わった直後の異常系ガード
-                // (通常は validate_selection が毎 tick 先に破棄している)。
-                let alt_ok = pane
-                    .parser
-                    .lock()
-                    .ok()
-                    .map(|p| p.screen().alternate_screen() == sel.alt)
-                    .unwrap_or(false);
-                if alt_ok {
-                    let text = extract_selected_text(pane, sel);
-                    if !text.is_empty() {
-                        copy_to_clipboard(&text);
-                    }
+                let text = extract_selected_text(pane, sel);
+                if !text.is_empty() {
+                    copy_to_clipboard(&text);
                 }
             }
             app.selection = None;
@@ -628,13 +620,17 @@ fn scroll_pane_with_selection(app: &mut App, pane_id: PaneId, delta: i32) {
     }
 }
 
-/// (viewport 先頭の abs 行, alternate screen 中か) を 1 回のロックで取得する。
-/// 選択の作成・更新時に画面座標 → 絶対座標へ変換するために使う。
-fn pane_view_state(app: &App, pid: PaneId) -> Option<(i64, bool)> {
+/// (viewport 先頭の abs 行, alternate screen 中か, reset 世代) を 1 回のロックで
+/// 取得する。選択の作成・更新時に画面座標 → 絶対座標へ変換するために使う。
+fn pane_view_state(app: &App, pid: PaneId) -> Option<(i64, bool, u64)> {
     let pane = app.panes.get(&pid)?;
     let parser = pane.parser.lock().ok()?;
     let s = parser.screen();
-    Some((crate::pane::viewport_top_abs(s), s.alternate_screen()))
+    Some((
+        crate::pane::viewport_top_abs(s),
+        s.alternate_screen(),
+        s.reset_generation(),
+    ))
 }
 
 /// ドラッグ中の auto-scroll を 1 行進める。
@@ -674,9 +670,10 @@ fn advance_drag_auto_scroll(app: &mut App, pane_rects: &HashMap<PaneId, Rect>) {
     }
 }
 
-/// 選択の前提が崩れていたら破棄する。ペイン消滅、または子アプリの alternate
-/// screen 状態が選択作成時と食い違った (グリッドが入れ替わり、abs 座標が別の
-/// 内容を指してしまう) ケース。選択が存在するときだけロックを取る。
+/// 選択の前提が崩れていたら破棄する。ペイン消滅、子アプリの alternate screen
+/// 状態が選択作成時と食い違った (グリッドが入れ替わり、abs 座標が別の内容を
+/// 指してしまう)、または RIS (ESC c) でグリッドが作り直された (reset 世代の
+/// 不一致) ケース。選択が存在するときだけロックを取る。
 fn validate_selection(app: &mut App) {
     let Some(sel) = app.selection else {
         return;
@@ -685,10 +682,10 @@ fn validate_selection(app: &mut App) {
         .panes
         .get(&sel.pane_id)
         .and_then(|p| {
-            p.parser
-                .lock()
-                .ok()
-                .map(|pr| pr.screen().alternate_screen() == sel.alt)
+            p.parser.lock().ok().map(|pr| {
+                let s = pr.screen();
+                s.alternate_screen() == sel.alt && s.reset_generation() == sel.grid_gen
+            })
         })
         .unwrap_or(false);
     if !ok {
@@ -820,10 +817,11 @@ fn handle_mouse(
                                 line_text_range(s, ly),
                                 crate::pane::viewport_top_abs(s),
                                 s.alternate_screen(),
+                                s.reset_generation(),
                             )
                         })
                     });
-                    if let Some((Some((start_x, end_x)), top, alt)) = info {
+                    if let Some((Some((start_x, end_x)), top, alt, grid_gen)) = info {
                         app.selection = Some(crate::app::Selection {
                             pane_id: pid,
                             anchor: (start_x, top + ly as i64),
@@ -831,6 +829,7 @@ fn handle_mouse(
                             dragging: false,
                             auto_scroll: 0,
                             alt,
+                            grid_gen,
                         });
                     } else {
                         // 空行など実テキストが無いときは選択しない。
@@ -838,7 +837,7 @@ fn handle_mouse(
                     }
                     // 連続トリプル化を防ぐためリセット。
                     app.last_left_click = None;
-                } else if let Some((top, alt)) = pane_view_state(app, pid) {
+                } else if let Some((top, alt, grid_gen)) = pane_view_state(app, pid) {
                     app.selection = Some(crate::app::Selection {
                         pane_id: pid,
                         anchor: (lx, top + ly as i64),
@@ -846,6 +845,7 @@ fn handle_mouse(
                         dragging: true,
                         auto_scroll: 0,
                         alt,
+                        grid_gen,
                     });
                     app.last_left_click = Some((now, pid, ly));
                 } else {
@@ -874,7 +874,7 @@ fn handle_mouse(
                         (my - rect.y, 0)
                     };
                     // 現在の viewport 先頭で画面 row → abs row に変換。
-                    if let Some((top, _)) = pane_view_state(app, sel.pane_id) {
+                    if let Some((top, _, _)) = pane_view_state(app, sel.pane_id) {
                         if let Some(s) = app.selection.as_mut() {
                             s.cursor = (lx, top + ly as i64);
                             s.auto_scroll = dir;
@@ -938,8 +938,8 @@ fn try_forward_mouse(app: &mut App, me: &MouseEvent, pane_rects: &HashMap<PaneId
         return false;
     };
     // (3)(4) このペインの内側アプリのマウスモード/エンコーディング/alt 画面状態と
-    // viewport 先頭 abs 行 (選択の abs 変換用) を 1 回のロックで取得。
-    let Some((mode, enc, alt, top)) = app.panes.get(&pid).and_then(|p| {
+    // viewport 先頭 abs 行・reset 世代 (選択の abs 変換用) を 1 回のロックで取得。
+    let Some((mode, enc, alt, top, grid_gen)) = app.panes.get(&pid).and_then(|p| {
         p.parser.lock().ok().map(|g| {
             let s = g.screen();
             (
@@ -947,6 +947,7 @@ fn try_forward_mouse(app: &mut App, me: &MouseEvent, pane_rects: &HashMap<PaneId
                 s.mouse_protocol_encoding(),
                 s.alternate_screen(),
                 crate::pane::viewport_top_abs(s),
+                s.reset_generation(),
             )
         })
     }) else {
@@ -1018,6 +1019,7 @@ fn try_forward_mouse(app: &mut App, me: &MouseEvent, pane_rects: &HashMap<PaneId
                         dragging: true,
                         auto_scroll: 0,
                         alt,
+                        grid_gen,
                     });
                     app.last_left_click = Some((Instant::now(), pid, p.ly));
                     return false; // 同 Drag を既存アームで cursor 追従
@@ -1287,6 +1289,16 @@ fn extract_selected_text_from_parser(
     parser: &mut vt100::Parser,
     sel: crate::app::Selection,
 ) -> String {
+    // グリッド識別ガード: 選択作成時と alt 画面状態 / reset 世代が食い違って
+    // いたら、この選択の abs 座標は現在の内容と無関係 → 何もコピーしない。
+    // 呼び出し元での事前チェックではなく、抽出と同一の &mut parser (= ロック
+    // 保持中で reader スレッドが割り込めない) 下で判定するのが重要 (TOCTOU 防止)。
+    {
+        let s = parser.screen();
+        if s.alternate_screen() != sel.alt || s.reset_generation() != sel.grid_gen {
+            return String::new();
+        }
+    }
     let saved_scrollback = parser.screen().scrollback();
     // parser を &mut で掴んでいる間 reader スレッドは process できないため、
     // total_scrolled_off は抜き出し中不変とみなせる。
@@ -2029,6 +2041,7 @@ mod tests {
             dragging: false,
             auto_scroll: 0,
             alt: false,
+            grid_gen: 0,
         };
         let text = extract_selected_text_from_parser(&mut parser, sel);
         let lines: Vec<&str> = text.lines().collect();
@@ -2054,6 +2067,7 @@ mod tests {
             dragging: false,
             auto_scroll: 0,
             alt: false,
+            grid_gen: 0,
         };
         let text = extract_selected_text_from_parser(&mut parser, sel);
         let lines: Vec<&str> = text.lines().collect();
@@ -2080,6 +2094,7 @@ mod tests {
             dragging: false,
             auto_scroll: 0,
             alt: false,
+            grid_gen: 0,
         };
         let text = extract_selected_text_from_parser(&mut parser, sel);
         // 改行が混入していないこと。URL がそのまま再構成されていること。
@@ -2103,6 +2118,7 @@ mod tests {
             dragging: false,
             auto_scroll: 0,
             alt: false,
+            grid_gen: 0,
         };
         let text = extract_selected_text_from_parser(&mut parser, sel);
         assert_eq!(text, "first\nsecond\nthird");
@@ -2129,6 +2145,7 @@ mod tests {
             dragging: false,
             auto_scroll: 0,
             alt: false,
+            grid_gen: 0,
         };
         let text = extract_selected_text_from_parser(&mut parser, sel);
         let lines: Vec<&str> = text.lines().collect();
@@ -2161,10 +2178,44 @@ mod tests {
             dragging: false,
             auto_scroll: 0,
             alt: false,
+            grid_gen: 0,
         };
         let text = extract_selected_text_from_parser(&mut parser, sel);
         assert_eq!(text, "line05\nline06");
         assert_eq!(parser.screen().scrollback(), 2, "offset は元値へ復元される");
+    }
+
+    /// グリッド識別 (alt 画面状態 / RIS reset 世代) が選択作成時と食い違う場合、
+    /// 抽出は何も返さない (チェックは抽出と同一ロック下 = TOCTOU ガードの検証)。
+    #[test]
+    fn extract_selected_text_refuses_mismatched_grid() {
+        let mut parser = vt100::Parser::new(5, 20, 100);
+        parser.process(b"alpha\r\nbeta");
+
+        // alt 不一致: primary 画面なのに alt=true で作られた選択。
+        let sel_alt = crate::app::Selection {
+            pane_id: 1,
+            anchor: (0, 0),
+            cursor: (19, 1),
+            dragging: false,
+            auto_scroll: 0,
+            alt: true,
+            grid_gen: 0,
+        };
+        assert_eq!(extract_selected_text_from_parser(&mut parser, sel_alt), "");
+
+        // 世代不一致: RIS (ESC c) 後に旧世代の選択でコピーしようとする。
+        let sel_old_gen = crate::app::Selection {
+            alt: false,
+            grid_gen: 0,
+            ..sel_alt
+        };
+        parser.process(b"\x1bc");
+        assert_eq!(parser.screen().reset_generation(), 1);
+        assert_eq!(
+            extract_selected_text_from_parser(&mut parser, sel_old_gen),
+            ""
+        );
     }
 
     /// normalize_range は行優先・同一行では col 昇順に並べ替える (i64 版)。

@@ -93,6 +93,21 @@ fn viewport_top_abs_glued_when_scrolled_back() {
     assert_eq!(parser.screen().total_scrolled_off(), total0 + 1);
 }
 
+/// RIS (ESC c) はグリッドと total_scrolled_off を作り直すため、reset_generation
+/// が進む。abs 座標を持つ側 (ccnest の選択) はこれで座標系の断絶を検知できる。
+#[test]
+fn ris_bumps_reset_generation_and_resets_counter() {
+    let mut parser = vt100::Parser::new(3, 20, 100);
+    parser.process(b"a\r\nb\r\nc\r\nd\r\ne");
+    assert_eq!(parser.screen().total_scrolled_off(), 2);
+    assert_eq!(parser.screen().reset_generation(), 0);
+
+    parser.process(b"\x1bc");
+    assert_eq!(parser.screen().reset_generation(), 1);
+    assert_eq!(parser.screen().total_scrolled_off(), 0);
+    assert!(!parser.screen().alternate_screen());
+}
+
 /// 1 画面より深い scrollback offset でも可視セルが読める
 /// (grid.rs visible_rows の usize アンダーフロー → saturating_sub 修正の回帰テスト。
 /// debug ビルドで実行されることに意味がある)。

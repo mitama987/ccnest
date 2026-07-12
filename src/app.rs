@@ -92,6 +92,10 @@ pub struct Selection {
     /// 選択作成時に子アプリが alternate screen だったか。現在の状態と食い違ったら
     /// (グリッドが入れ替わったら) その選択は無効 → validate_selection が破棄する。
     pub alt: bool,
+    /// 選択作成時の vt100 reset 世代 (RIS = ESC c で増える)。RIS はグリッドと
+    /// total_scrolled_off を作り直し abs 座標の連続性が切れるため、世代が
+    /// 食い違った選択は無効 → validate_selection / 抽出ガードが破棄する。
+    pub grid_gen: u64,
 }
 
 /// Derive a tab title from the pane cwd (final path component).
