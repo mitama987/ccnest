@@ -81,6 +81,11 @@ fn context_menu_rect(
     term_w: u16,
     term_h: u16,
 ) -> Rect {
+    // アンカーはまず端末内へクランプする。メニュー表示中に端末が縮むと、
+    // 保存されたアンカーが新しい端末サイズの外を指し得る。そのまま flip 計算
+    // (ay - h) すると端末外の矩形になり ratatui の描画が範囲外パニックする。
+    let ax = ax.min(term_w.saturating_sub(1));
+    let ay = ay.min(term_h.saturating_sub(1));
     let w = (max_label_w + 4).min(term_w);
     let h = (n_items + 2).min(term_h);
     let x = if ax + w <= term_w {
@@ -735,6 +740,15 @@ mod tests {
     fn context_menu_rect_zero_terminal_no_panic() {
         let r = context_menu_rect(0, 0, 2, 8, 0, 0);
         assert_eq!((r.width, r.height), (0, 0));
+    }
+
+    #[test]
+    fn context_menu_rect_clamps_stale_anchor_after_shrink() {
+        // メニュー表示中に端末が 24 行 → 10 行へ縮み、アンカー (ay=20) が
+        // 端末外に取り残されたケース。矩形は必ず新しい端末内に収まる。
+        let r = context_menu_rect(10, 20, 2, 8, 80, 10);
+        assert!(r.x + r.width <= 80, "must fit horizontally: {r:?}");
+        assert!(r.y + r.height <= 10, "must fit vertically: {r:?}");
     }
 
     #[test]

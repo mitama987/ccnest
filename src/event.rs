@@ -21,6 +21,8 @@ pub fn run_event_loop<B: Backend>(term: &mut Terminal<B>, mut app: App) -> Resul
     let mut pane_rects: HashMap<PaneId, Rect> = HashMap::new();
     let mut sidebar_file_rect: Option<Rect> = None;
     let mut tab_rects: Vec<(Rect, usize)> = Vec::new();
+    // メニューの実描画矩形。draw が毎フレーム更新し、メニューを開いた直後は
+    // event 側が None に無効化する (旧位置でのヒットテスト防止)。
     let mut menu_rect: Option<Rect> = None;
 
     while !app.quit {
@@ -92,7 +94,7 @@ pub fn run_event_loop<B: Backend>(term: &mut Terminal<B>, mut app: App) -> Resul
                 &pane_rects,
                 sidebar_file_rect,
                 &tab_rects,
-                menu_rect,
+                &mut menu_rect,
             )?;
         }
 
@@ -169,7 +171,7 @@ fn process_batch(
     pane_rects: &HashMap<PaneId, Rect>,
     sidebar_file_rect: Option<Rect>,
     tab_rects: &[(Rect, usize)],
-    menu_rect: Option<Rect>,
+    menu_rect: &mut Option<Rect>,
 ) -> Result<()> {
     use crossterm::event::MouseEventKind;
     trace_input_batch(&events, app.pending_arrow.is_some());
@@ -195,6 +197,10 @@ fn process_batch(
         // 配信するため、ここで合流させないと Claude 側で N 個の placeholder に
         // 分裂して見える。
         if let Some((consumed, text)) = collect_paste_segment(&events[i..]) {
+            // コンテキストメニューは「その他の入力で閉じる」ルールに合わせ、
+            // ターミナル側ペーストでも閉じてからフォーカス先へ流す
+            // (開いたまま裏へ書き込まれるのを防ぐ)。
+            app.context_menu = None;
             handle_paste(app, &text);
             i += consumed;
             continue;
@@ -212,7 +218,7 @@ fn process_batch(
                     let adjacent = batch_adjacent_wheel(&events, i);
                     match classify_arrow(
                         app.sidebar_focused,
-                        app.renaming_tab.is_some(),
+                        app.renaming_tab.is_some() || app.context_menu.is_some(),
                         key,
                         app.last_wheel_at,
                         PAIR_WINDOW,
@@ -268,8 +274,10 @@ fn process_batch(
             }
             Event::Resize(..) => {
                 // ホストリサイズは全ペインの再フロー (行の折り返し直し) を引き起こし、
-                // 選択の座標が指す内容が変わるため破棄する。
+                // 選択の座標が指す内容が変わるため破棄する。メニューもアンカーが
+                // 新しい端末サイズの外を指し得るため閉じる。
                 app.selection = None;
+                app.context_menu = None;
             }
             _ => {}
         }
@@ -775,7 +783,7 @@ fn handle_mouse(
     pane_rects: &HashMap<PaneId, Rect>,
     sidebar_file_rect: Option<Rect>,
     tab_rects: &[(Rect, usize)],
-    menu_rect: Option<Rect>,
+    menu_rect: &mut Option<Rect>,
 ) {
     use crossterm::event::{MouseButton, MouseEventKind::*};
     let mx = me.column as i32;
@@ -784,7 +792,7 @@ fn handle_mouse(
     // (0) コンテキストメニューモーダル: 開いている間は全マウスイベントを横取り。
     // try_forward より先に判定し、子 (マウスモードのアプリ) へ一切漏らさない。
     if let Some(menu) = app.context_menu.clone() {
-        let (inside, over) = menu_hit(menu_rect, menu.items.len(), mx, my);
+        let (inside, over) = menu_hit(*menu_rect, menu.items.len(), mx, my);
         match classify_menu_mouse(&me.kind, inside, over, &menu.items) {
             MenuMouseAction::Highlight(i) => {
                 if let Some(m) = app.context_menu.as_mut() {
@@ -824,7 +832,23 @@ fn handle_mouse(
         flush_pending_click(app);
         if let Some((pid, _)) = find_pane_at(pane_rects, mx, my) {
             if right_click_is_local(app, pid) {
+                // 進行中の左ドラッグはここで確定させる。メニューが対の Up(Left) を
+                // 飲むため、放置すると dragging/auto_scroll が取り残されて
+                // auto-scroll が回り続け、mouse_local_drag も残って以降の
+                // マウスルーティングが狂う (左右チョード押しのケース)。
+                if let Some(sel) = app.selection.as_mut() {
+                    sel.dragging = false;
+                    sel.auto_scroll = 0;
+                    if sel.anchor == sel.cursor {
+                        app.selection = None;
+                    }
+                }
+                app.mouse_local_drag = false;
                 open_context_menu(app, pid, mx, my);
+                // 直前フレームの矩形は旧メニュー (または無し) のもの。新メニューが
+                // 描画されるまでヒットテストに使わせない (同一バッチ内の連続
+                // イベントが旧位置の項目を誤実行しないように)。
+                *menu_rect = None;
                 return;
             }
         } else {
@@ -1370,12 +1394,15 @@ fn classify_menu_mouse(
     match kind {
         Down(MouseButton::Right) => MenuMouseAction::Reopen,
         ScrollUp | ScrollDown | ScrollLeft | ScrollRight => MenuMouseAction::Close,
-        Down(_) => match over_item {
+        Down(MouseButton::Left) => match over_item {
             Some(i) if items.get(i).is_some_and(|it| it.enabled) => MenuMouseAction::Execute(i),
             Some(_) => MenuMouseAction::Consume,
             None if inside => MenuMouseAction::Consume,
             None => MenuMouseAction::Close,
         },
+        // 中ボタンは実行にも解除にも使わない (対の Up(Middle) は誰も
+        // mouse_local_drag を掃除できないため、フラグを立てる操作にしない)。
+        Down(_) => MenuMouseAction::Consume,
         Moved | Drag(_) => match over_item {
             Some(i) if items.get(i).is_some_and(|it| it.enabled) => MenuMouseAction::Highlight(i),
             _ => MenuMouseAction::Consume,
@@ -1893,14 +1920,17 @@ enum ArrowAction {
 #[allow(clippy::too_many_arguments)]
 fn classify_arrow(
     sidebar_focused: bool,
-    renaming: bool,
+    // rename 入力中またはコンテキストメニュー開時 (モーダル UI が矢印を消費する)。
+    // Defer の 70ms 遅延や recent-wheel Drop で実キーが失われないよう即 Forward
+    // する。モーダルを閉じた直後に保留矢印が子へフラッシュされる漏れも防ぐ。
+    modal: bool,
     key: &KeyEvent,
     last_wheel_at: Option<Instant>,
     pair_window: Duration,
     now: Instant,
     adjacent_wheel: bool,
 ) -> ArrowAction {
-    if sidebar_focused || renaming {
+    if sidebar_focused || modal {
         return ArrowAction::Forward;
     }
     if !key.modifiers.is_empty() {
@@ -2549,6 +2579,12 @@ mod tests {
         assert_eq!(
             classify_menu_mouse(&Down(MouseButton::Left), false, None, &items),
             MenuMouseAction::Close
+        );
+        // 中ボタンは実行にしない (対の Up(Middle) が mouse_local_drag を
+        // 掃除できないため)。
+        assert_eq!(
+            classify_menu_mouse(&Down(MouseButton::Middle), true, Some(1), &items),
+            MenuMouseAction::Consume
         );
         assert_eq!(
             classify_menu_mouse(&Moved, true, Some(1), &items),
