@@ -1647,12 +1647,47 @@ fn extract_selected_text_from_parser(
                 }
             }
             // ソフトラップ判定。
-            // 1) vt100 がこの行を wrapped と markしている (右端まで埋まり次行へ続く)。
-            // 2) かつ、行末まで切れずに読み取れている (x1 が cols-1)。
-            //    範囲末尾の `end` を含む行で x1 が短く切られている場合は
+            // 1) vt100 がこの行を wrapped と mark している (右端まで埋まり次行へ続く)。
+            // 2) かつ、行末まで切れずに読み取れている (upper が cols-1)。
+            //    範囲末尾の `end` を含む行で upper が短く切られている場合は
             //    URL 文字列としての連続性を保証できないので結合扱いにしない。
+            let cols_last = cols_now.saturating_sub(1);
+            let at_row_end = upper == cols_last;
+            let hard_wrapped = screen.row_wrapped(y_u16);
+
+            // 遅延ワイドラップ検出。
+            // vt100 は「行末に残り 1 列しかない所へ全角(幅2)文字が来て次行送りに
+            // なった」場合、最終セルを空のまま残し row_wrapped を立てない
+            // (tmux 互換。vendor/vt100 screen.rs の has_contents 判定コメント参照)。
+            // この場合も論理行としては次行と連続しているので、専用に検出して
+            // 結合する。判定は「最終セルが空 / その左は埋まっている / 次行頭が
+            // 全角文字 (次行送りされた当の文字)」の 3 点。ハードラップ(明示改行)で
+            // たまたま cols-2 まで埋めて改行した行を誤結合しないための絞り込み。
+            let last_empty = !screen
+                .cell(y_u16, cols_last)
+                .is_some_and(|c| c.is_wide_continuation() || c.has_contents());
+            let prev_filled = cols_last > 0
+                && screen
+                    .cell(y_u16, cols_last - 1)
+                    .is_some_and(|c| c.is_wide_continuation() || c.has_contents());
+            let next_wide = screen.cell((y + 1) as u16, 0).is_some_and(|c| c.is_wide());
+            let deferred_wide_wrap = !hard_wrapped
+                && at_row_end
+                && our_row < end.1
+                && y + 1 < h_now
+                && last_empty
+                && prev_filled
+                && next_wide;
+
             let wrapped_to_next =
-                screen.row_wrapped(y_u16) && upper == cols_now.saturating_sub(1) && our_row < end.1;
+                our_row < end.1 && at_row_end && (hard_wrapped || deferred_wide_wrap);
+            // 遅延ワイドラップ行は、読み取った末尾のパディング空白 1 個を落として
+            // から結合する (次行頭の全角文字と直結させ、余分な空白を残さない)。
+            let line = if deferred_wide_wrap {
+                line.trim_end_matches(' ').to_string()
+            } else {
+                line
+            };
             rows.push((line, wrapped_to_next));
             row = our_row + 1;
             progressed = true;
@@ -2392,6 +2427,38 @@ mod tests {
             "expected no newline in wrapped URL copy, got: {text:?}"
         );
         assert_eq!(text, url);
+    }
+
+    /// 全角(幅2)文字が行末の残り 1 列に入りきらず次行送りになる "遅延ワイド
+    /// ラップ"。vt100 はこのケースで row_wrapped を立てない (tmux 互換) ため、
+    /// 従来は改行と末尾パディング空白が混入していた。抽出側の専用検出で、
+    /// 論理行として改行・余分な空白なしに結合されることを検証する。
+    #[test]
+    fn extract_selected_text_joins_deferred_wide_wrap() {
+        // 40 桁。全角を含むパスが右端で遅延ラップするよう構成。
+        // y=0 は "...教科" の直後に全角 "書" が入りきらず次行送り → 最終セル空 /
+        // row_wrapped=false になる (この前提が崩れたら本テストの意義も要再検討)。
+        let mut parser = vt100::Parser::new(4, 40, 100);
+        let path = "C:\\work\\img\\2026-07-18_整体院に学ぶ教科書級マーケティング_thumb.png";
+        parser.process(path.as_bytes());
+        // 前提の確認: y=0 は vt100 の仕様で wrapped フラグが立たない。
+        assert!(
+            !parser.screen().row_wrapped(0),
+            "前提が変化: y=0 が wrapped 扱いになった"
+        );
+        let sel = crate::app::Selection {
+            pane_id: 1,
+            anchor: (0, 0),
+            cursor: (39, 1),
+            dragging: false,
+            auto_scroll: 0,
+            alt: false,
+            grid_gen: 0,
+        };
+        let text = extract_selected_text_from_parser(&mut parser, sel);
+        assert!(!text.contains('\n'), "改行が混入: {text:?}");
+        assert!(!text.contains("  "), "余分な空白が混入: {text:?}");
+        assert_eq!(text, path);
     }
 
     /// ハードラップ (明示的な \r\n) は従来どおり '\n' で結合される
