@@ -1,5 +1,7 @@
-use std::fs;
+use std::fs::File;
+use std::io::{Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
+use std::time::SystemTime;
 
 use anyhow::Result;
 use serde::Deserialize;
@@ -7,6 +9,18 @@ use serde::Deserialize;
 /// Default context window for the Claude models we care about in v0.1.
 /// Overridden by env var `CCNEST_CONTEXT_WINDOW` if set.
 pub const DEFAULT_CONTEXT_WINDOW: u64 = 200_000;
+
+/// 初回の逆走査で読む末尾バイト数。実測では目的の行は EOF から 3〜5 行
+/// (2.8〜7.7KB) 以内に収まるので、通常はこの 1 回で足りる。
+const TAIL_START: u64 = 64 * 1024;
+/// 逆走査ウィンドウの上限。実測の最大行長が 5.1MB あるため、それを 1 行
+/// 丸ごと収容できるところまでは倍々で広げる。超えたら全文読みに落ちる。
+const TAIL_MAX: u64 = 8 * 1024 * 1024;
+
+/// Claude Code がローカル生成する通知行 (API エラー / 上限到達 / 中断) の
+/// model 値。実データに 21 行実在し、**セッション最終行がこれ**のケースも
+/// あるため、モデル名としても usage としても採用してはいけない。
+const SYNTHETIC_MODEL: &str = "<synthetic>";
 
 #[derive(Debug, Clone, Copy)]
 pub struct ContextUsage {
@@ -27,8 +41,30 @@ impl ContextUsage {
     }
 }
 
+/// セッション JSONL の 1 パス走査で得られる「今の状態」。
+#[derive(Debug, Clone, Default)]
+pub struct SessionInfo {
+    pub usage: Option<ContextUsage>,
+    /// 最後の非 synthetic な assistant 行の `message.model` (生の ID)。
+    pub model: Option<String>,
+}
+
+/// セッションファイルの読み取り状態。`(no session yet)` と実 I/O エラーを
+/// 区別するために持つ (かつて `.ok()` で握り潰していたせいで、パス生成の
+/// 恒久バグが「セッション未開始」に見えていた)。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum SessionState {
+    /// まだファイルが無い (claude 起動直後 / shell ペイン)。
+    #[default]
+    NoSession,
+    Ok,
+    ReadError,
+}
+
 #[derive(Debug, Deserialize)]
 struct Entry {
+    #[serde(default, rename = "type")]
+    kind: Option<String>,
     #[serde(default)]
     message: Option<Message>,
 }
@@ -37,6 +73,8 @@ struct Entry {
 struct Message {
     #[serde(default)]
     usage: Option<Usage>,
+    #[serde(default)]
+    model: Option<String>,
 }
 
 #[derive(Debug, Deserialize, Default)]
@@ -51,21 +89,30 @@ struct Usage {
     output_tokens: Option<u64>,
 }
 
+impl Usage {
+    fn total(&self) -> u64 {
+        self.input_tokens.unwrap_or(0)
+            + self.cache_creation_input_tokens.unwrap_or(0)
+            + self.cache_read_input_tokens.unwrap_or(0)
+            + self.output_tokens.unwrap_or(0)
+    }
+}
+
 /// Translate a filesystem cwd into the encoded directory name that Claude Code
 /// uses under `~/.claude/projects/`.
 ///
-/// Rule: drop the drive colon (Windows), then replace `\` and `/` with `-`.
+/// Rule (実データ 8/8 で検証): **英数字以外はすべて `-` に置換**する。
+/// 非 ASCII はバイト数ではなく 1 文字につき `-` 1 個。
+///
+/// ```text
+/// C:\Users\me\work\90_other\App  -> C--Users-me-work-90-other-App
+/// C:\Users\me\work\50_ブログ     -> C--Users-me-work-50----
+/// ```
 pub fn encode_project_dir(cwd: &Path) -> String {
-    let s = cwd.to_string_lossy();
-    let mut out = String::with_capacity(s.len());
-    for ch in s.chars() {
-        match ch {
-            '\\' | '/' => out.push('-'),
-            ':' => {} // drop drive colon
-            other => out.push(other),
-        }
-    }
-    out
+    cwd.to_string_lossy()
+        .chars()
+        .map(|c| if c.is_ascii_alphanumeric() { c } else { '-' })
+        .collect()
 }
 
 pub fn claude_projects_root() -> Option<PathBuf> {
@@ -79,51 +126,268 @@ pub fn session_path(cwd: &Path, session_id: &str) -> Option<PathBuf> {
     })
 }
 
-/// Parse a JSONL file and compute current context usage.
-/// We treat the *last* assistant message's usage as authoritative (Claude
-/// reports cumulative input including cache) — this is how ccusage and
-/// similar tools handle it.
-pub fn usage_from_file(path: &Path) -> Result<ContextUsage> {
-    let content = fs::read_to_string(path)?;
-    usage_from_str(&content)
-}
-
-pub fn usage_from_str(content: &str) -> Result<ContextUsage> {
-    let mut last_usage: Option<Usage> = None;
-    for line in content.lines() {
-        if line.trim().is_empty() {
-            continue;
-        }
-        let Ok(entry) = serde_json::from_str::<Entry>(line) else {
-            continue;
-        };
-        if let Some(u) = entry.message.and_then(|m| m.usage) {
-            last_usage = Some(u);
-        }
-    }
-    let used = last_usage
-        .map(|u| {
-            u.input_tokens.unwrap_or(0)
-                + u.cache_creation_input_tokens.unwrap_or(0)
-                + u.cache_read_input_tokens.unwrap_or(0)
-                + u.output_tokens.unwrap_or(0)
-        })
-        .unwrap_or(0);
-    let window = std::env::var("CCNEST_CONTEXT_WINDOW")
+fn context_window() -> u64 {
+    std::env::var("CCNEST_CONTEXT_WINDOW")
         .ok()
         .and_then(|s| s.parse().ok())
-        .unwrap_or(DEFAULT_CONTEXT_WINDOW);
-    Ok(ContextUsage { used, window })
+        .unwrap_or(DEFAULT_CONTEXT_WINDOW)
+}
+
+/// 1 行を取り込む。assistant 行のみ、かつ synthetic を除いて「最後が勝つ」。
+fn apply_line(line: &str, info: &mut SessionInfo) {
+    let line = line.trim();
+    if line.is_empty() {
+        return;
+    }
+    let Ok(entry) = serde_json::from_str::<Entry>(line) else {
+        return;
+    };
+    if entry.kind.as_deref() != Some("assistant") {
+        return;
+    }
+    let Some(msg) = entry.message else {
+        return;
+    };
+    if msg.model.as_deref() == Some(SYNTHETIC_MODEL) {
+        return;
+    }
+    if let Some(m) = msg.model {
+        info.model = Some(m);
+    }
+    if let Some(u) = msg.usage {
+        info.usage = Some(ContextUsage {
+            used: u.total(),
+            window: context_window(),
+        });
+    }
+}
+
+pub fn session_info_from_str(content: &str) -> SessionInfo {
+    let mut info = SessionInfo::default();
+    for line in content.lines() {
+        apply_line(line, &mut info);
+    }
+    info
+}
+
+/// ファイル末尾から `win` バイトを読み、**最初の改行より前を必ず捨てて**
+/// 返す。バイト境界で切ってから行頭に揃えるので、UTF-8 のマルチバイト文字
+/// を分断することが原理的に起きない。
+///
+/// 返り値は (行に揃ったテキスト, そのテキストが始まるファイル内オフセット)。
+/// ファイル全体が `win` に収まる場合は先頭から返す (オフセット 0)。
+fn read_tail(path: &Path, win: u64) -> Result<(String, u64)> {
+    let mut f = File::open(path)?;
+    let len = f.metadata()?.len();
+    let start = len.saturating_sub(win);
+    f.seek(SeekFrom::Start(start))?;
+    let mut buf = Vec::with_capacity((len - start) as usize);
+    f.read_to_end(&mut buf)?;
+
+    let (slice, offset) = if start == 0 {
+        (&buf[..], 0)
+    } else {
+        match buf.iter().position(|b| *b == b'\n') {
+            // 先頭の欠けた行を捨てる。改行の次から。
+            Some(nl) => (&buf[nl + 1..], start + nl as u64 + 1),
+            // ウィンドウ内に改行が 1 つも無い = 1 行の途中しか掴めていない。
+            None => (&buf[buf.len()..], len),
+        }
+    };
+    Ok((String::from_utf8_lossy(slice).into_owned(), offset))
+}
+
+/// 末尾から必要な行が見つかるまでウィンドウを倍々に広げて読む。
+/// 見つからないまま `TAIL_MAX` を超えたら全文読みにフォールバックする。
+fn read_tail_until_found(path: &Path) -> Result<(SessionInfo, u64)> {
+    let file_len = File::open(path)?.metadata()?.len();
+    let mut win = TAIL_START;
+    loop {
+        let (text, _) = read_tail(path, win)?;
+        let info = session_info_from_str(&text);
+        if info.model.is_some() || info.usage.is_some() || win >= file_len {
+            return Ok((info, file_len));
+        }
+        if win >= TAIL_MAX {
+            // 巨大行に阻まれている。ここまで来たら全文読みしかない。
+            let mut buf = Vec::with_capacity(file_len as usize);
+            File::open(path)?.read_to_end(&mut buf)?;
+            let text = String::from_utf8_lossy(&buf);
+            return Ok((session_info_from_str(&text), file_len));
+        }
+        win = win.saturating_mul(2);
+    }
+}
+
+/// 1 ペイン分のセッション JSONL を追跡する。ペインと生死を共にするので
+/// GC は不要。定常時のコストは `fs::metadata` 1 回だけ。
+///
+/// 初回のみ末尾から逆走査し、以降は前回の位置からの**差分バイトだけ**を
+/// 読む。ファイルが縮んでいたら (rewind / 別セッションへの切替) 位置を
+/// リセットして初回扱いに戻す。
+#[derive(Debug, Default)]
+pub struct SessionTailer {
+    path: Option<PathBuf>,
+    /// 消費済みバイト数。常に行境界に揃っている。
+    offset: u64,
+    stamp: Option<(u64, SystemTime)>,
+    info: SessionInfo,
+    state: SessionState,
+}
+
+impl SessionTailer {
+    pub fn new(path: Option<PathBuf>) -> Self {
+        Self {
+            path,
+            ..Default::default()
+        }
+    }
+
+    pub fn info(&self) -> &SessionInfo {
+        &self.info
+    }
+
+    pub fn state(&self) -> SessionState {
+        self.state
+    }
+
+    /// 追跡を止めて状態を捨てる。ペインを shell に戻したときに呼ぶ。
+    pub fn disable(&mut self) {
+        *self = Self::default();
+    }
+
+    /// metadata が変化していれば読み直す。2 秒 tick から呼ぶ。
+    pub fn refresh(&mut self) {
+        let Some(path) = self.path.clone() else {
+            self.state = SessionState::NoSession;
+            return;
+        };
+        let meta = match std::fs::metadata(&path) {
+            Ok(m) => m,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                self.state = SessionState::NoSession;
+                return;
+            }
+            Err(_) => {
+                self.state = SessionState::ReadError;
+                return;
+            }
+        };
+        let stamp = (
+            meta.len(),
+            meta.modified().unwrap_or(SystemTime::UNIX_EPOCH),
+        );
+        if self.stamp == Some(stamp) {
+            return;
+        }
+
+        // ファイルが縮んだ = 別ファイルに差し替わった。最初から読み直す。
+        if meta.len() < self.offset {
+            self.offset = 0;
+            self.info = SessionInfo::default();
+        }
+
+        let result = if self.offset == 0 {
+            read_tail_until_found(&path).map(|(info, len)| {
+                self.info = info;
+                len
+            })
+        } else {
+            self.read_delta(&path, meta.len())
+        };
+
+        match result {
+            Ok(new_offset) => {
+                self.offset = new_offset;
+                self.stamp = Some(stamp);
+                self.state = SessionState::Ok;
+            }
+            Err(_) => self.state = SessionState::ReadError,
+        }
+    }
+
+    /// 前回位置から末尾までの追記分だけを読む。末尾の未完了行 (書き込み途中)
+    /// は消費せず、次回に持ち越す。
+    fn read_delta(&mut self, path: &Path, len: u64) -> Result<u64> {
+        let mut f = File::open(path)?;
+        f.seek(SeekFrom::Start(self.offset))?;
+        let mut buf = Vec::with_capacity((len - self.offset) as usize);
+        f.read_to_end(&mut buf)?;
+
+        let complete = match buf.iter().rposition(|b| *b == b'\n') {
+            Some(nl) => nl + 1,
+            None => return Ok(self.offset), // まだ 1 行も完結していない
+        };
+        let text = String::from_utf8_lossy(&buf[..complete]);
+        for line in text.lines() {
+            apply_line(line, &mut self.info);
+        }
+        Ok(self.offset + complete as u64)
+    }
+}
+
+/// モデル ID を人間が読める短縮表記にする。
+///
+/// ```text
+/// claude-opus-4-8           -> Opus 4.8
+/// claude-fable-5            -> Fable 5
+/// claude-haiku-4-5-20251001 -> Haiku 4.5
+/// claude-opus-4-8[1m]       -> Opus 4.8 (1M)
+/// (規則に当てはまらないもの)  -> 生の ID をそのまま
+/// ```
+pub fn pretty_model(id: &str) -> String {
+    let (base, one_m) = match id.strip_suffix("[1m]") {
+        Some(b) => (b, true),
+        None => (id, false),
+    };
+    let Some(rest) = base.strip_prefix("claude-") else {
+        return id.to_string();
+    };
+    let mut parts: Vec<&str> = rest.split('-').filter(|s| !s.is_empty()).collect();
+    // 末尾の 8 桁日付 (例: -20251001) は表示しない。
+    if parts
+        .last()
+        .is_some_and(|s| s.len() == 8 && s.chars().all(|c| c.is_ascii_digit()))
+    {
+        parts.pop();
+    }
+    let Some((family, version)) = parts.split_first() else {
+        return id.to_string();
+    };
+    // バージョンが数値トークンだけで構成されていなければ規則の対象外。
+    if version.is_empty()
+        || !version
+            .iter()
+            .all(|s| !s.is_empty() && s.chars().all(|c| c.is_ascii_digit()))
+    {
+        return id.to_string();
+    }
+    let mut out = String::with_capacity(base.len());
+    let mut chars = family.chars();
+    if let Some(first) = chars.next() {
+        out.extend(first.to_uppercase());
+        out.push_str(chars.as_str());
+    }
+    out.push(' ');
+    out.push_str(&version.join("."));
+    if one_m {
+        out.push_str(" (1M)");
+    }
+    out
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::io::Write;
+
+    // ---- encode_project_dir ------------------------------------------------
 
     #[test]
     fn encodes_windows_path() {
         let p = PathBuf::from(r"C:\Users\me\proj");
-        assert_eq!(encode_project_dir(&p), "C-Users-me-proj");
+        // ドライブのコロンも `-` になるので `C--` で始まる。
+        assert_eq!(encode_project_dir(&p), "C--Users-me-proj");
     }
 
     #[test]
@@ -133,26 +397,290 @@ mod tests {
     }
 
     #[test]
-    fn empty_jsonl_gives_zero_usage() {
-        let u = usage_from_str("").unwrap();
-        assert_eq!(u.used, 0);
+    fn encodes_path_with_underscore_and_dot() {
+        // 実データ: C--Users-mitam-Desktop-work-30-XTP2-POST-r5--docs-...
+        let p = PathBuf::from(r"C:\work\30_XTP2_POST_r5\.docs");
+        assert_eq!(encode_project_dir(&p), "C--work-30-XTP2-POST-r5--docs");
+    }
+
+    #[test]
+    fn encodes_non_ascii_one_dash_per_char() {
+        // 実データ: C--Users-mitam-Desktop-work-50----
+        let p = PathBuf::from(r"C:\work\50_ブログ");
+        assert_eq!(encode_project_dir(&p), "C--work-50----");
+    }
+
+    // ---- parsing -----------------------------------------------------------
+
+    #[test]
+    fn empty_jsonl_gives_no_usage() {
+        let info = session_info_from_str("");
+        assert!(info.usage.is_none());
+        assert!(info.model.is_none());
     }
 
     #[test]
     fn usage_takes_last_message() {
         let jsonl = r#"
 {"type":"user","message":{"role":"user"}}
-{"type":"assistant","message":{"role":"assistant","usage":{"input_tokens":1000,"cache_read_input_tokens":500,"output_tokens":200}}}
-{"type":"assistant","message":{"role":"assistant","usage":{"input_tokens":1500,"cache_read_input_tokens":800,"output_tokens":300}}}
+{"type":"assistant","message":{"role":"assistant","model":"claude-opus-4-8","usage":{"input_tokens":1000,"cache_read_input_tokens":500,"output_tokens":200}}}
+{"type":"assistant","message":{"role":"assistant","model":"claude-opus-4-8","usage":{"input_tokens":1500,"cache_read_input_tokens":800,"output_tokens":300}}}
 "#;
-        let u = usage_from_str(jsonl).unwrap();
-        assert_eq!(u.used, 1500 + 800 + 300);
+        let info = session_info_from_str(jsonl);
+        assert_eq!(info.usage.unwrap().used, 1500 + 800 + 300);
     }
 
     #[test]
     fn tolerates_malformed_lines() {
-        let jsonl = "garbage\n{\"message\":{\"usage\":{\"input_tokens\":42}}}\n";
-        let u = usage_from_str(jsonl).unwrap();
-        assert_eq!(u.used, 42);
+        let jsonl =
+            "garbage\n{\"type\":\"assistant\",\"message\":{\"usage\":{\"input_tokens\":42}}}\n";
+        let info = session_info_from_str(jsonl);
+        assert_eq!(info.usage.unwrap().used, 42);
+    }
+
+    #[test]
+    fn parses_model_from_last_assistant_line() {
+        let jsonl = r#"
+{"type":"assistant","message":{"model":"claude-fable-5","usage":{"input_tokens":10}}}
+{"type":"assistant","message":{"model":"claude-opus-4-8","usage":{"input_tokens":20}}}
+"#;
+        assert_eq!(
+            session_info_from_str(jsonl).model.as_deref(),
+            Some("claude-opus-4-8")
+        );
+    }
+
+    #[test]
+    fn model_switch_mid_session_takes_latest() {
+        // 実観測: 同一セッション内で fable-5 -> opus-4-8 に切り替わる。
+        let jsonl = r#"
+{"type":"assistant","message":{"model":"claude-fable-5","usage":{"input_tokens":10}}}
+{"type":"user","message":{"role":"user","content":"<command-name>/model</command-name>"}}
+{"type":"assistant","message":{"model":"claude-opus-4-8","usage":{"input_tokens":20}}}
+"#;
+        assert_eq!(
+            session_info_from_str(jsonl).model.as_deref(),
+            Some("claude-opus-4-8")
+        );
+    }
+
+    #[test]
+    fn skips_synthetic_model_and_takes_previous_real_one() {
+        // 実データにセッション最終行が <synthetic> のケースがある。
+        let jsonl = r#"
+{"type":"assistant","message":{"model":"claude-opus-4-8","usage":{"input_tokens":1000,"output_tokens":50}}}
+{"type":"assistant","message":{"model":"<synthetic>","id":"66cbae66-615f-4775-9cb4-8d31b8712f4e","usage":{"input_tokens":0,"output_tokens":0}}}
+"#;
+        let info = session_info_from_str(jsonl);
+        assert_eq!(info.model.as_deref(), Some("claude-opus-4-8"));
+        // synthetic の全ゼロ usage で上書きされていないこと (既存バグの回帰防止)。
+        assert_eq!(info.usage.unwrap().used, 1050);
+    }
+
+    #[test]
+    fn ignores_non_assistant_lines() {
+        let jsonl = r#"
+{"type":"user","message":{"model":"claude-opus-4-8","usage":{"input_tokens":999}}}
+{"type":"mode","mode":"normal"}
+"#;
+        let info = session_info_from_str(jsonl);
+        assert!(info.model.is_none());
+        assert!(info.usage.is_none());
+    }
+
+    #[test]
+    fn model_none_when_no_assistant_line() {
+        let jsonl = "{\"type\":\"user\",\"message\":{\"role\":\"user\"}}\n";
+        assert!(session_info_from_str(jsonl).model.is_none());
+    }
+
+    // ---- tail read ---------------------------------------------------------
+
+    fn write_tmp(name: &str, body: &str) -> (tempfile::TempDir, PathBuf) {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join(name);
+        let mut f = File::create(&path).unwrap();
+        f.write_all(body.as_bytes()).unwrap();
+        (dir, path)
+    }
+
+    #[test]
+    fn tail_read_drops_partial_first_line() {
+        let body = "{\"type\":\"assistant\",\"message\":{\"model\":\"claude-fable-5\"}}\n\
+                    {\"type\":\"assistant\",\"message\":{\"model\":\"claude-opus-4-8\"}}\n";
+        let (_d, path) = write_tmp("s.jsonl", body);
+        // 2 行目の途中から始まる窓を要求する。
+        let win = 30;
+        let (text, off) = read_tail(&path, win).unwrap();
+        assert!(off > 0, "窓が先頭に届いてしまっている");
+        // 欠けた行は捨てられ、完結した行だけが残る。
+        for line in text.lines() {
+            assert!(serde_json::from_str::<serde_json::Value>(line).is_ok());
+        }
+    }
+
+    #[test]
+    fn tail_read_keeps_utf8_intact_with_multibyte() {
+        // 非 ASCII を大量に含む行をバイト境界で切っても壊れないこと。
+        let mut body = String::new();
+        for i in 0..50 {
+            body.push_str(&format!(
+                "{{\"type\":\"assistant\",\"message\":{{\"model\":\"claude-opus-4-8\",\"note\":\"日本語のテキスト{i}\",\"usage\":{{\"input_tokens\":{i}}}}}}}\n"
+            ));
+        }
+        let (_d, path) = write_tmp("ja.jsonl", &body);
+        let (text, _) = read_tail(&path, 100).unwrap();
+        for line in text.lines() {
+            assert!(serde_json::from_str::<serde_json::Value>(line).is_ok());
+        }
+    }
+
+    #[test]
+    fn tail_widens_window_when_first_window_has_no_assistant_line() {
+        // 先頭に assistant 行、その後に巨大な非 assistant 行を置く。初期窓には
+        // assistant 行が入らないので、ウィンドウが広がって初めて見つかる。
+        let filler = "x".repeat(100 * 1024);
+        let body = format!(
+            "{{\"type\":\"assistant\",\"message\":{{\"model\":\"claude-opus-4-8\",\"usage\":{{\"input_tokens\":7}}}}}}\n\
+             {{\"type\":\"user\",\"pad\":\"{filler}\"}}\n"
+        );
+        let (_d, path) = write_tmp("wide.jsonl", &body);
+        let (info, len) = read_tail_until_found(&path).unwrap();
+        assert_eq!(info.model.as_deref(), Some("claude-opus-4-8"));
+        assert_eq!(len, body.len() as u64);
+    }
+
+    #[test]
+    fn tailer_reads_appended_lines_incrementally() {
+        let (_d, path) = write_tmp(
+            "t.jsonl",
+            "{\"type\":\"assistant\",\"message\":{\"model\":\"claude-fable-5\",\"usage\":{\"input_tokens\":10}}}\n",
+        );
+        let mut t = SessionTailer::new(Some(path.clone()));
+        t.refresh();
+        assert_eq!(t.state(), SessionState::Ok);
+        assert_eq!(t.info().model.as_deref(), Some("claude-fable-5"));
+
+        let mut f = std::fs::OpenOptions::new()
+            .append(true)
+            .open(&path)
+            .unwrap();
+        f.write_all(b"{\"type\":\"assistant\",\"message\":{\"model\":\"claude-opus-4-8\",\"usage\":{\"input_tokens\":99}}}\n").unwrap();
+        drop(f);
+
+        t.refresh();
+        assert_eq!(t.info().model.as_deref(), Some("claude-opus-4-8"));
+        assert_eq!(t.info().usage.unwrap().used, 99);
+    }
+
+    #[test]
+    fn tailer_holds_back_incomplete_trailing_line() {
+        let (_d, path) = write_tmp(
+            "p.jsonl",
+            "{\"type\":\"assistant\",\"message\":{\"model\":\"claude-fable-5\"}}\n",
+        );
+        let mut t = SessionTailer::new(Some(path.clone()));
+        t.refresh();
+
+        // 改行の無い書きかけの行を追記する。
+        let mut f = std::fs::OpenOptions::new()
+            .append(true)
+            .open(&path)
+            .unwrap();
+        f.write_all(b"{\"type\":\"assistant\",\"message\":{\"model\":\"claude-op")
+            .unwrap();
+        drop(f);
+        t.refresh();
+        assert_eq!(t.info().model.as_deref(), Some("claude-fable-5"));
+
+        // 続きが書かれて行が完結したら取り込まれる。
+        let mut f = std::fs::OpenOptions::new()
+            .append(true)
+            .open(&path)
+            .unwrap();
+        f.write_all(b"us-4-8\"}}\n").unwrap();
+        drop(f);
+        t.refresh();
+        assert_eq!(t.info().model.as_deref(), Some("claude-opus-4-8"));
+    }
+
+    #[test]
+    fn tailer_reports_no_session_for_missing_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut t = SessionTailer::new(Some(dir.path().join("nope.jsonl")));
+        t.refresh();
+        assert_eq!(t.state(), SessionState::NoSession);
+        assert!(t.info().model.is_none());
+    }
+
+    #[test]
+    fn tailer_resets_when_file_shrinks() {
+        let (_d, path) = write_tmp(
+            "r.jsonl",
+            "{\"type\":\"assistant\",\"message\":{\"model\":\"claude-opus-4-8\"}}\n",
+        );
+        let mut t = SessionTailer::new(Some(path.clone()));
+        t.refresh();
+        assert_eq!(t.info().model.as_deref(), Some("claude-opus-4-8"));
+
+        // より短い内容で置き換える。
+        std::fs::write(
+            &path,
+            "{\"type\":\"assistant\",\"message\":{\"model\":\"claude-fable-5\"}}\n",
+        )
+        .unwrap();
+        t.refresh();
+        assert_eq!(t.info().model.as_deref(), Some("claude-fable-5"));
+    }
+
+    #[test]
+    fn tailer_disable_clears_state() {
+        let (_d, path) = write_tmp(
+            "d.jsonl",
+            "{\"type\":\"assistant\",\"message\":{\"model\":\"claude-opus-4-8\"}}\n",
+        );
+        let mut t = SessionTailer::new(Some(path));
+        t.refresh();
+        assert!(t.info().model.is_some());
+        t.disable();
+        assert!(t.info().model.is_none());
+        assert_eq!(t.state(), SessionState::NoSession);
+    }
+
+    // ---- pretty_model ------------------------------------------------------
+
+    #[test]
+    fn pretty_model_known_ids() {
+        assert_eq!(pretty_model("claude-opus-4-8"), "Opus 4.8");
+        assert_eq!(pretty_model("claude-fable-5"), "Fable 5");
+        assert_eq!(pretty_model("claude-sonnet-5"), "Sonnet 5");
+    }
+
+    #[test]
+    fn pretty_model_strips_date_suffix() {
+        assert_eq!(pretty_model("claude-haiku-4-5-20251001"), "Haiku 4.5");
+    }
+
+    #[test]
+    fn pretty_model_1m_suffix() {
+        assert_eq!(pretty_model("claude-opus-4-8[1m]"), "Opus 4.8 (1M)");
+    }
+
+    #[test]
+    fn pretty_model_unknown_passthrough() {
+        assert_eq!(pretty_model("gpt-foo"), "gpt-foo");
+        assert_eq!(pretty_model("claude-unknown-x"), "claude-unknown-x");
+        assert_eq!(pretty_model("claude-opus"), "claude-opus");
+        assert_eq!(pretty_model("<synthetic>"), "<synthetic>");
     }
 }
+
+// Version History
+// ver0.1 - 2026-04-25 - Initial JSONL context-usage parser.
+// ver0.2 - 2026-07-20 - Fixed encode_project_dir (non-alphanumeric -> '-'; the
+//                       old rule never matched a real ~/.claude/projects dir, so
+//                       context usage silently showed "(no session yet)").
+//                       Added model extraction (<synthetic> excluded), byte-based
+//                       incremental tail reading (SessionTailer) to remove
+//                       multi-MB full-file parses from the render path, and
+//                       pretty_model() for short display names.

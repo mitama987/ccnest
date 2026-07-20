@@ -10,6 +10,10 @@ pub struct Theme {
     pub section_active: Style,
     pub section_inactive: Style,
     pub hint: Style,
+    /// ステータスバーのモデル名 (border_claude と同系のオレンジ)。
+    pub status_model: Style,
+    /// ステータスバーの git ブランチ。
+    pub status_branch: Style,
     pub file_directory: Style,
     pub file_git: Style,
     pub file_markdown: Style,
@@ -50,6 +54,8 @@ pub fn default_theme() -> Theme {
             .add_modifier(Modifier::BOLD),
         section_inactive: Style::default().fg(Color::DarkGray),
         hint: Style::default().fg(Color::DarkGray),
+        status_model: Style::default().fg(Color::Rgb(255, 140, 0)),
+        status_branch: Style::default().fg(Color::Rgb(148, 163, 184)),
         file_directory: Style::default()
             .fg(Color::Rgb(255, 204, 64))
             .add_modifier(Modifier::BOLD),
@@ -85,3 +91,4 @@ pub fn default_theme() -> Theme {
 // Version History
 // ver0.1 - 2026-04-25 - Added file tree category colors for iconized sidebar rows.
 // ver0.2 - 2026-07-12 - Added context-menu styles (menu_highlight / menu_disabled).
+// ver0.3 - 2026-07-20 - Added status bar styles (status_model / status_branch).

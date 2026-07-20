@@ -214,16 +214,197 @@ fn draw_tabbar(
     frame.render_widget(Paragraph::new(Line::from(spans)), area);
 }
 
+/// ステータスバー 1 行目のセグメント区切り (表示幅 3 桁)。
+const STATUS_SEP: &str = " │ ";
+const STATUS_SEP_W: usize = 3;
+/// cwd をこの幅未満までしか残せないなら、いっそ丸ごと落とす。
+const MIN_CWD_WIDTH: usize = 10;
+/// ブランチ名をこの幅未満までしか残せないなら、丸ごと落とす。
+const MIN_BRANCH_WIDTH: usize = 8;
+
+/// 幅計算済みのステータスバー 1 行目。空文字列 = そのセグメントは出さない。
+#[derive(Debug, Default, PartialEq, Eq)]
+struct StatusLayout {
+    cwd: String,
+    model: String,
+    branch: String,
+}
+
+impl StatusLayout {
+    fn segments(&self) -> impl Iterator<Item = (&str, u8)> {
+        [
+            (self.cwd.as_str(), 0u8),
+            (self.model.as_str(), 1),
+            (self.branch.as_str(), 2),
+        ]
+        .into_iter()
+        .filter(|(s, _)| !s.is_empty())
+    }
+}
+
+fn width_of(s: &str) -> usize {
+    unicode_width::UnicodeWidthStr::width(s)
+}
+
+/// 末尾を残して先頭を `…` で詰める (パスは末尾のディレクトリ名が重要)。
+fn ellipsize_left(s: &str, max: usize) -> String {
+    if width_of(s) <= max {
+        return s.to_string();
+    }
+    if max == 0 {
+        return String::new();
+    }
+    if max == 1 {
+        return "…".to_string();
+    }
+    let budget = max - 1;
+    let mut tail: Vec<char> = Vec::new();
+    let mut w = 0;
+    for ch in s.chars().rev() {
+        let cw = unicode_width::UnicodeWidthChar::width(ch).unwrap_or(0);
+        if w + cw > budget {
+            break;
+        }
+        w += cw;
+        tail.push(ch);
+    }
+    let mut out = String::from("…");
+    out.extend(tail.into_iter().rev());
+    out
+}
+
+/// 先頭を残して末尾を `…` で詰める。
+fn ellipsize_right(s: &str, max: usize) -> String {
+    if width_of(s) <= max {
+        return s.to_string();
+    }
+    if max == 0 {
+        return String::new();
+    }
+    if max == 1 {
+        return "…".to_string();
+    }
+    let budget = max - 1;
+    let mut out = String::new();
+    let mut w = 0;
+    for ch in s.chars() {
+        let cw = unicode_width::UnicodeWidthChar::width(ch).unwrap_or(0);
+        if w + cw > budget {
+            break;
+        }
+        w += cw;
+        out.push(ch);
+    }
+    out.push('…');
+    out
+}
+
+fn joined_width(parts: &[&str]) -> usize {
+    let live: Vec<&&str> = parts.iter().filter(|s| !s.is_empty()).collect();
+    if live.is_empty() {
+        return 0;
+    }
+    live.iter().map(|s| width_of(s)).sum::<usize>() + STATUS_SEP_W * (live.len() - 1)
+}
+
+/// 幅 `width` に収まるようセグメントを削る。
+///
+/// **モデル名とブランチを最優先で守る**（それが今回追加した情報であり、cwd は
+/// 既にタブタイトルにも出ているため）。削る順は cwd → ブランチ → モデル。
+fn layout_status(cwd: &str, model: &str, branch: &str, width: usize) -> StatusLayout {
+    let mut cwd = cwd.to_string();
+    let mut branch = branch.to_string();
+    let model = model.to_string();
+
+    if joined_width(&[&cwd, &model, &branch]) <= width {
+        return StatusLayout { cwd, model, branch };
+    }
+
+    // 1) cwd を左から詰める。確保できる幅が足りなければ丸ごと落とす。
+    if !cwd.is_empty() {
+        let others = joined_width(&[&model, &branch]);
+        let sep = if others > 0 { STATUS_SEP_W } else { 0 };
+        let avail = width.saturating_sub(others + sep);
+        cwd = if avail >= MIN_CWD_WIDTH {
+            ellipsize_left(&cwd, avail)
+        } else {
+            String::new()
+        };
+        if joined_width(&[&cwd, &model, &branch]) <= width {
+            return StatusLayout { cwd, model, branch };
+        }
+    }
+
+    // 2) ブランチを右から詰める。
+    if !branch.is_empty() {
+        let others = joined_width(&[&cwd, &model]);
+        let sep = if others > 0 { STATUS_SEP_W } else { 0 };
+        let avail = width.saturating_sub(others + sep);
+        branch = if avail >= MIN_BRANCH_WIDTH {
+            ellipsize_right(&branch, avail)
+        } else {
+            String::new()
+        };
+        if joined_width(&[&cwd, &model, &branch]) <= width {
+            return StatusLayout { cwd, model, branch };
+        }
+    }
+
+    // 3) 最後の砦。モデル名だけを幅に押し込む。
+    StatusLayout {
+        cwd: String::new(),
+        model: ellipsize_right(&model, width),
+        branch: String::new(),
+    }
+}
+
+/// ステータスバー 1 行目を組み立てる純粋関数。App に触らないので
+/// TestBackend で実バッファを検証できる。
+fn status_line<'a>(
+    cwd: &str,
+    model: &str,
+    branch: &str,
+    width: usize,
+    theme: &theme::Theme,
+) -> Line<'a> {
+    let layout = layout_status(cwd, model, branch, width);
+    let mut spans: Vec<Span> = Vec::new();
+    for (text, kind) in layout.segments() {
+        if !spans.is_empty() {
+            spans.push(Span::styled(STATUS_SEP, theme.hint));
+        }
+        let style = match kind {
+            1 => theme.status_model,
+            2 => theme.status_branch,
+            _ => theme.hint,
+        };
+        spans.push(Span::styled(text.to_string(), style));
+    }
+    Line::from(spans)
+}
+
 fn draw_statusbar(app: &App, frame: &mut Frame<'_>, area: Rect, theme: &theme::Theme) {
     let hint_text =
         "Ctrl+D:┃  Ctrl+E:━  Ctrl+T:tab  Ctrl+W:close  Ctrl+F:files  Alt+F:rename  Ctrl+C×2:shell  Ctrl+Q:quit";
-    let status = app
+    let cwd = app
         .status
         .clone()
         .unwrap_or_else(|| format!("cwd: {}", app.focused_pane_cwd().display()));
-    // 上段: cwd / status、下段: ショートカットヒント
+    // claude が走っていないペインでもセグメントは消さない (消すと右側が
+    // フォーカス移動のたびに伸縮してチラつく)。記号マーカーは付けない —
+    // ✳ (U+2733) 等は Windows Terminal が絵文字表示にして 2 桁を占め、
+    // unicode-width の申告 (1 桁) と食い違って行がはみ出す。
+    let model = app
+        .focused_model_label()
+        .unwrap_or_else(|| "shell".to_string());
+    let branch = app
+        .focused_branch()
+        .map(|b| format!("⎇ {b}"))
+        .unwrap_or_default();
+
+    // 上段: cwd / status + モデル + ブランチ、下段: ショートカットヒント
     let lines = vec![
-        Line::from(Span::styled(status, theme.hint)),
+        status_line(&cwd, &model, &branch, area.width as usize, theme),
         Line::from(Span::styled(hint_text, theme.hint)),
     ];
     frame.render_widget(Paragraph::new(lines), area);
@@ -760,6 +941,141 @@ mod tests {
             assert!(!selection_contains((5, y), s, e));
         }
     }
+
+    // ---- status bar layout -------------------------------------------------
+
+    /// 実際に描かれる 1 行の表示幅 (セグメント + 区切り) を再現する。
+    fn rendered_width(l: &StatusLayout) -> usize {
+        let parts: Vec<&str> = l.segments().map(|(s, _)| s).collect();
+        if parts.is_empty() {
+            return 0;
+        }
+        parts.iter().map(|s| width_of(s)).sum::<usize>() + STATUS_SEP_W * (parts.len() - 1)
+    }
+
+    const CWD: &str = "cwd: C:\\Users\\mitam\\Desktop\\work\\90_other\\ccnest";
+    const MODEL: &str = "Opus 4.8";
+    const BRANCH: &str = "⎇ feature/threadstoolspro2-note-article";
+
+    #[test]
+    fn statusbar_keeps_everything_when_wide() {
+        let l = layout_status(CWD, MODEL, BRANCH, 140);
+        assert_eq!(l.cwd, CWD);
+        assert_eq!(l.model, MODEL);
+        assert_eq!(l.branch, BRANCH);
+    }
+
+    #[test]
+    fn statusbar_truncates_cwd_before_model_and_branch() {
+        let l = layout_status(CWD, MODEL, BRANCH, 80);
+        // 追加した情報は無傷、cwd だけが削られる。
+        assert_eq!(l.model, MODEL);
+        assert_eq!(l.branch, BRANCH);
+        assert!(l.cwd.starts_with('…'), "cwd は左から詰める: {:?}", l.cwd);
+        // 末尾のディレクトリ名は残っている。
+        assert!(l.cwd.ends_with("ccnest"), "{:?}", l.cwd);
+        assert!(rendered_width(&l) <= 80);
+    }
+
+    #[test]
+    fn statusbar_drops_cwd_then_truncates_branch() {
+        let l = layout_status(CWD, MODEL, BRANCH, 40);
+        assert_eq!(l.model, MODEL, "モデル名は最後まで守る");
+        assert!(l.cwd.is_empty(), "cwd が先に落ちる: {:?}", l.cwd);
+        assert!(
+            l.branch.ends_with('…'),
+            "ブランチは右から詰める: {:?}",
+            l.branch
+        );
+        assert!(rendered_width(&l) <= 40);
+    }
+
+    #[test]
+    fn statusbar_model_survives_at_minimum_width() {
+        let l = layout_status(CWD, MODEL, BRANCH, 12);
+        assert!(l.cwd.is_empty());
+        assert!(l.branch.is_empty());
+        assert!(!l.model.is_empty(), "モデル名が最後の砦");
+        assert!(rendered_width(&l) <= 12);
+    }
+
+    #[test]
+    fn statusbar_never_exceeds_width_across_the_whole_range() {
+        for w in 0..=160usize {
+            let l = layout_status(CWD, MODEL, BRANCH, w);
+            assert!(
+                rendered_width(&l) <= w,
+                "width {w} overflowed: {l:?} -> {}",
+                rendered_width(&l)
+            );
+        }
+    }
+
+    #[test]
+    fn statusbar_handles_multibyte_cwd_width() {
+        // 全角は 1 文字 2 桁。バイト長で測っていると必ずはみ出す。
+        let cwd = "cwd: C:\\Users\\mitam\\Desktop\\work\\50_ブログ\\記事";
+        for w in 0..=120usize {
+            let l = layout_status(cwd, MODEL, "⎇ main", w);
+            assert!(rendered_width(&l) <= w, "width {w}: {l:?}");
+        }
+    }
+
+    #[test]
+    fn statusbar_without_branch_outside_repo() {
+        let l = layout_status(CWD, MODEL, "", 140);
+        assert!(l.branch.is_empty());
+        assert_eq!(l.cwd, CWD);
+        assert_eq!(l.model, MODEL);
+    }
+
+    /// 実際に端末バッファへ描いた 1 行目の文字列を取り出す。
+    fn render_status_row(cwd: &str, model: &str, branch: &str, width: u16) -> String {
+        use ratatui::backend::TestBackend;
+        use ratatui::Terminal;
+        let theme = theme::default_theme();
+        let mut term = Terminal::new(TestBackend::new(width, 1)).unwrap();
+        term.draw(|f| {
+            let line = status_line(cwd, model, branch, width as usize, &theme);
+            f.render_widget(Paragraph::new(vec![line]), f.area());
+        })
+        .unwrap();
+        let buf = term.backend().buffer();
+        (0..width)
+            .map(|x| buf[(x, 0)].symbol())
+            .collect::<String>()
+            .trim_end()
+            .to_string()
+    }
+
+    #[test]
+    fn statusbar_renders_expected_row_at_realistic_width() {
+        let row = render_status_row(
+            "cwd: C:\\Users\\mitam\\Desktop\\work\\90_other\\ccnest",
+            "Opus 4.8",
+            "⎇ main",
+            100,
+        );
+        assert_eq!(
+            row,
+            "cwd: C:\\Users\\mitam\\Desktop\\work\\90_other\\ccnest │ Opus 4.8 │ ⎇ main"
+        );
+    }
+
+    #[test]
+    fn statusbar_renders_shell_pane_placeholder() {
+        let row = render_status_row("cwd: C:\\tmp", "shell", "⎇ main", 60);
+        assert_eq!(row, "cwd: C:\\tmp │ shell │ ⎇ main");
+    }
+
+    #[test]
+    fn statusbar_render_never_wraps_to_a_second_cell_row() {
+        // 描画バッファ幅を超えないこと = 2 行目 (ヒント行) を押し出さない。
+        for w in [20u16, 40, 60, 80, 100, 120] {
+            let row = render_status_row(CWD, MODEL, BRANCH, w);
+            assert!(width_of(&row) <= w as usize, "w={w}: {row:?}");
+        }
+    }
 }
 
 // Version History
@@ -771,3 +1087,8 @@ mod tests {
 // ver0.3 - 2026-07-12 - Selection rows are buffer-absolute; convert to screen rows
 //                       once per frame in PaneCells::render so the highlight stays
 //                       glued to content across scrolling and streaming output.
+// ver0.4 - 2026-07-20 - Status bar line 1 now shows "cwd │ model │ ⎇ branch" with
+//                       explicit display-width truncation (cwd shrinks first, the
+//                       model name is protected last). Segment assembly lives in
+//                       the pure `status_line` so it can be asserted against a
+//                       real TestBackend buffer.

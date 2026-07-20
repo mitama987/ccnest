@@ -1,13 +1,17 @@
 use crate::app::App;
-use crate::claude::session::{session_path, usage_from_file, ContextUsage};
+use crate::claude::session::{ContextUsage, SessionState};
 
 #[derive(Debug, Clone)]
 pub struct PaneCtxRow {
     pub pane_index: usize,
     pub active: bool,
     pub usage: Option<ContextUsage>,
+    pub state: SessionState,
 }
 
+/// 描画パスから呼ばれる。**ここでディスクを触ってはいけない** —
+/// 実データは `Pane::session` に、イベントループの定期 tick で
+/// 読み込み済みのものを参照するだけ。
 pub fn rows(app: &App) -> Vec<PaneCtxRow> {
     let focused = app.current_tab().focused;
     let mut out = Vec::new();
@@ -15,12 +19,11 @@ pub fn rows(app: &App) -> Vec<PaneCtxRow> {
         let Some(pane) = app.panes.get(pid) else {
             continue;
         };
-        let usage = session_path(&pane.cwd, &pane.session_id.to_string())
-            .and_then(|p| usage_from_file(&p).ok());
         out.push(PaneCtxRow {
             pane_index: i + 1,
             active: *pid == focused,
-            usage,
+            usage: pane.session.info().usage,
+            state: pane.session.state(),
         });
     }
     out
@@ -39,7 +42,12 @@ impl PaneCtxRow {
                     u.window / 1000
                 )
             }
-            None => format!("{marker}[{}] (no session yet)", self.pane_index),
+            // かつては読み取り失敗を丸ごと「セッション未開始」に見せていたため、
+            // パス生成の恒久バグが誰にも気づかれなかった。両者を区別する。
+            None => match self.state {
+                SessionState::ReadError => format!("{marker}[{}] (read error)", self.pane_index),
+                _ => format!("{marker}[{}] (no session yet)", self.pane_index),
+            },
         }
     }
 }

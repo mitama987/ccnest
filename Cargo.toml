@@ -25,6 +25,9 @@ uuid = { version = "1", features = ["v4", "serde"] }
 dirs = "5"
 chrono = { version = "0.4", default-features = false, features = ["clock", "serde"] }
 arboard = { version = "3", default-features = false, features = ["windows-sys"] }
+# ステータスバーの切り詰めは端末セル幅で測る必要がある (cwd に日本語が入る)。
+# ratatui も同じものを使っているので実質的な依存増加は無い。
+unicode-width = "0.2"
 
 [dependencies.git2]
 version = "0.20"

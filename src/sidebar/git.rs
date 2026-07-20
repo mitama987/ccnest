@@ -20,12 +20,33 @@ impl GitInfo {
     }
 }
 
+/// ブランチ名だけを取る軽量版。`load()` と違い status の全ツリー走査を
+/// しないので、フォーカスごと・tick ごとに呼んでも安い。
+///
+/// リポジトリ外なら `None`。detached HEAD は `load()` と同じ表記に揃える。
+pub fn branch_of(path: &Path) -> Option<String> {
+    let repo = Repository::discover(path).ok()?;
+    Some(head_branch(&repo))
+}
+
+fn head_branch(repo: &Repository) -> String {
+    // 注意: detached HEAD では head() は **Ok** を返し、shorthand が短縮 SHA に
+    // なる。head() が Err になるのは主に「まだコミットが 1 つも無いブランチ
+    // (unborn)」で、そこを一律 "(detached)" と呼ぶのは誤り。unborn のときは
+    // HEAD のシンボリック参照からブランチ名を復元する。
+    if let Ok(r) = repo.head() {
+        return r.shorthand().unwrap_or("HEAD").to_string();
+    }
+    repo.find_reference("HEAD")
+        .ok()
+        .and_then(|h| h.symbolic_target().map(|t| t.to_string()))
+        .map(|t| t.strip_prefix("refs/heads/").unwrap_or(&t).to_string())
+        .unwrap_or_else(|| "(detached)".to_string())
+}
+
 pub fn load(path: &Path) -> Result<GitInfo> {
     let repo = Repository::discover(path)?;
-    let branch = match repo.head() {
-        Ok(r) => r.shorthand().unwrap_or("HEAD").to_string(),
-        Err(_) => "(detached)".to_string(),
-    };
+    let branch = head_branch(&repo);
     let mut opts = StatusOptions::new();
     opts.include_untracked(true).recurse_untracked_dirs(true);
     let statuses = repo.statuses(Some(&mut opts))?;
@@ -48,4 +69,25 @@ pub fn load(path: &Path) -> Result<GitInfo> {
         }
     }
     Ok(info)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn branch_of_returns_none_outside_repo() {
+        let dir = tempfile::tempdir().unwrap();
+        assert_eq!(branch_of(dir.path()), None);
+    }
+
+    #[test]
+    fn branch_of_reports_unborn_branch_by_name() {
+        // git init 直後 (コミット 0 件) は head() が Err になるが、
+        // detached ではなく普通のブランチ上にいる。
+        let dir = tempfile::tempdir().unwrap();
+        let repo = Repository::init(dir.path()).unwrap();
+        repo.set_head("refs/heads/demo-branch").unwrap();
+        assert_eq!(branch_of(dir.path()).as_deref(), Some("demo-branch"));
+    }
 }

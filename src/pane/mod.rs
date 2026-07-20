@@ -9,6 +9,7 @@ use anyhow::Result;
 use uuid::Uuid;
 
 use crate::claude::launcher::{spawn_claude, spawn_shell};
+use crate::claude::session::{session_path, SessionTailer};
 
 pub type PaneId = u64;
 
@@ -31,12 +32,22 @@ pub struct Pane {
     pub parser: Arc<Mutex<vt100::Parser>>,
     pub command: String,
     pub claude_running: bool,
+    /// このペインの Claude セッション JSONL の追跡子。イベントループの
+    /// 定期 tick からのみ更新し、描画側は読むだけ (描画パスに I/O を
+    /// 持ち込まないため)。
+    pub session: SessionTailer,
 }
 
 impl Pane {
     pub fn spawn(id: PaneId, cwd: &Path, session_id: Uuid) -> Result<Self> {
         let parser = Arc::new(Mutex::new(vt100::Parser::new(24, 80, 2000)));
         let (pty, command, claude_running) = spawn_claude(cwd, session_id, Arc::clone(&parser))?;
+        // claude が起動できなかった (shell フォールバック) ペインは追跡しない。
+        let session = if claude_running {
+            SessionTailer::new(session_path(cwd, &session_id.to_string()))
+        } else {
+            SessionTailer::default()
+        };
         Ok(Self {
             id,
             cwd: cwd.to_path_buf(),
@@ -46,6 +57,7 @@ impl Pane {
             parser,
             command,
             claude_running,
+            session,
         })
     }
 
@@ -77,6 +89,9 @@ impl Pane {
         self.parser = new_parser;
         self.command = cmd_label;
         self.claude_running = false;
+        // claude は死んだのでセッション追跡も畳む。これを忘れるとコンパイルは
+        // 通ったまま、shell に戻ったペインに古いモデル名が出続ける。
+        self.session.disable();
         Ok(())
     }
 

@@ -58,6 +58,10 @@ pub struct App {
     /// 右クリックで開くコンテキストメニュー。開いている間はキー/マウス入力を
     /// モーダルに横取りする (renaming_tab と同じ Option モーダルパターン)。
     pub context_menu: Option<ContextMenu>,
+    /// cwd -> ブランチ名。複数ペインが同じ cwd を共有しがちなので、リポジトリ
+    /// 探索の重複を避けるため App 側に持つ。`refresh_pane_state` が現存ペインの
+    /// cwd だけで毎回作り直すので、ペインを閉じてもエントリが残らない。
+    pub branch_cache: HashMap<PathBuf, Option<String>>,
 }
 
 /// 左 Down 押下の保留 (press/drag 判定待ち)。座標はペインローカル (0 始まり)。
@@ -172,7 +176,56 @@ impl App {
             pending_mouse: None,
             mouse_local_drag: false,
             context_menu: None,
+            branch_cache: HashMap::new(),
         })
+    }
+
+    /// ペイン由来の状態 (Claude セッション / git ブランチ) をまとめて更新する。
+    /// イベントループの定期 tick からのみ呼ぶ。描画パスでは呼ばない。
+    pub fn refresh_pane_state(&mut self) {
+        for pane in self.panes.values_mut() {
+            pane.session.refresh();
+        }
+        // 現存ペインの cwd だけで作り直す = 閉じたペインの分は自然に落ちる。
+        let mut next: HashMap<PathBuf, Option<String>> = HashMap::new();
+        for cwd in self.panes.values().map(|p| p.cwd.clone()) {
+            if next.contains_key(&cwd) {
+                continue;
+            }
+            // 変化していないものは再探索せず前回値を持ち越す…のではなく、
+            // ブランチは外部で切り替わるので毎 tick 引き直す。status 走査を
+            // しない branch_of なので十分安い。
+            let branch = crate::sidebar::git::branch_of(&cwd);
+            next.insert(cwd, branch);
+        }
+        self.branch_cache = next;
+    }
+
+    /// フォーカス中ペインのモデル名 (短縮表記)。claude が走っていなければ None。
+    pub fn focused_model_label(&self) -> Option<String> {
+        let pane = self.panes.get(&self.current_tab().focused)?;
+        if !pane.claude_running {
+            return None;
+        }
+        Some(
+            pane.session
+                .info()
+                .model
+                .as_deref()
+                .map(crate::claude::session::pretty_model)
+                // まだ assistant ターンが 1 回も無く、モデルが確定していない。
+                .unwrap_or_else(|| "Claude …".to_string()),
+        )
+    }
+
+    /// フォーカス中ペインの cwd のブランチ名。
+    pub fn focused_branch(&self) -> Option<&str> {
+        let cwd = self
+            .panes
+            .get(&self.current_tab().focused)
+            .map(|p| p.cwd.as_path())
+            .unwrap_or(self.cwd.as_path());
+        self.branch_cache.get(cwd)?.as_deref()
     }
 
     pub fn current_tab_mut(&mut self) -> &mut Tab {

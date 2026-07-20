@@ -100,6 +100,7 @@ pub fn run_event_loop<B: Backend>(term: &mut Terminal<B>, mut app: App) -> Resul
 
         if last_refresh.elapsed() >= refresh_every {
             app.sidebar.refresh();
+            app.refresh_pane_state();
             last_refresh = Instant::now();
         }
     }
