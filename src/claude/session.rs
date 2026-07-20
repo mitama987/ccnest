@@ -6,9 +6,22 @@ use std::time::SystemTime;
 use anyhow::Result;
 use serde::Deserialize;
 
-/// Default context window for the Claude models we care about in v0.1.
-/// Overridden by env var `CCNEST_CONTEXT_WINDOW` if set.
-pub const DEFAULT_CONTEXT_WINDOW: u64 = 200_000;
+/// 既知のコンテキストウィンドウの段階 (小さい順)。
+///
+/// **セッションがどちらの窓で動いているかを知る手段はディスク上に存在しない。**
+/// transcript の `message.model` は `[1m]` サフィックスを落とすし、
+/// `~/.claude/sessions/<pid>.json` に model フィールドは無く、`.claude.json` の
+/// `lastModelUsage` は「前回セッションの複数モデル合算」で当てにならない。
+///
+/// そこで**片方向にだけ確実な推論**を使う: 累計使用量が 200k を超えたなら、
+/// その窓は物理的に 200k ではありえない (プロンプトが窓に収まらない)。
+/// 収まる最小の段階まで繰り上げる。逆に「200k を超えていない = 200k の窓」
+/// とは言えないので、そちらには推論しない。
+const CONTEXT_WINDOW_TIERS: [u64; 2] = [200_000, 1_000_000];
+
+/// 何も観測できていないときの既定 (最小の段階)。
+/// 環境変数 `CCNEST_CONTEXT_WINDOW` で明示指定すれば推論より優先される。
+pub const DEFAULT_CONTEXT_WINDOW: u64 = CONTEXT_WINDOW_TIERS[0];
 
 /// 初回の逆走査で読む末尾バイト数。実測では目的の行は EOF から 3〜5 行
 /// (2.8〜7.7KB) 以内に収まるので、通常はこの 1 回で足りる。
@@ -47,6 +60,10 @@ pub struct SessionInfo {
     pub usage: Option<ContextUsage>,
     /// 最後の非 synthetic な assistant 行の `message.model` (生の ID)。
     pub model: Option<String>,
+    /// これまでに観測した最大の使用量。窓の推定に使う。単調増加なので、
+    /// compact でコンテキストが縮んでも窓が 1M から 200k に戻ってしまう
+    /// ことはない (`SessionTailer` が SessionInfo を持ち越すため)。
+    peak_used: u64,
 }
 
 /// セッションファイルの読み取り状態。`(no session yet)` と実 I/O エラーを
@@ -126,11 +143,21 @@ pub fn session_path(cwd: &Path, session_id: &str) -> Option<PathBuf> {
     })
 }
 
-fn context_window() -> u64 {
-    std::env::var("CCNEST_CONTEXT_WINDOW")
+/// 観測済みの最大使用量からコンテキストウィンドウを推定する。
+/// 明示指定 (`CCNEST_CONTEXT_WINDOW`) があればそれを最優先。
+fn window_for(peak_used: u64) -> u64 {
+    if let Some(w) = std::env::var("CCNEST_CONTEXT_WINDOW")
         .ok()
-        .and_then(|s| s.parse().ok())
-        .unwrap_or(DEFAULT_CONTEXT_WINDOW)
+        .and_then(|s| s.parse::<u64>().ok())
+        .filter(|w| *w > 0)
+    {
+        return w;
+    }
+    CONTEXT_WINDOW_TIERS
+        .iter()
+        .copied()
+        .find(|w| peak_used <= *w)
+        .unwrap_or(CONTEXT_WINDOW_TIERS[CONTEXT_WINDOW_TIERS.len() - 1])
 }
 
 /// 1 行を取り込む。assistant 行のみ、かつ synthetic を除いて「最後が勝つ」。
@@ -155,9 +182,11 @@ fn apply_line(line: &str, info: &mut SessionInfo) {
         info.model = Some(m);
     }
     if let Some(u) = msg.usage {
+        let used = u.total();
+        info.peak_used = info.peak_used.max(used);
         info.usage = Some(ContextUsage {
-            used: u.total(),
-            window: context_window(),
+            used,
+            window: window_for(info.peak_used),
         });
     }
 }
@@ -488,6 +517,69 @@ mod tests {
         assert!(info.usage.is_none());
     }
 
+    // ---- context window inference -----------------------------------------
+
+    #[test]
+    fn window_stays_at_first_tier_below_threshold() {
+        let jsonl = r#"{"type":"assistant","message":{"model":"claude-opus-4-8","usage":{"input_tokens":150000}}}"#;
+        let u = session_info_from_str(jsonl).usage.unwrap();
+        assert_eq!(u.window, 200_000);
+        assert_eq!(u.used, 150_000);
+    }
+
+    #[test]
+    fn window_promotes_when_usage_exceeds_a_tier() {
+        // 200k を超えた時点で「窓は 200k ではありえない」ことが確定する。
+        let jsonl = r#"{"type":"assistant","message":{"model":"claude-opus-4-8","usage":{"input_tokens":237532}}}"#;
+        let u = session_info_from_str(jsonl).usage.unwrap();
+        assert_eq!(u.window, 1_000_000);
+        // 100% に張り付かず、正しい比率になる。
+        assert!((u.ratio() - 0.237_532).abs() < 0.001, "{}", u.ratio());
+    }
+
+    #[test]
+    fn window_stays_promoted_after_compaction_drops_usage() {
+        // compact でコンテキストが縮んでも窓は 1M のまま (peak が単調増加)。
+        let jsonl = r#"
+{"type":"assistant","message":{"model":"claude-opus-4-8","usage":{"input_tokens":344593}}}
+{"type":"assistant","message":{"model":"claude-opus-4-8","usage":{"input_tokens":40000}}}
+"#;
+        let u = session_info_from_str(jsonl).usage.unwrap();
+        assert_eq!(u.used, 40_000);
+        assert_eq!(u.window, 1_000_000, "compact 後に 200k へ戻ってはいけない");
+    }
+
+    #[test]
+    fn window_promotion_survives_incremental_refresh() {
+        // 追記読みでも peak は持ち越される。
+        let (_d, path) = write_tmp(
+            "w.jsonl",
+            "{\"type\":\"assistant\",\"message\":{\"model\":\"claude-opus-4-8\",\"usage\":{\"input_tokens\":344593}}}\n",
+        );
+        let mut t = SessionTailer::new(Some(path.clone()));
+        t.refresh();
+        assert_eq!(t.info().usage.unwrap().window, 1_000_000);
+
+        let mut f = std::fs::OpenOptions::new()
+            .append(true)
+            .open(&path)
+            .unwrap();
+        f.write_all(b"{\"type\":\"assistant\",\"message\":{\"model\":\"claude-opus-4-8\",\"usage\":{\"input_tokens\":50000}}}\n").unwrap();
+        drop(f);
+        t.refresh();
+        let u = t.info().usage.unwrap();
+        assert_eq!(u.used, 50_000);
+        assert_eq!(u.window, 1_000_000);
+    }
+
+    #[test]
+    fn window_caps_at_largest_tier() {
+        let jsonl = r#"{"type":"assistant","message":{"model":"claude-opus-4-8","usage":{"input_tokens":9000000}}}"#;
+        let u = session_info_from_str(jsonl).usage.unwrap();
+        assert_eq!(u.window, 1_000_000);
+        assert_eq!(u.ratio(), 1.0, "上限を超えたら 100% に張り付く");
+    }
+
     #[test]
     fn model_none_when_no_assistant_line() {
         let jsonl = "{\"type\":\"user\",\"message\":{\"role\":\"user\"}}\n";
@@ -684,3 +776,9 @@ mod tests {
 //                       incremental tail reading (SessionTailer) to remove
 //                       multi-MB full-file parses from the render path, and
 //                       pretty_model() for short display names.
+// ver0.3 - 2026-07-20 - Infer the context window instead of hardcoding 200k.
+//                       Nothing on disk states a session's window (the transcript
+//                       strips the `[1m]` model suffix), but usage above a tier
+//                       proves the window is larger — a prompt cannot exceed its
+//                       own window. Peak usage is monotonic so compaction never
+//                       demotes the window back. CCNEST_CONTEXT_WINDOW still wins.
