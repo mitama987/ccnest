@@ -1,5 +1,6 @@
 pub mod grid;
 pub mod pty;
+pub mod status;
 
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
