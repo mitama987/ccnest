@@ -60,6 +60,10 @@ pub struct SessionInfo {
     pub usage: Option<ContextUsage>,
     /// 最後の非 synthetic な assistant 行の `message.model` (生の ID)。
     pub model: Option<String>,
+    /// このセッションが「今なにをしているか」の表示用文字列。
+    /// 最後の実ユーザー発話 (または summary 行) の先頭行。OSC タイトルが
+    /// 取れないときのフォールバック表示に使う。
+    pub task: Option<String>,
     /// これまでに観測した最大の使用量。窓の推定に使う。単調増加なので、
     /// compact でコンテキストが縮んでも窓が 1M から 200k に戻ってしまう
     /// ことはない (`SessionTailer` が SessionInfo を持ち越すため)。
@@ -84,6 +88,12 @@ struct Entry {
     kind: Option<String>,
     #[serde(default)]
     message: Option<Message>,
+    /// `type:"summary"` 行の要約文字列。
+    #[serde(default)]
+    summary: Option<String>,
+    /// Claude Code が内部生成した user 行 (コマンド出力等) のマーカー。
+    #[serde(default, rename = "isMeta")]
+    is_meta: Option<bool>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -92,6 +102,24 @@ struct Message {
     usage: Option<Usage>,
     #[serde(default)]
     model: Option<String>,
+    #[serde(default)]
+    content: Option<Content>,
+}
+
+/// user 行の `message.content`。素の文字列と block 配列の両形が実在する。
+#[derive(Debug, Deserialize)]
+#[serde(untagged)]
+enum Content {
+    Text(String),
+    Blocks(Vec<ContentBlock>),
+}
+
+#[derive(Debug, Deserialize)]
+struct ContentBlock {
+    #[serde(default, rename = "type")]
+    kind: Option<String>,
+    #[serde(default)]
+    text: Option<String>,
 }
 
 #[derive(Debug, Deserialize, Default)]
@@ -160,7 +188,45 @@ fn window_for(peak_used: u64) -> u64 {
         .unwrap_or(CONTEXT_WINDOW_TIERS[CONTEXT_WINDOW_TIERS.len() - 1])
 }
 
-/// 1 行を取り込む。assistant 行のみ、かつ synthetic を除いて「最後が勝つ」。
+/// タスク表示に採用しない user 行の先頭パターン。Claude Code がローカル
+/// 生成するラッパ行・通知行 (実データで観測)。
+const EXCLUDED_TASK_PREFIXES: &[&str] = &[
+    "<command-name>",
+    "<command-message>",
+    "<local-command-stdout>",
+    "<system-reminder>",
+    "[Request interrupted",
+];
+
+/// タスク表示文字列の上限文字数。表示側 (タブ 20 セル・サイドバー横幅) で
+/// さらに切り詰めるので、ここは「無駄に長い保持」を防ぐだけ。
+const TASK_MAX_CHARS: usize = 200;
+
+/// user 行から「本当のユーザー発話」だけを取り出す。tool_result のみの行、
+/// isMeta 行、コマンド/リマインダのラッパ行、中断通知は除外する。
+/// 採用時は最初の text の先頭行を trim し、[`TASK_MAX_CHARS`] で打ち切る。
+fn user_task_text(entry: &Entry) -> Option<String> {
+    if entry.is_meta == Some(true) {
+        return None;
+    }
+    let msg = entry.message.as_ref()?;
+    let text = match msg.content.as_ref()? {
+        Content::Text(s) => s.as_str(),
+        Content::Blocks(blocks) => blocks
+            .iter()
+            .find(|b| b.kind.as_deref() == Some("text"))
+            .and_then(|b| b.text.as_deref())?,
+    };
+    let first = text.trim().lines().next().unwrap_or("").trim();
+    if first.is_empty() || EXCLUDED_TASK_PREFIXES.iter().any(|p| first.starts_with(p)) {
+        return None;
+    }
+    Some(first.chars().take(TASK_MAX_CHARS).collect())
+}
+
+/// 1 行を取り込む。いずれの項目も「最後が勝つ」:
+/// - assistant 行 (synthetic 除く) → model / usage
+/// - user 行 (実ユーザー発話のみ) / summary 行 → task
 fn apply_line(line: &str, info: &mut SessionInfo) {
     let line = line.trim();
     if line.is_empty() {
@@ -169,25 +235,42 @@ fn apply_line(line: &str, info: &mut SessionInfo) {
     let Ok(entry) = serde_json::from_str::<Entry>(line) else {
         return;
     };
-    if entry.kind.as_deref() != Some("assistant") {
-        return;
-    }
-    let Some(msg) = entry.message else {
-        return;
-    };
-    if msg.model.as_deref() == Some(SYNTHETIC_MODEL) {
-        return;
-    }
-    if let Some(m) = msg.model {
-        info.model = Some(m);
-    }
-    if let Some(u) = msg.usage {
-        let used = u.total();
-        info.peak_used = info.peak_used.max(used);
-        info.usage = Some(ContextUsage {
-            used,
-            window: window_for(info.peak_used),
-        });
+    match entry.kind.as_deref() {
+        Some("assistant") => {
+            let Some(msg) = entry.message else {
+                return;
+            };
+            if msg.model.as_deref() == Some(SYNTHETIC_MODEL) {
+                return;
+            }
+            if let Some(m) = msg.model {
+                info.model = Some(m);
+            }
+            if let Some(u) = msg.usage {
+                let used = u.total();
+                info.peak_used = info.peak_used.max(used);
+                info.usage = Some(ContextUsage {
+                    used,
+                    window: window_for(info.peak_used),
+                });
+            }
+        }
+        Some("user") => {
+            if let Some(t) = user_task_text(&entry) {
+                info.task = Some(t);
+            }
+        }
+        // resume 時にファイル先頭へ書かれる要約行。後続の実ユーザー発話が
+        // あれば自然に上書きされる。
+        Some("summary") => {
+            if let Some(s) = entry.summary.as_deref() {
+                let s = s.trim();
+                if !s.is_empty() {
+                    info.task = Some(s.chars().take(TASK_MAX_CHARS).collect());
+                }
+            }
+        }
+        _ => {}
     }
 }
 
@@ -234,6 +317,10 @@ fn read_tail_until_found(path: &Path) -> Result<(SessionInfo, u64)> {
     loop {
         let (text, _) = read_tail(path, win)?;
         let info = session_info_from_str(&text);
+        // 停止条件は model/usage のみ。task は「窓に入っていれば拾える」
+        // best-effort とする (直前の user 行はほぼ常に assistant 行の直前に
+        // あるので実用上は同じ窓に入る)。task を条件に足すと、user 行の無い
+        // セッションで毎回全文読みに落ちてしまう。
         if info.model.is_some() || info.usage.is_some() || win >= file_len {
             return Ok((info, file_len));
         }
@@ -739,6 +826,149 @@ mod tests {
         assert_eq!(t.state(), SessionState::NoSession);
     }
 
+    // ---- task extraction ---------------------------------------------------
+
+    // 素の文字列 content の user 行から task が取れる
+    #[test]
+    fn user_line_string_content_sets_task() {
+        let jsonl = r#"{"type":"user","message":{"role":"user","content":"タブバーの実装をして"}}"#;
+        assert_eq!(
+            session_info_from_str(jsonl).task.as_deref(),
+            Some("タブバーの実装をして")
+        );
+    }
+
+    // block 配列 content でも最初の text block から取れる
+    #[test]
+    fn user_line_blocks_content_sets_task() {
+        let jsonl = r#"{"type":"user","message":{"role":"user","content":[{"type":"text","text":"fix the tests"}]}}"#;
+        assert_eq!(
+            session_info_from_str(jsonl).task.as_deref(),
+            Some("fix the tests")
+        );
+    }
+
+    // 複数 user 行は最後が勝つ
+    #[test]
+    fn task_takes_last_user_line() {
+        let jsonl = r#"
+{"type":"user","message":{"role":"user","content":"最初の依頼"}}
+{"type":"assistant","message":{"model":"claude-opus-4-8","usage":{"input_tokens":10}}}
+{"type":"user","message":{"role":"user","content":"次の依頼"}}
+"#;
+        assert_eq!(
+            session_info_from_str(jsonl).task.as_deref(),
+            Some("次の依頼")
+        );
+    }
+
+    // tool_result だけの user 行 (text block なし) は無視して前の task を保持
+    #[test]
+    fn tool_result_only_user_line_keeps_previous_task() {
+        let jsonl = r#"
+{"type":"user","message":{"role":"user","content":"本当の依頼"}}
+{"type":"user","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"t1","content":"ok"}]}}
+"#;
+        assert_eq!(
+            session_info_from_str(jsonl).task.as_deref(),
+            Some("本当の依頼")
+        );
+    }
+
+    // isMeta:true の user 行は無視
+    #[test]
+    fn is_meta_user_line_ignored() {
+        let jsonl = r#"
+{"type":"user","message":{"role":"user","content":"本当の依頼"}}
+{"type":"user","isMeta":true,"message":{"role":"user","content":"Caveat: the messages below were generated"}}
+"#;
+        assert_eq!(
+            session_info_from_str(jsonl).task.as_deref(),
+            Some("本当の依頼")
+        );
+    }
+
+    // <command-name> 等のラッパ行・中断通知は無視
+    #[test]
+    fn wrapper_and_interrupt_user_lines_ignored() {
+        let jsonl = r#"
+{"type":"user","message":{"role":"user","content":"本当の依頼"}}
+{"type":"user","message":{"role":"user","content":"<command-name>/model</command-name>"}}
+{"type":"user","message":{"role":"user","content":"<local-command-stdout>done</local-command-stdout>"}}
+{"type":"user","message":{"role":"user","content":"<system-reminder>note</system-reminder>"}}
+{"type":"user","message":{"role":"user","content":"[Request interrupted by user]"}}
+"#;
+        assert_eq!(
+            session_info_from_str(jsonl).task.as_deref(),
+            Some("本当の依頼")
+        );
+    }
+
+    // summary 行単独なら task に採用、後続の実ユーザー発話があれば上書き
+    #[test]
+    fn summary_sets_task_and_user_overrides() {
+        let only_summary = r#"{"type":"summary","summary":"タブ実装の続き","leafUuid":"x"}"#;
+        assert_eq!(
+            session_info_from_str(only_summary).task.as_deref(),
+            Some("タブ実装の続き")
+        );
+
+        let with_user = r#"
+{"type":"summary","summary":"タブ実装の続き","leafUuid":"x"}
+{"type":"user","message":{"role":"user","content":"色分けもやって"}}
+"#;
+        assert_eq!(
+            session_info_from_str(with_user).task.as_deref(),
+            Some("色分けもやって")
+        );
+    }
+
+    // 複数行のユーザー発話は先頭行のみ
+    #[test]
+    fn multiline_user_text_takes_first_line() {
+        let jsonl =
+            r#"{"type":"user","message":{"role":"user","content":"一行目の依頼\n二行目の詳細"}}"#;
+        assert_eq!(
+            session_info_from_str(jsonl).task.as_deref(),
+            Some("一行目の依頼")
+        );
+    }
+
+    // 200 文字を超える発話は打ち切られる (char 境界安全)
+    #[test]
+    fn long_user_text_truncated() {
+        let long = "あ".repeat(300);
+        let jsonl = format!(r#"{{"type":"user","message":{{"role":"user","content":"{long}"}}}}"#);
+        let task = session_info_from_str(&jsonl).task.unwrap();
+        assert_eq!(task.chars().count(), 200);
+    }
+
+    // 追記読み (インクリメンタル) でも task は更新される
+    #[test]
+    fn tailer_updates_task_incrementally() {
+        let (_d, path) = write_tmp(
+            "task.jsonl",
+            "{\"type\":\"user\",\"message\":{\"role\":\"user\",\"content\":\"最初の依頼\"}}\n\
+             {\"type\":\"assistant\",\"message\":{\"model\":\"claude-opus-4-8\",\"usage\":{\"input_tokens\":10}}}\n",
+        );
+        let mut t = SessionTailer::new(Some(path.clone()));
+        t.refresh();
+        assert_eq!(t.info().task.as_deref(), Some("最初の依頼"));
+
+        let mut f = std::fs::OpenOptions::new()
+            .append(true)
+            .open(&path)
+            .unwrap();
+        f.write_all(
+            "{\"type\":\"user\",\"message\":{\"role\":\"user\",\"content\":\"次の依頼\"}}\n"
+                .as_bytes(),
+        )
+        .unwrap();
+        drop(f);
+        t.refresh();
+        assert_eq!(t.info().task.as_deref(), Some("次の依頼"));
+    }
+
     // ---- pretty_model ------------------------------------------------------
 
     #[test]
@@ -782,3 +1012,7 @@ mod tests {
 //                       proves the window is larger — a prompt cannot exceed its
 //                       own window. Peak usage is monotonic so compaction never
 //                       demotes the window back. CCNEST_CONTEXT_WINDOW still wins.
+// ver0.4 - 2026-08-11 - SessionInfo.task: 最後の実ユーザー発話 (user 行) または
+//                       summary 行からタスク表示用文字列を抽出。tool_result のみ /
+//                       isMeta / コマンドラッパ / 中断通知は除外。OSC タイトルが
+//                       取れないペインのフォールバック表示に使う。

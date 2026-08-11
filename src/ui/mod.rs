@@ -12,6 +12,7 @@ use ratatui::Frame;
 
 use crate::app::{App, Rect as AppRect};
 use crate::pane::grid::{Layout, SplitDir};
+use crate::pane::status::{aggregate_status, ClaudeStatus};
 use crate::pane::PaneId;
 use crate::sidebar::{claude_ctx, filetree, panelist, Section};
 
@@ -182,15 +183,25 @@ fn draw_tabbar(
     let area_end = area.x.saturating_add(area.width);
     for (i, tab) in app.tabs.iter().enumerate() {
         let active = i == app.active_tab;
-        let style = if active {
+        let base = if active {
             theme.tab_active
         } else {
             theme.tab_inactive
         };
+        // タブの状態色 = 配下全ペインの畳み込み。タスク名はフォーカスペインのもの。
+        let status = aggregate_status(
+            tab.layout
+                .leaves()
+                .iter()
+                .filter_map(|pid| app.panes.get(pid))
+                .map(|p| p.status),
+        );
+        let task = app.panes.get(&tab.focused).and_then(|p| p.task.as_deref());
+        let style = tab_label_style(base, status, theme);
         let label = if active && app.renaming_tab.is_some() {
             format!(" {}\u{258e} ", app.renaming_tab.as_deref().unwrap_or(""))
         } else {
-            format!(" {} ", tab.title)
+            format!(" {} ", tab_label(i + 1, &tab.title, task, TAB_LABEL_MAX))
         };
         let span = Span::styled(label, style);
         let width = span.width() as u16;
@@ -383,6 +394,36 @@ fn status_line<'a>(
     Line::from(spans)
 }
 
+/// タブラベルの表示幅上限 (セル)。タスク名が長くてもタブが際限なく
+/// 育たないよう抑える。
+const TAB_LABEL_MAX: usize = 20;
+
+/// タブ 1 個のラベル文字列。タスクがあれば「N:短縮タスク」、無ければ従来の
+/// タイトル。どちらも `max` セルに `ellipsize_right` (unicode-width ベース)
+/// で収める。
+fn tab_label(number: usize, title: &str, task: Option<&str>, max: usize) -> String {
+    let raw = match task {
+        Some(t) => format!("{number}:{t}"),
+        None => title.to_string(),
+    };
+    ellipsize_right(&raw, max)
+}
+
+/// ペイン状態をタブ/サイドバー行のスタイルに反映する。Idle は base のまま。
+/// fg だけを差し替え、bg と modifier (アクティブタブの白帯・BOLD) は保持する。
+fn tab_label_style(base: Style, status: ClaudeStatus, theme: &theme::Theme) -> Style {
+    let status_style = match status {
+        ClaudeStatus::Idle => return base,
+        ClaudeStatus::Busy => theme.status_busy,
+        ClaudeStatus::NeedsAttention => theme.status_attention,
+        ClaudeStatus::DoneUnseen => theme.status_done,
+    };
+    match status_style.fg {
+        Some(fg) => base.fg(fg),
+        None => base,
+    }
+}
+
 fn draw_statusbar(app: &App, frame: &mut Frame<'_>, area: Rect, theme: &theme::Theme) {
     let hint_text =
         "Ctrl+D:┃  Ctrl+E:━  Ctrl+T:tab  Ctrl+W:close  Ctrl+F:files  Alt+F:rename  Ctrl+C×2:shell  Ctrl+Q:quit";
@@ -476,7 +517,11 @@ fn draw_sidebar(
         },
         Section::Panes => panelist::rows(app)
             .into_iter()
-            .map(|r| Line::from(Span::raw(r.display())))
+            .map(|r| {
+                // 状態色はタブバーと同じマッピング (Idle はデフォルト表示)。
+                let style = tab_label_style(Style::default(), r.status, theme);
+                Line::from(Span::styled(r.display(), style))
+            })
             .collect(),
     };
 
@@ -1076,6 +1121,108 @@ mod tests {
             assert!(width_of(&row) <= w as usize, "w={w}: {row:?}");
         }
     }
+
+    // ---- tab label ---------------------------------------------------------
+
+    // タスクがあれば「N:タスク」形式になる
+    #[test]
+    fn tab_label_uses_task_when_present() {
+        assert_eq!(
+            tab_label(1, "ccnest", Some("Fix the tab bar"), 20),
+            "1:Fix the tab bar"
+        );
+    }
+
+    // タスクが無ければ従来どおりタイトル
+    #[test]
+    fn tab_label_falls_back_to_title() {
+        assert_eq!(tab_label(2, "ccnest", None, 20), "ccnest");
+    }
+
+    // 長いタスクは … で切り詰められ、上限幅を超えない
+    #[test]
+    fn tab_label_truncates_with_ellipsis() {
+        let l = tab_label(1, "t", Some("a very long task description here"), 20);
+        assert!(l.ends_with('…'), "{l:?}");
+        assert!(width_of(&l) <= 20, "{l:?}");
+    }
+
+    // 全幅ループ不変条件: どの幅でもはみ出さない (全角タスク含む)
+    #[test]
+    fn tab_label_never_exceeds_width_across_the_whole_range() {
+        for w in 0..=40usize {
+            for task in [
+                Some("タブバーの実装をしてください"),
+                Some("fix tests"),
+                None,
+            ] {
+                let l = tab_label(3, "タイトル", task, w);
+                assert!(width_of(&l) <= w, "w={w} task={task:?}: {l:?}");
+            }
+        }
+    }
+
+    // Idle は base スタイルそのまま
+    #[test]
+    fn tab_label_style_idle_keeps_base() {
+        let theme = theme::default_theme();
+        let base = theme.tab_active;
+        assert_eq!(tab_label_style(base, ClaudeStatus::Idle, &theme), base);
+    }
+
+    // Busy/NeedsAttention/DoneUnseen は fg だけ差し替え、bg と BOLD は保持
+    #[test]
+    fn tab_label_style_overrides_fg_only() {
+        let theme = theme::default_theme();
+        let base = theme.tab_active; // 黒文字・白帯・BOLD
+        for (status, expect) in [
+            (ClaudeStatus::Busy, theme.status_busy.fg),
+            (ClaudeStatus::NeedsAttention, theme.status_attention.fg),
+            (ClaudeStatus::DoneUnseen, theme.status_done.fg),
+        ] {
+            let s = tab_label_style(base, status, &theme);
+            assert_eq!(s.fg, expect, "{status:?}");
+            assert_eq!(s.bg, base.bg, "{status:?} で bg を壊してはいけない");
+            assert_eq!(
+                s.add_modifier, base.add_modifier,
+                "{status:?} で modifier を壊してはいけない"
+            );
+        }
+    }
+
+    /// タブバー 1 行を TestBackend に描いた結果の文字列を取り出す。
+    fn render_tab_row(labels: &[(&str, Style)], width: u16) -> String {
+        use ratatui::backend::TestBackend;
+        use ratatui::Terminal;
+        let mut term = Terminal::new(TestBackend::new(width, 1)).unwrap();
+        term.draw(|f| {
+            let mut spans = Vec::new();
+            for (text, style) in labels {
+                spans.push(Span::styled(format!(" {text} "), *style));
+                spans.push(Span::raw(" "));
+            }
+            f.render_widget(Paragraph::new(Line::from(spans)), f.area());
+        })
+        .unwrap();
+        let buf = term.backend().buffer();
+        (0..width)
+            .map(|x| buf[(x, 0)].symbol())
+            .collect::<String>()
+            .trim_end()
+            .to_string()
+    }
+
+    // タスク付きラベルが実バッファに期待どおり並ぶ
+    // (全角はTestBackendの継続セルが空白になるため、ここではASCIIで検証。
+    //  全角の幅不変条件は tab_label_never_exceeds_width... 側で担保)
+    #[test]
+    fn tabbar_renders_task_labels_in_buffer() {
+        let theme = theme::default_theme();
+        let l1 = tab_label(1, "ccnest", Some("fix tests"), 20);
+        let l2 = tab_label(2, "ccnest", None, 20);
+        let row = render_tab_row(&[(&l1, theme.tab_active), (&l2, theme.tab_inactive)], 40);
+        assert_eq!(row, " 1:fix tests   ccnest");
+    }
 }
 
 // Version History
@@ -1092,3 +1239,7 @@ mod tests {
 //                       model name is protected last). Segment assembly lives in
 //                       the pure `status_line` so it can be asserted against a
 //                       real TestBackend buffer.
+// ver0.5 - 2026-08-11 - タブラベルを「N:タスク名」(20 セル上限・ellipsize_right)
+//                       に変更し、Claude 状態色 (busy=緑 / attention=黄 /
+//                       done-unseen=マゼンタ) を fg 差し替えで適用。サイドバーの
+//                       Panes 行にも同じ状態色を反映。

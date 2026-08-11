@@ -1,5 +1,6 @@
 pub mod grid;
 pub mod pty;
+pub mod status;
 
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
@@ -10,6 +11,7 @@ use uuid::Uuid;
 
 use crate::claude::launcher::{spawn_claude, spawn_shell};
 use crate::claude::session::{session_path, SessionTailer};
+use crate::pane::status::ClaudeStatus;
 
 pub type PaneId = u64;
 
@@ -36,6 +38,12 @@ pub struct Pane {
     /// 定期 tick からのみ更新し、描画側は読むだけ (描画パスに I/O を
     /// 持ち込まないため)。
     pub session: SessionTailer,
+    /// Claude の実行状態 (タブ/サイドバーの色分け用)。session と同じく
+    /// 定期 tick (`App::refresh_pane_state`) だけが更新するキャッシュ。
+    pub status: ClaudeStatus,
+    /// 「今なにをしているか」の表示文字列 (OSC タイトル優先、無ければ
+    /// セッション JSONL の最後のユーザー発話)。これも tick 更新キャッシュ。
+    pub task: Option<String>,
 }
 
 impl Pane {
@@ -58,6 +66,8 @@ impl Pane {
             command,
             claude_running,
             session,
+            status: ClaudeStatus::default(),
+            task: None,
         })
     }
 
@@ -92,6 +102,10 @@ impl Pane {
         // claude は死んだのでセッション追跡も畳む。これを忘れるとコンパイルは
         // 通ったまま、shell に戻ったペインに古いモデル名が出続ける。
         self.session.disable();
+        // 状態色とタスク名も claude のものなので必ず捨てる。残すと shell に
+        // 戻ったペインに古いタスク名・状態色が表示され続ける。
+        self.status = ClaudeStatus::Idle;
+        self.task = None;
         Ok(())
     }
 

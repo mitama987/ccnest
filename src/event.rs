@@ -900,6 +900,8 @@ fn handle_mouse(
                     if mx >= rect.x && mx < rect.x + rect.w && my >= rect.y && my < rect.y + rect.h
                     {
                         app.active_tab = *idx;
+                        // 未閲覧完了 (マゼンタ) はクリックで開いた瞬間に消す。
+                        app.mark_active_tab_seen();
                         app.selection = None;
                         return;
                     }

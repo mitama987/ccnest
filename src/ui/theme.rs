@@ -36,6 +36,12 @@ pub struct Theme {
     pub menu_highlight: Style,
     /// コンテキストメニューの無効項目 (グレーアウト)。
     pub menu_disabled: Style,
+    /// Claude 実行中 (タブ/サイドバーの状態色)。
+    pub status_busy: Style,
+    /// 許可/質問プロンプト待ち (要対応)。
+    pub status_attention: Style,
+    /// バックグラウンドで完了・未閲覧。
+    pub status_done: Style,
 }
 
 pub fn default_theme() -> Theme {
@@ -85,6 +91,9 @@ pub fn default_theme() -> Theme {
             .bg(Color::White)
             .add_modifier(Modifier::BOLD),
         menu_disabled: Style::default().fg(Color::DarkGray),
+        status_busy: Style::default().fg(Color::Green),
+        status_attention: Style::default().fg(Color::Yellow),
+        status_done: Style::default().fg(Color::Magenta),
     }
 }
 
@@ -92,3 +101,5 @@ pub fn default_theme() -> Theme {
 // ver0.1 - 2026-04-25 - Added file tree category colors for iconized sidebar rows.
 // ver0.2 - 2026-07-12 - Added context-menu styles (menu_highlight / menu_disabled).
 // ver0.3 - 2026-07-20 - Added status bar styles (status_model / status_branch).
+// ver0.4 - 2026-08-11 - Added Claude pane status colors
+//                       (status_busy / status_attention / status_done).
