@@ -197,7 +197,7 @@ fn draw_tabbar(
                 .map(|p| p.status),
         );
         // マーカー絵文字は claude ペインを含むタブだけに出す
-        // (shell のみのタブに 🟡 が付くと紛らわしい)。
+        // (shell のみのタブに 🟨 が付くと紛らわしい)。
         let has_claude = leaves
             .iter()
             .filter_map(|pid| app.panes.get(pid))
@@ -1192,12 +1192,12 @@ mod tests {
     #[test]
     fn tab_label_marked_prepends_emoji() {
         assert_eq!(
-            tab_label_marked(Some("🟢"), 1, "ccnest", Some("fix tests"), 20),
-            "🟢 1:fix tests"
+            tab_label_marked(Some("🟩"), 1, "ccnest", Some("fix tests"), 20),
+            "🟩 1:fix tests"
         );
         assert_eq!(
-            tab_label_marked(Some("🟡"), 2, "ccnest", None, 20),
-            "🟡 ccnest"
+            tab_label_marked(Some("🟨"), 2, "ccnest", None, 20),
+            "🟨 ccnest"
         );
     }
 
@@ -1212,7 +1212,7 @@ mod tests {
     fn tab_label_marked_width_bound() {
         for w in 0..=40usize {
             for task in [Some("タブバーの実装をしてください"), None] {
-                let l = tab_label_marked(Some("🟣"), 3, "タイトル", task, w);
+                let l = tab_label_marked(Some("🟪"), 3, "タイトル", task, w);
                 assert!(width_of(&l) <= w + 3, "w={w} task={task:?}: {l:?}");
             }
         }
@@ -1303,3 +1303,4 @@ mod tests {
 //                       アイドル+許可待ち / 🟣 未閲覧完了) を追加。claude ペインを
 //                       含むタブのみ。文字色だけでは判別しづらいという実使用
 //                       フィードバックへの対応。
+// ver0.7 - 2026-08-11 - マーカーを四角セット 🟩🟨🟪 に変更 (ユーザー選定)。
