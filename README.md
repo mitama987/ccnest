@@ -100,6 +100,35 @@ Each tab's title is initialized from the pane's current folder name
 the active tab — type the new title, then `Enter` to commit or `Esc` to
 cancel. The cursor (`▎`) is shown inline while editing.
 
+When the focused pane's Claude session has a current task (from the OSC
+window title, falling back to the last user message in the session
+JSONL), the tab label becomes `N:<task>` (truncated to 20 cells) so you
+can tell at a glance what each tab is working on.
+
+Tab labels are also color-coded by the Claude status of the panes in
+that tab:
+
+| Color | Meaning |
+|---|---|
+| green | Claude is running (`esc to interrupt` visible) |
+| yellow | waiting on a permission prompt / question |
+| magenta | finished while the tab was in the background (clears when viewed) |
+| default | idle (waiting for input) |
+
+## Claude launch flags
+
+Panes launch `claude --session-id <uuid> --permission-mode plan
+--allow-dangerously-skip-permissions` by default: the session **starts in
+plan mode**, and after you approve a plan you can Shift+Tab into
+bypass-permissions for fully automatic execution.
+
+- `CCNEST_CLAUDE_PERMISSION_MODE=off` (or `bypass`) restores the legacy
+  behavior: start directly in bypass via `--dangerously-skip-permissions`.
+- Any other value (e.g. `acceptEdits`) is passed to `--permission-mode`
+  as-is.
+- `CCNEST_CLAUDE_NO_SKIP_PERMISSIONS=1` still removes every bypass flag
+  (plan mode stays unless turned off as above).
+
 ## Sidebar
 
 The left sidebar is always available (`Ctrl+B` toggles the whole sidebar,
@@ -116,7 +145,8 @@ sections:
 - **Git** — the current branch plus `M / S / ?` counts for the focused
   pane's cwd.
 - **Panes** — a list of every pane in the current tab, marking the active
-  one and whether Claude is running.
+  one and whether Claude is running. When a task is known the row shows
+  `— <task>` in full, tinted with the same status colors as the tab bar.
 
 The selection cursor is a solid white reversed block (`bg=white`,
 `fg=black`, `REVERSED`), rendered over the full width of the row.
@@ -150,3 +180,4 @@ ver0.1 - 2026-04-25 - Documented iconized and colorized Files sidebar rows.
 ver0.1.4 - 2026-05-16 - Disabled host alternate-scroll (DECSET 1007) and added stall-robust wheel-budget phantom-arrow suppression so the mouse wheel no longer recalls Claude prompt history.
 ver0.1.5 - 2026-05-16 - Reverted the host alternate-scroll disable (DECSET 1007) that broke wheel scrolling on Windows Terminal; kept the wheel-budget phantom-arrow suppression and added an opt-in input trace (CCNEST_INPUT_TRACE) for diagnostics.
 ver0.1.6 - 2026-05-21 - Kept vertical mouse wheel scrolling local to ccnest even when Claude Code enables mouse reporting, and extended phantom-arrow suppression across heavy render stalls.
+ver0.1.7 - 2026-08-11 - Tab labels show the focused pane's current task (`N:<task>`, OSC title with JSONL fallback) with 4-state status colors (busy/attention/done-unseen/idle); the Panes sidebar shows the full task. Claude now launches in plan mode by default (`--permission-mode plan --allow-dangerously-skip-permissions`); `CCNEST_CLAUDE_PERMISSION_MODE=off` restores the legacy bypass start.
