@@ -111,9 +111,9 @@ signal):
 
 | Marker | Meaning |
 |---|---|
-| 🟢 | Claude is running (`esc to interrupt` visible) |
-| 🟡 | your turn — idle (waiting for input) or a permission prompt / question |
-| 🟣 | finished while the tab was in the background (clears when viewed) |
+| 🟩 | Claude is running (`esc to interrupt` visible) |
+| 🟨 | your turn — idle (waiting for input) or a permission prompt / question |
+| 🟪 | finished while the tab was in the background (clears when viewed) |
 | (none) | shell-only tab (no Claude pane) |
 
 ## Claude launch flags
@@ -183,3 +183,4 @@ ver0.1.5 - 2026-05-16 - Reverted the host alternate-scroll disable (DECSET 1007)
 ver0.1.6 - 2026-05-21 - Kept vertical mouse wheel scrolling local to ccnest even when Claude Code enables mouse reporting, and extended phantom-arrow suppression across heavy render stalls.
 ver0.1.7 - 2026-08-11 - Tab labels show the focused pane's current task (`N:<task>`, OSC title with JSONL fallback) with 4-state status colors (busy/attention/done-unseen/idle); the Panes sidebar shows the full task. Claude now launches in plan mode by default (`--permission-mode plan --allow-dangerously-skip-permissions`); `CCNEST_CLAUDE_PERMISSION_MODE=off` restores the legacy bypass start.
 ver0.1.8 - 2026-08-11 - Tab labels get a status marker emoji (🟢 running / 🟡 your turn = idle + permission prompts / 🟣 done-unseen) on Claude tabs — color alone was hard to spot in practice. Idle is treated as "your turn" (yellow) per user feedback.
+ver0.1.9 - 2026-08-11 - Status markers switched to the square set (🟩 running / 🟨 your turn / 🟪 done-unseen) per user preference.
