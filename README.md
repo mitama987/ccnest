@@ -105,15 +105,16 @@ window title, falling back to the last user message in the session
 JSONL), the tab label becomes `N:<task>` (truncated to 20 cells) so you
 can tell at a glance what each tab is working on.
 
-Tab labels are also color-coded by the Claude status of the panes in
-that tab:
+Tabs containing a Claude pane get a status marker emoji at the head of
+the label (the label text is also tinted, but the emoji is the primary
+signal):
 
-| Color | Meaning |
+| Marker | Meaning |
 |---|---|
-| green | Claude is running (`esc to interrupt` visible) |
-| yellow | waiting on a permission prompt / question |
-| magenta | finished while the tab was in the background (clears when viewed) |
-| default | idle (waiting for input) |
+| 🟢 | Claude is running (`esc to interrupt` visible) |
+| 🟡 | your turn — idle (waiting for input) or a permission prompt / question |
+| 🟣 | finished while the tab was in the background (clears when viewed) |
+| (none) | shell-only tab (no Claude pane) |
 
 ## Claude launch flags
 
@@ -181,3 +182,4 @@ ver0.1.4 - 2026-05-16 - Disabled host alternate-scroll (DECSET 1007) and added s
 ver0.1.5 - 2026-05-16 - Reverted the host alternate-scroll disable (DECSET 1007) that broke wheel scrolling on Windows Terminal; kept the wheel-budget phantom-arrow suppression and added an opt-in input trace (CCNEST_INPUT_TRACE) for diagnostics.
 ver0.1.6 - 2026-05-21 - Kept vertical mouse wheel scrolling local to ccnest even when Claude Code enables mouse reporting, and extended phantom-arrow suppression across heavy render stalls.
 ver0.1.7 - 2026-08-11 - Tab labels show the focused pane's current task (`N:<task>`, OSC title with JSONL fallback) with 4-state status colors (busy/attention/done-unseen/idle); the Panes sidebar shows the full task. Claude now launches in plan mode by default (`--permission-mode plan --allow-dangerously-skip-permissions`); `CCNEST_CLAUDE_PERMISSION_MODE=off` restores the legacy bypass start.
+ver0.1.8 - 2026-08-11 - Tab labels get a status marker emoji (🟢 running / 🟡 your turn = idle + permission prompts / 🟣 done-unseen) on Claude tabs — color alone was hard to spot in practice. Idle is treated as "your turn" (yellow) per user feedback.
