@@ -72,6 +72,20 @@ pub fn aggregate_status(statuses: impl IntoIterator<Item = ClaudeStatus>) -> Cla
     })
 }
 
+/// タブ先頭に出す状態マーカーの絵文字。文字色より一目で分かる主シグナル。
+///
+/// Idle も「こちらの指示待ち＝自分の番」なので NeedsAttention と同じ黄色に
+/// する (ユーザー要望 2026-08-11)。🟢🟡🟣 (U+1F7E2/E1/E3) は East Asian
+/// Width=Wide で unicode-width=2・Windows Terminal 描画も 2 セルで一致する
+/// (✳ U+2733 のような曖昧幅文字と違い、はみ出しを起こさない)。
+pub fn status_marker(status: ClaudeStatus) -> &'static str {
+    match status {
+        ClaudeStatus::Busy => "🟢",
+        ClaudeStatus::NeedsAttention | ClaudeStatus::Idle => "🟡",
+        ClaudeStatus::DoneUnseen => "🟣",
+    }
+}
+
 /// OSC タイトルの生文字列をタスク表示用に正規化する。
 ///
 /// - C0/C1 制御文字を除去
@@ -257,6 +271,27 @@ mod tests {
         );
     }
 
+    // ---- status_marker ----
+
+    // 実行中は緑丸
+    #[test]
+    fn marker_busy_is_green() {
+        assert_eq!(status_marker(ClaudeStatus::Busy), "🟢");
+    }
+
+    // アイドルも「こちらの番」なので黄丸 (許可待ちと同じ)
+    #[test]
+    fn marker_idle_and_attention_are_yellow() {
+        assert_eq!(status_marker(ClaudeStatus::Idle), "🟡");
+        assert_eq!(status_marker(ClaudeStatus::NeedsAttention), "🟡");
+    }
+
+    // 未閲覧完了は紫丸
+    #[test]
+    fn marker_done_unseen_is_purple() {
+        assert_eq!(status_marker(ClaudeStatus::DoneUnseen), "🟣");
+    }
+
     // ---- sanitize_task ----
 
     // 装飾なしのタイトルはそのまま通る
@@ -327,5 +362,7 @@ mod tests {
 }
 
 // Version History
+// - ver1.1 (2026-08-11): status_marker 追加 (タブ先頭の絵文字 🟢🟡🟣。Idle も
+//   「こちらの番」として黄色扱い)。汎用タイトル "Claude Code" を task から除外
 // - ver1.0 (2026-08-11): 新規作成。ClaudeStatus / detect_status / aggregate_status /
 //   sanitize_task (マーカーは claude v2.1.227 で観測)

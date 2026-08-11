@@ -12,7 +12,7 @@ use ratatui::Frame;
 
 use crate::app::{App, Rect as AppRect};
 use crate::pane::grid::{Layout, SplitDir};
-use crate::pane::status::{aggregate_status, ClaudeStatus};
+use crate::pane::status::{aggregate_status, status_marker, ClaudeStatus};
 use crate::pane::PaneId;
 use crate::sidebar::{claude_ctx, filetree, panelist, Section};
 
@@ -189,19 +189,29 @@ fn draw_tabbar(
             theme.tab_inactive
         };
         // タブの状態色 = 配下全ペインの畳み込み。タスク名はフォーカスペインのもの。
+        let leaves = tab.layout.leaves();
         let status = aggregate_status(
-            tab.layout
-                .leaves()
+            leaves
                 .iter()
                 .filter_map(|pid| app.panes.get(pid))
                 .map(|p| p.status),
         );
+        // マーカー絵文字は claude ペインを含むタブだけに出す
+        // (shell のみのタブに 🟡 が付くと紛らわしい)。
+        let has_claude = leaves
+            .iter()
+            .filter_map(|pid| app.panes.get(pid))
+            .any(|p| p.claude_running);
+        let marker = has_claude.then(|| status_marker(status));
         let task = app.panes.get(&tab.focused).and_then(|p| p.task.as_deref());
         let style = tab_label_style(base, status, theme);
         let label = if active && app.renaming_tab.is_some() {
             format!(" {}\u{258e} ", app.renaming_tab.as_deref().unwrap_or(""))
         } else {
-            format!(" {} ", tab_label(i + 1, &tab.title, task, TAB_LABEL_MAX))
+            format!(
+                " {} ",
+                tab_label_marked(marker, i + 1, &tab.title, task, TAB_LABEL_MAX)
+            )
         };
         let span = Span::styled(label, style);
         let width = span.width() as u16;
@@ -407,6 +417,22 @@ fn tab_label(number: usize, title: &str, task: Option<&str>, max: usize) -> Stri
         None => title.to_string(),
     };
     ellipsize_right(&raw, max)
+}
+
+/// マーカー絵文字付きのタブラベル。マーカーは claude ペインを含むタブのみ
+/// (`None` = shell のみのタブで、従来のラベルそのまま)。
+fn tab_label_marked(
+    marker: Option<&str>,
+    number: usize,
+    title: &str,
+    task: Option<&str>,
+    max: usize,
+) -> String {
+    let label = tab_label(number, title, task, max);
+    match marker {
+        Some(m) => format!("{m} {label}"),
+        None => label,
+    }
 }
 
 /// ペイン状態をタブ/サイドバー行のスタイルに反映する。Idle は base のまま。
@@ -1162,6 +1188,36 @@ mod tests {
         }
     }
 
+    // マーカー付きラベルは「絵文字 + 半角スペース + 従来ラベル」
+    #[test]
+    fn tab_label_marked_prepends_emoji() {
+        assert_eq!(
+            tab_label_marked(Some("🟢"), 1, "ccnest", Some("fix tests"), 20),
+            "🟢 1:fix tests"
+        );
+        assert_eq!(
+            tab_label_marked(Some("🟡"), 2, "ccnest", None, 20),
+            "🟡 ccnest"
+        );
+    }
+
+    // マーカー None (shell のみのタブ) は従来ラベルそのまま
+    #[test]
+    fn tab_label_marked_none_is_plain() {
+        assert_eq!(tab_label_marked(None, 2, "ccnest", None, 20), "ccnest");
+    }
+
+    // マーカーを足しても全体幅は「本文上限 + 絵文字2 + 空白1」を超えない
+    #[test]
+    fn tab_label_marked_width_bound() {
+        for w in 0..=40usize {
+            for task in [Some("タブバーの実装をしてください"), None] {
+                let l = tab_label_marked(Some("🟣"), 3, "タイトル", task, w);
+                assert!(width_of(&l) <= w + 3, "w={w} task={task:?}: {l:?}");
+            }
+        }
+    }
+
     // Idle は base スタイルそのまま
     #[test]
     fn tab_label_style_idle_keeps_base() {
@@ -1243,3 +1299,7 @@ mod tests {
 //                       に変更し、Claude 状態色 (busy=緑 / attention=黄 /
 //                       done-unseen=マゼンタ) を fg 差し替えで適用。サイドバーの
 //                       Panes 行にも同じ状態色を反映。
+// ver0.6 - 2026-08-11 - タブ先頭に状態マーカー絵文字 (🟢 実行中 / 🟡 こちらの番 =
+//                       アイドル+許可待ち / 🟣 未閲覧完了) を追加。claude ペインを
+//                       含むタブのみ。文字色だけでは判別しづらいという実使用
+//                       フィードバックへの対応。
