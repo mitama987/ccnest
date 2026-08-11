@@ -94,7 +94,11 @@ pub fn sanitize_task(raw: &str) -> Option<String> {
             || c.is_whitespace()
     });
     let collapsed = stripped.split_whitespace().collect::<Vec<_>>().join(" ");
-    if collapsed.is_empty() || collapsed.eq_ignore_ascii_case("claude") {
+    // "claude" / "Claude Code" は起動直後の汎用タイトルでタスク情報が無い。
+    if collapsed.is_empty()
+        || collapsed.eq_ignore_ascii_case("claude")
+        || collapsed.eq_ignore_ascii_case("claude code")
+    {
         None
     } else {
         Some(collapsed)
@@ -292,11 +296,12 @@ mod tests {
         assert_eq!(sanitize_task("   "), None);
     }
 
-    // "claude" 単独は表示価値がないので None (大小無視)
+    // "claude" / "Claude Code" は汎用タイトルなので None (大小無視)
     #[test]
     fn sanitize_bare_claude_is_none() {
         assert_eq!(sanitize_task("Claude"), None);
         assert_eq!(sanitize_task("✳ claude"), None);
+        assert_eq!(sanitize_task("Claude Code"), None);
     }
 
     // 日本語タイトルはそのまま保持される
