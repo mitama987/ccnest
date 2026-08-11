@@ -6,6 +6,7 @@ use anyhow::Result;
 use uuid::Uuid;
 
 use crate::pane::grid::{Direction, Layout};
+use crate::pane::status::{detect_status, sanitize_task, ClaudeStatus};
 use crate::pane::{Pane, PaneId};
 use crate::sidebar::SidebarState;
 
@@ -180,11 +181,43 @@ impl App {
         })
     }
 
-    /// ペイン由来の状態 (Claude セッション / git ブランチ) をまとめて更新する。
-    /// イベントループの定期 tick からのみ呼ぶ。描画パスでは呼ばない。
+    /// ペイン由来の状態 (Claude セッション / 実行状態 / タスク名 / git ブランチ)
+    /// をまとめて更新する。イベントループの定期 tick からのみ呼ぶ。描画パスでは
+    /// 呼ばない (描画側はここで作ったキャッシュを読むだけ)。
     pub fn refresh_pane_state(&mut self) {
+        // 「アクティブタブに属するペインか」の判定用。DoneUnseen (未閲覧完了)
+        // はアクティブタブでは発生させない。
+        let active_leaves: Vec<PaneId> = self
+            .tabs
+            .get(self.active_tab)
+            .map(|t| t.layout.leaves())
+            .unwrap_or_default();
         for pane in self.panes.values_mut() {
             pane.session.refresh();
+            if !pane.claude_running {
+                // shell ペインに状態色・タスク名は出さない
+                // (focused_model_label と同じゲート)。
+                pane.status = ClaudeStatus::Idle;
+                pane.task = None;
+                continue;
+            }
+            let tab_active = active_leaves.contains(&pane.id);
+            let title_task = match pane.parser.lock() {
+                Ok(p) => {
+                    let screen = p.screen();
+                    // スクロールバック閲覧中は contents() が過去の画面を返す
+                    // ため判定しない (前回の状態を据え置き、最下部へ戻った
+                    // 次の tick で回復する)。
+                    if screen.scrollback() == 0 {
+                        pane.status = detect_status(&screen.contents(), pane.status, tab_active);
+                    }
+                    sanitize_task(screen.title())
+                }
+                Err(_) => None,
+            };
+            // OSC タイトルが取れればそれを優先、無ければセッション JSONL の
+            // 最後のユーザー発話にフォールバック。
+            pane.task = title_task.or_else(|| pane.session.info().task.clone());
         }
         // 現存ペインの cwd だけで作り直す = 閉じたペインの分は自然に落ちる。
         let mut next: HashMap<PathBuf, Option<String>> = HashMap::new();
@@ -302,6 +335,7 @@ impl App {
             return;
         }
         self.active_tab = (self.active_tab + 1) % self.tabs.len();
+        self.mark_active_tab_seen();
     }
 
     pub fn prev_tab(&mut self) {
@@ -312,6 +346,23 @@ impl App {
             self.active_tab = self.tabs.len() - 1;
         } else {
             self.active_tab -= 1;
+        }
+        self.mark_active_tab_seen();
+    }
+
+    /// アクティブタブ配下の DoneUnseen (未閲覧完了) を即座に Idle へ戻す。
+    /// タブ切替直後にマゼンタを 2 秒 tick を待たず消すための補助で、
+    /// 呼び忘れても次 tick の detect_status が同じ結果に収束する。
+    pub fn mark_active_tab_seen(&mut self) {
+        let Some(tab) = self.tabs.get(self.active_tab) else {
+            return;
+        };
+        for pid in tab.layout.leaves() {
+            if let Some(p) = self.panes.get_mut(&pid) {
+                if p.status == ClaudeStatus::DoneUnseen {
+                    p.status = ClaudeStatus::Idle;
+                }
+            }
         }
     }
 
