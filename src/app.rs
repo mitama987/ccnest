@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use anyhow::Result;
 use uuid::Uuid;
@@ -59,11 +59,20 @@ pub struct App {
     /// 右クリックで開くコンテキストメニュー。開いている間はキー/マウス入力を
     /// モーダルに横取りする (renaming_tab と同じ Option モーダルパターン)。
     pub context_menu: Option<ContextMenu>,
-    /// cwd -> ブランチ名。複数ペインが同じ cwd を共有しがちなので、リポジトリ
-    /// 探索の重複を避けるため App 側に持つ。`refresh_pane_state` が現存ペインの
-    /// cwd だけで毎回作り直すので、ペインを閉じてもエントリが残らない。
-    pub branch_cache: HashMap<PathBuf, Option<String>>,
+    /// cwd -> (ブランチ名, 最終探索時刻)。複数ペインが同じ cwd を共有しがちなので、
+    /// リポジトリ探索の重複を避けるため App 側に持つ。`refresh_pane_state` が
+    /// 現存ペインの cwd だけで作り直すので、ペインを閉じてもエントリが残らない。
+    /// 探索は `BRANCH_TTL` ごと (毎 tick ではない)。
+    pub branch_cache: BranchCache,
 }
+
+/// cwd -> (ブランチ名, 最終探索時刻)。`plan_branch_refresh` と共用する型。
+pub type BranchCache = HashMap<PathBuf, (Option<String>, Instant)>;
+
+/// git ブランチ再探索の間隔。`Repository::discover` は親ディレクトリ walk を伴い
+/// イベントループ tick には重いため、TTL を切って引き直す。外部での `git switch`
+/// が表示に反映されるまで最大 TTL+tick 遅れるが、ステータスバー表示専用なので許容。
+const BRANCH_TTL: Duration = Duration::from_secs(10);
 
 /// 左 Down 押下の保留 (press/drag 判定待ち)。座標はペインローカル (0 始まり)。
 #[derive(Debug, Clone, Copy)]
@@ -202,34 +211,37 @@ impl App {
                 continue;
             }
             let tab_active = active_leaves.contains(&pane.id);
-            let title_task = match pane.parser.lock() {
-                Ok(p) => {
-                    let screen = p.screen();
-                    // スクロールバック閲覧中は contents() が過去の画面を返す
-                    // ため判定しない (前回の状態を据え置き、最下部へ戻った
-                    // 次の tick で回復する)。
-                    if screen.scrollback() == 0 {
-                        pane.status = detect_status(&screen.contents(), pane.status, tab_active);
-                    }
-                    sanitize_task(screen.title())
-                }
-                Err(_) => None,
+            // PTY reader スレッドはストリーミング中、チャンク処理のたびに parser
+            // ロックを保持する。ここはイベントループスレッドなので lock() で
+            // 待つと 1 周が PAIR_WINDOW (70ms) を超えて停滞し、ファントム矢印
+            // 抑止の前提を崩す (ホイールで Claude 履歴が開く回帰の一因)。
+            // try_lock で取れなければ前回の status / task を据え置き、次 tick
+            // (2 秒後) に再試行する (表示専用なので staleness は無害)。
+            let Ok(p) = pane.parser.try_lock() else {
+                continue;
             };
+            let screen = p.screen();
+            // スクロールバック閲覧中は contents() が過去の画面を返すため
+            // 判定しない (前回の状態を据え置き、最下部へ戻った次の tick で
+            // 回復する)。
+            if screen.scrollback() == 0 {
+                pane.status = detect_status(&screen.contents(), pane.status, tab_active);
+            }
+            let title_task = sanitize_task(screen.title());
+            drop(p);
             // OSC タイトルが取れればそれを優先、無ければセッション JSONL の
             // 最後のユーザー発話にフォールバック。
             pane.task = title_task.or_else(|| pane.session.info().task.clone());
         }
-        // 現存ペインの cwd だけで作り直す = 閉じたペインの分は自然に落ちる。
-        let mut next: HashMap<PathBuf, Option<String>> = HashMap::new();
-        for cwd in self.panes.values().map(|p| p.cwd.clone()) {
-            if next.contains_key(&cwd) {
-                continue;
-            }
-            // 変化していないものは再探索せず前回値を持ち越す…のではなく、
-            // ブランチは外部で切り替わるので毎 tick 引き直す。status 走査を
-            // しない branch_of なので十分安い。
+        // ブランチは TTL キャッシュ。現存ペインの cwd だけで作り直す = 閉じた
+        // ペインの分は自然に落ちる。TTL 内のエントリは引き継ぎ、切れた分だけ
+        // ここで引き直す (探索自体は純粋関数の外)。
+        let now = Instant::now();
+        let cwds: Vec<PathBuf> = self.panes.values().map(|p| p.cwd.clone()).collect();
+        let (mut next, stale) = plan_branch_refresh(&cwds, &self.branch_cache, BRANCH_TTL, now);
+        for cwd in stale {
             let branch = crate::sidebar::git::branch_of(&cwd);
-            next.insert(cwd, branch);
+            next.insert(cwd, (branch, now));
         }
         self.branch_cache = next;
     }
@@ -258,7 +270,7 @@ impl App {
             .get(&self.current_tab().focused)
             .map(|p| p.cwd.as_path())
             .unwrap_or(self.cwd.as_path());
-        self.branch_cache.get(cwd)?.as_deref()
+        self.branch_cache.get(cwd)?.0.as_deref()
     }
 
     pub fn current_tab_mut(&mut self) -> &mut Tab {
@@ -420,3 +432,107 @@ fn direction_score(from: &Rect, to: &Rect, dir: Direction) -> Option<i64> {
     }
     Some((dx.pow(2) + dy.pow(2)) as i64)
 }
+
+/// 純粋: 現存ペインの cwd 列と既存キャッシュから、(TTL 内で引き継ぐエントリ,
+/// 再探索すべき cwd 列) を決める。閉じたペインの cwd は引き継がれず自然に落ち、
+/// 重複 cwd は 1 回だけ再探索する。`App` 非依存 (実 PTY spawn なし) で単体テスト
+/// 可能にするため探索そのもの (`git::branch_of`) は呼び出し側で行う。
+fn plan_branch_refresh(
+    cwds: &[PathBuf],
+    cache: &BranchCache,
+    ttl: Duration,
+    now: Instant,
+) -> (BranchCache, Vec<PathBuf>) {
+    let mut next = BranchCache::new();
+    let mut stale: Vec<PathBuf> = Vec::new();
+    for cwd in cwds {
+        if next.contains_key(cwd) || stale.contains(cwd) {
+            continue;
+        }
+        match cache.get(cwd) {
+            Some((branch, at)) if now.saturating_duration_since(*at) < ttl => {
+                next.insert(cwd.clone(), (branch.clone(), *at));
+            }
+            _ => stale.push(cwd.clone()),
+        }
+    }
+    (next, stale)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const TTL: Duration = Duration::from_secs(10);
+
+    fn cache_with(cwd: &str, branch: Option<&str>, at: Instant) -> BranchCache {
+        let mut c = BranchCache::new();
+        c.insert(PathBuf::from(cwd), (branch.map(str::to_string), at));
+        c
+    }
+
+    /// TTL 内のエントリは再探索リストへ入れず、値と時刻ごと引き継ぐ。
+    #[test]
+    fn plan_branch_refresh_carries_fresh_entry_without_rediscovery() {
+        let now = Instant::now();
+        let cache = cache_with("C:/repo", Some("main"), now);
+        let (next, stale) = plan_branch_refresh(&[PathBuf::from("C:/repo")], &cache, TTL, now);
+        assert!(stale.is_empty(), "stale: {stale:?}");
+        assert_eq!(
+            next.get(Path::new("C:/repo")).unwrap().0.as_deref(),
+            Some("main")
+        );
+    }
+
+    /// 経過 >= TTL のエントリは再探索リストへ (境界は再探索側に倒す)。
+    #[test]
+    fn plan_branch_refresh_lists_stale_entry() {
+        let now = Instant::now();
+        let cache = cache_with("C:/repo", Some("main"), now - TTL);
+        let (next, stale) = plan_branch_refresh(&[PathBuf::from("C:/repo")], &cache, TTL, now);
+        assert!(next.is_empty(), "next: {next:?}");
+        assert_eq!(stale, vec![PathBuf::from("C:/repo")]);
+    }
+
+    /// キャッシュに無い cwd は再探索リストへ。
+    #[test]
+    fn plan_branch_refresh_lists_uncached_cwd() {
+        let now = Instant::now();
+        let cache = BranchCache::new();
+        let (next, stale) = plan_branch_refresh(&[PathBuf::from("C:/new")], &cache, TTL, now);
+        assert!(next.is_empty());
+        assert_eq!(stale, vec![PathBuf::from("C:/new")]);
+    }
+
+    /// 閉じたペインの cwd (cwds に現存しないキャッシュ) は引き継がず自然に落ちる。
+    #[test]
+    fn plan_branch_refresh_drops_closed_pane_cwd() {
+        let now = Instant::now();
+        let cache = cache_with("C:/closed", Some("main"), now);
+        let (next, stale) = plan_branch_refresh(&[PathBuf::from("C:/alive")], &cache, TTL, now);
+        assert!(!next.contains_key(Path::new("C:/closed")));
+        assert_eq!(stale, vec![PathBuf::from("C:/alive")]);
+    }
+
+    /// 同一 cwd を共有する複数ペインでも再探索は 1 回だけ。
+    #[test]
+    fn plan_branch_refresh_dedupes_shared_cwd() {
+        let now = Instant::now();
+        let cache = BranchCache::new();
+        let cwds = [PathBuf::from("C:/repo"), PathBuf::from("C:/repo")];
+        let (next, stale) = plan_branch_refresh(&cwds, &cache, TTL, now);
+        assert!(next.is_empty());
+        assert_eq!(stale, vec![PathBuf::from("C:/repo")]);
+    }
+}
+
+// Version History
+// ver0.1 - 2026-08-11 - refresh_pane_state: parser.lock() → try_lock() (skip on
+//                       contention, keep previous status/task) so the 2s tick
+//                       never blocks the event loop behind the PTY reader
+//                       thread; git branch discovery moved to a 10s TTL cache
+//                       (branch_cache now stores (branch, discovered_at);
+//                       pure plan_branch_refresh() decides carry-over vs
+//                       re-discovery). Both stalls broke the PAIR_WINDOW
+//                       assumption of the phantom-arrow coalescer (wheel
+//                       reopened Claude prompt history).

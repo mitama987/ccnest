@@ -5,6 +5,42 @@
 
 ---
 
+## 2026-08-11 — ホイールで Claude 履歴が開く回帰の修正（v0.1.10）
+
+ブランチ: `fix/wheel-history-regression`
+
+### 症状と根本原因
+
+ペイン上のホイール回転で Claude Code のプロンプト履歴（`History N/100`）が開く。
+2026-05〜06 に修正済みだった問題の再発。
+
+- Windows ConPTY はホイール 1 ノッチを `Mouse(ScrollUp/Down)` と幻の
+  `Key(Up/Down)`（ファントム矢印）の両方として順不同・別バッチで配信する
+- 防御（`classify_arrow` の Drop/Defer + `PAIR_WINDOW`=70ms のフラッシュ）は
+  無傷だったが、フラッシュ判定が `event::poll` の**前**にあったため、
+  ループ 1 周が 70ms を超えて停滞すると対のホイールが**キューに未読のまま**
+  保留矢印が実キー化され `\x1bOA` が子へ漏れていた
+- 停滞源 = 2 秒 tick の重量化: v0.1.7 の毎 tick libgit2 `Repository::discover`、
+  v0.1.8 の全ペイン `parser.lock()`（PTY リーダースレッドと競合）+
+  `session.refresh()` JSONL パース、さらに非表示サイドバーの毎 tick
+  フル git status walk（従来から）
+
+### 変更点
+
+| ファイル | ver | 内容 |
+|---|---|---|
+| src/event.rs | 0.5 | フラッシュを drain + process_batch 直後へ移動（停滞しても未読ホイールが先に相殺する不変条件を構造で保証）。純関数 `pending_arrow_expired` 抽出。`pending_arrow_flush` トレース追加。サイドバー非表示中は git walk スキップ + 表示遷移で即時 refresh |
+| src/app.rs | 0.1 | `refresh_pane_state` を `try_lock` 化（競合時は前回値据え置き）。ブランチ探索を 10s TTL キャッシュ化（純関数 `plan_branch_refresh`） |
+| Cargo.toml | - | 0.1.6 → 0.1.10（README の 0.1.7〜0.1.9 に追いつき） |
+
+### 検証
+
+- 単体: `pending_arrow_expired` 境界 3 件 + `plan_branch_refresh` 5 件を追加
+- E2E: `CCNEST_INPUT_TRACE=1` で Claude ストリーミング中にホイール連打 →
+  履歴が開かず、input-trace.log に `pending_arrow_flush` が 0 件であること
+
+---
+
 ## 2026-07-20 — ステータスバーにモデル名 / git ブランチを常時表示
 
 ブランチ: `feature/status-model-branch`

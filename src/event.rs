@@ -24,6 +24,9 @@ pub fn run_event_loop<B: Backend>(term: &mut Terminal<B>, mut app: App) -> Resul
     // メニューの実描画矩形。draw が毎フレーム更新し、メニューを開いた直後は
     // event 側が None に無効化する (旧位置でのヒットテスト防止)。
     let mut menu_rect: Option<Rect> = None;
+    // サイドバー表示遷移の検知用。非表示中は 2 秒 tick の git status walk を
+    // 止めるため、表示された瞬間にここで 1 回だけ即時 refresh する。
+    let mut sidebar_was_visible = app.sidebar.visible;
 
     while !app.quit {
         // 選択の前提 (ペイン存在 / alt 画面状態) が崩れていたら描画前に破棄する。
@@ -52,16 +55,6 @@ pub fn run_event_loop<B: Backend>(term: &mut Terminal<B>, mut app: App) -> Resul
         {
             advance_drag_auto_scroll(&mut app, &pane_rects);
             last_auto_scroll = Instant::now();
-        }
-
-        // 保留中の plain Up/Down フラッシュ: PAIR_WINDOW 内に対のホイールが
-        // 来なければ実キー確定として子へ転送する。poll がタイムアウト (false)
-        // でも毎 tick ここを通るので、入力が途絶えても保留が取り残されない。
-        if let Some((key, at)) = app.pending_arrow {
-            if at.elapsed() > PAIR_WINDOW {
-                app.pending_arrow = None;
-                handle_key(&mut app, key, &pane_rects)?;
-            }
         }
 
         if event::poll(tick)? {
@@ -98,13 +91,53 @@ pub fn run_event_loop<B: Backend>(term: &mut Terminal<B>, mut app: App) -> Resul
             )?;
         }
 
-        if last_refresh.elapsed() >= refresh_every {
+        // 保留中の plain Up/Down フラッシュ: PAIR_WINDOW 内に対のホイールが
+        // 来なければ実キー確定として子へ転送する。poll がタイムアウト (false)
+        // でも毎 tick ここを通るので、入力が途絶えても保留が取り残されない。
+        //
+        // 必ず上の drain + process_batch の「直後」に置くこと (ループ先頭の
+        // draw より前に停滞し得る処理を挟まない)。かつて draw の後・poll の前に
+        // あったが、その配置だと 2 秒 tick (refresh_pane_state / git walk) 等で
+        // 1 周が PAIR_WINDOW を超えた瞬間、キューに未読の対ホイールが残ったまま
+        // ファントム矢印が実キー化されて子へ流れ、Claude のプロンプト履歴が
+        // 開いてしまう (v0.1.7/0.1.8 の tick 重量化で再発した回帰)。ここなら
+        // フラッシュ判定の直前に必ず drain が入り、先に処理されたホイールが
+        // pending_arrow を相殺するため、tick がどれだけ停滞しても漏れない。
+        if let Some((key, at)) = app.pending_arrow {
+            if pending_arrow_expired(at, PAIR_WINDOW, Instant::now()) {
+                app.pending_arrow = None;
+                trace_pending_flush(&key);
+                handle_key(&mut app, key, &pane_rects)?;
+            }
+        }
+
+        // サイドバーが表示された瞬間は 2 秒 tick を待たず 1 回だけ即時 refresh
+        // する (トグル箇所は複数あるため、ここで遷移検知に一本化)。
+        if app.sidebar.visible && !sidebar_was_visible {
             app.sidebar.refresh();
+        }
+        sidebar_was_visible = app.sidebar.visible;
+
+        if last_refresh.elapsed() >= refresh_every {
+            // 非表示のサイドバーのために毎 tick フル git status walk
+            // (untracked 再帰込み) + file tree 再走査を回さない。描画も操作も
+            // 非表示中は sidebar データを読まないため据え置きで無害。
+            if app.sidebar.visible {
+                app.sidebar.refresh();
+            }
             app.refresh_pane_state();
             last_refresh = Instant::now();
         }
     }
     Ok(())
+}
+
+/// 純粋判定: 保留中の plain Up/Down (Defer) を実キーとして確定フラッシュすべきか。
+/// classify_arrow の Drop 窓が `<= pair_window` なので、こちらは厳密不等号で
+/// 相補させ境界の隙間を作らない。`saturating_duration_since` により
+/// now < deferred_at (計測順序の逆転) でも panic せず false を返す。
+fn pending_arrow_expired(deferred_at: Instant, pair_window: Duration, now: Instant) -> bool {
+    now.saturating_duration_since(deferred_at) > pair_window
 }
 
 /// 単一イベントを診断ログ向けに 1 トークンへ整形する純粋関数。
@@ -140,10 +173,11 @@ fn input_trace_enabled() -> bool {
     *ENABLED.get_or_init(|| std::env::var("CCNEST_INPUT_TRACE").is_ok())
 }
 
-/// 入力トレースが有効なときだけ、1 バッチを `%APPDATA%\ccnest\input-trace.log`
-/// (OS データディレクトリ配下) に追記する。既定では即 return し挙動・性能に
-/// 一切影響しない。全 IO は best-effort でエラー無視 (診断が本体を壊さない)。
-fn trace_input_batch(events: &[Event], pending_arrow: bool) {
+/// 入力トレースが有効なときだけ、タイムスタンプ付き 1 行を
+/// `%APPDATA%\ccnest\input-trace.log` (OS データディレクトリ配下) に追記する。
+/// 既定では即 return し挙動・性能に一切影響しない。全 IO は best-effort で
+/// エラー無視 (診断が本体を壊さない)。
+fn trace_append_line(line: &str) {
     if !input_trace_enabled() {
         return;
     }
@@ -162,8 +196,30 @@ fn trace_input_batch(events: &[Event], pending_arrow: bool) {
     {
         use std::io::Write as _;
         let ts = chrono::Local::now().format("%Y-%m-%dT%H:%M:%S%.3f");
-        let _ = writeln!(f, "{} {}", ts, format_trace_line(events, pending_arrow));
+        let _ = writeln!(f, "{} {}", ts, line);
     }
+}
+
+/// 1 バッチ分の入力イベント列をトレースログへ追記する。
+fn trace_input_batch(events: &[Event], pending_arrow: bool) {
+    if !input_trace_enabled() {
+        return;
+    }
+    trace_append_line(&format_trace_line(events, pending_arrow));
+}
+
+/// 保留矢印の実キー確定フラッシュを `pending_arrow_flush Key(...)` として記録
+/// する。ホイール操作だけのセッションでこの行が出たら、ファントム矢印が実キー
+/// として子へ漏れた署名 (E2E 検証は Select-String "pending_arrow_flush" が
+/// 0 件であることを確認する)。
+fn trace_pending_flush(key: &KeyEvent) {
+    if !input_trace_enabled() {
+        return;
+    }
+    trace_append_line(&format!(
+        "pending_arrow_flush {}",
+        fmt_event(&Event::Key(*key))
+    ));
 }
 
 fn process_batch(
@@ -2867,6 +2923,35 @@ mod tests {
         );
     }
 
+    // -- pending_arrow_expired --
+
+    /// 窓ちょうど (経過 == PAIR_WINDOW) はまだフラッシュしない。classify_arrow の
+    /// Drop 窓が `<= pair_window` なので、境界を厳密不等号で相補させ隙間を作らない。
+    #[test]
+    fn pending_arrow_expired_false_at_exact_window() {
+        let now = Instant::now();
+        assert!(!pending_arrow_expired(now - W, W, now));
+    }
+
+    /// 窓超過で実キー確定フラッシュ。
+    #[test]
+    fn pending_arrow_expired_true_past_window() {
+        let now = Instant::now();
+        let deferred = now - (W + Duration::from_millis(1));
+        assert!(pending_arrow_expired(deferred, W, now));
+    }
+
+    /// now < deferred_at (計測順序の逆転) でも panic せず false (saturating)。
+    #[test]
+    fn pending_arrow_expired_saturates_on_clock_skew() {
+        let now = Instant::now();
+        assert!(!pending_arrow_expired(
+            now + Duration::from_millis(10),
+            W,
+            now
+        ));
+    }
+
     // -- helper predicates --
 
     #[test]
@@ -3039,3 +3124,17 @@ mod tests {
 //                       cursor keys) enabled, so Left/Right actually move the
 //                       cursor in apps like Claude Code. Normal mode keeps CSI
 //                       (no regression).
+// ver0.5 - 2026-08-11 - Move the deferred phantom-arrow flush from before
+//                       event::poll to immediately after the queue drain
+//                       (process_batch), restoring the invariant that a queued
+//                       paired wheel always cancels its phantom before any
+//                       flush. The old placement leaked \x1bOA to Claude
+//                       (prompt history) whenever a loop iteration stalled past
+//                       PAIR_WINDOW — regressed by the heavier 2s tick of
+//                       v0.1.7/0.1.8. Flush timing extracted into pure
+//                       pending_arrow_expired() (strict > to complement
+//                       classify_arrow's <= Drop window; saturating on clock
+//                       skew). CCNEST_INPUT_TRACE now logs each flush as
+//                       "pending_arrow_flush Key(...)" (leak signature for
+//                       E2E). Sidebar git status walk is skipped while hidden,
+//                       with an immediate refresh on the hidden→visible edge.
