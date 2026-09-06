@@ -5,6 +5,18 @@ use std::thread;
 use anyhow::{Context, Result};
 use portable_pty::{CommandBuilder, MasterPty, NativePtySystem, PtyPair, PtySize, PtySystem};
 
+use crate::wake::{OutputStamp, OutputWaker};
+
+/// PTY reader スレッドが出力を parser へ反映した直後に呼ぶフック一式。
+/// reader はロックの外で呼ぶ (parser ロックを持ったまま他スレッドを起こさない)。
+#[derive(Clone, Debug, Default)]
+pub struct ReaderHooks {
+    /// 最終出力時刻 (`CCNEST_LATENCY_TRACE` 用)。
+    pub stamp: OutputStamp,
+    /// イベントループへの「出力あり」通知。None なら通知しない (probe 用)。
+    pub waker: Option<OutputWaker>,
+}
+
 pub struct PtyHandle {
     inner: Arc<Mutex<PtyInner>>,
 }
@@ -16,7 +28,11 @@ struct PtyInner {
 }
 
 impl PtyHandle {
-    pub fn spawn(cmd: CommandBuilder, parser: Arc<Mutex<vt100::Parser>>) -> Result<Self> {
+    pub fn spawn(
+        cmd: CommandBuilder,
+        parser: Arc<Mutex<vt100::Parser>>,
+        hooks: ReaderHooks,
+    ) -> Result<Self> {
         let pty_system = NativePtySystem::default();
         let PtyPair { master, slave } = pty_system
             .openpty(PtySize {
@@ -49,9 +65,15 @@ impl PtyHandle {
                         if let Ok(mut p) = parser.lock() {
                             p.process(&buf[..n]);
                         }
+                        hooks.stamp.mark();
+                        if let Some(w) = &hooks.waker {
+                            w.notify();
+                        }
+                        dump_pty_bytes("out", &buf[..n]);
                         carry.extend_from_slice(&buf[..n]);
                         let replies = scan_replies(&mut carry, &parser);
                         if !replies.is_empty() {
+                            dump_pty_bytes("reply", &replies);
                             if let Ok(mut g) = inner_r.lock() {
                                 let _ = g.writer.write_all(&replies);
                                 let _ = g.writer.flush();
@@ -88,6 +110,39 @@ impl PtyHandle {
         if let Ok(mut guard) = self.inner.lock() {
             let _ = guard.child.kill();
         }
+    }
+}
+
+/// `CCNEST_PTY_DUMP` が設定されているときだけ、reader が受け取った生バイト
+/// (と DSR 等への返信) を `%APPDATA%\ccnest\pty-dump.log` に追記する診断用。
+/// 未設定なら OnceLock 判定のみでゼロコスト。
+fn dump_pty_bytes(kind: &str, bytes: &[u8]) {
+    use std::sync::OnceLock;
+    static ENABLED: OnceLock<bool> = OnceLock::new();
+    if !*ENABLED.get_or_init(|| std::env::var("CCNEST_PTY_DUMP").is_ok()) {
+        return;
+    }
+    let Some(base) = dirs::data_dir() else {
+        return;
+    };
+    let path = base.join("ccnest").join("pty-dump.log");
+    if let Ok(mut f) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&path)
+    {
+        let ts = chrono::Local::now().format("%H:%M:%S%.3f");
+        let esc: String = bytes
+            .iter()
+            .map(|b| match *b {
+                0x1b => String::from("<ESC>"),
+                0x0a => String::from("<LF>"),
+                0x0d => String::from("<CR>"),
+                0x20..=0x7e => (*b as char).to_string(),
+                other => format!("<{other:02x}>"),
+            })
+            .collect();
+        let _ = writeln!(f, "{ts} {kind} len={} {}", bytes.len(), esc);
     }
 }
 
@@ -214,3 +269,10 @@ mod tests {
         assert_eq!(carry, b"\x1b[");
     }
 }
+
+// Version History
+// ver0.1 - 2026-09-06 - ReaderHooks (OutputStamp + optional OutputWaker): the
+//                       reader thread marks the output time and wakes the
+//                       event loop right after parser.process(), outside the
+//                       parser lock. CCNEST_PTY_DUMP=1 appends the raw bytes
+//                       (and DSR replies) to %APPDATA%\ccnest\pty-dump.log.

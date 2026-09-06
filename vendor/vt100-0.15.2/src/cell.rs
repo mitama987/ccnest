@@ -76,6 +76,14 @@ impl Cell {
         s
     }
 
+    /// Appends the text contents of the cell to `buf` without allocating.
+    /// Equivalent to `buf.push_str(&self.contents())`.
+    pub fn write_contents(&self, buf: &mut String) {
+        for c in self.contents.iter().take(self.len()) {
+            buf.push(*c);
+        }
+    }
+
     /// Returns whether the cell contains any text data.
     #[must_use]
     pub fn has_contents(&self) -> bool {

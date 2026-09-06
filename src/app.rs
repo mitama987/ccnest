@@ -9,6 +9,7 @@ use crate::pane::grid::{Direction, Layout};
 use crate::pane::status::{detect_status, sanitize_task, ClaudeStatus};
 use crate::pane::{Pane, PaneId};
 use crate::sidebar::SidebarState;
+use crate::wake::{WakeRx, WakeTx};
 
 pub struct Tab {
     pub title: String,
@@ -64,6 +65,15 @@ pub struct App {
     /// 現存ペインの cwd だけで作り直すので、ペインを閉じてもエントリが残らない。
     /// 探索は `BRANCH_TTL` ごと (毎 tick ではない)。
     pub branch_cache: BranchCache,
+    /// `CCNEST_LATENCY_TRACE` 用: 直近にフォーカスペインへキーを書き込んだ時刻
+    /// (`wake::now_us`)。エコーが描画されたら None に戻す。無効時は常に None。
+    pub last_key_write_us: Option<u64>,
+    /// `CCNEST_LATENCY_TRACE` 用: 直近バッチのペースト判定待ち (us)。
+    pub last_burst_wait_us: u64,
+    /// イベントループを起こすチャネルの送信側。ペイン生成時に reader へ配る。
+    wake_tx: WakeTx,
+    /// 受信側。`run_event_loop` が起動時に `take_wake_rx` で持っていく。
+    wake_rx: Option<WakeRx>,
 }
 
 /// cwd -> (ブランチ名, 最終探索時刻)。`plan_branch_refresh` と共用する型。
@@ -158,7 +168,8 @@ impl App {
     pub fn new(cwd: PathBuf) -> Result<Self> {
         let mut panes = HashMap::new();
         let first_id = 1 as PaneId;
-        let first = Pane::spawn(first_id, &cwd, Uuid::new_v4())?;
+        let (wake_tx, wake_rx) = std::sync::mpsc::channel();
+        let first = Pane::spawn(first_id, &cwd, Uuid::new_v4(), wake_tx.clone())?;
         panes.insert(first_id, first);
 
         let tab = Tab {
@@ -187,7 +198,27 @@ impl App {
             mouse_local_drag: false,
             context_menu: None,
             branch_cache: HashMap::new(),
+            last_key_write_us: None,
+            last_burst_wait_us: 0,
+            wake_tx,
+            wake_rx: Some(wake_rx),
         })
+    }
+
+    /// 入力ポンプスレッドなどに配る送信側。
+    pub fn wake_tx(&self) -> WakeTx {
+        self.wake_tx.clone()
+    }
+
+    /// 受信側を取り出す (1 回だけ)。
+    pub fn take_wake_rx(&mut self) -> Option<WakeRx> {
+        self.wake_rx.take()
+    }
+
+    /// `pid` がアクティブタブに表示されているか。非表示タブの出力では
+    /// 再描画しない (タブ切替時の描画で自然に反映される)。
+    pub fn pane_visible(&self, pid: PaneId) -> bool {
+        self.current_tab().layout.leaves().contains(&pid)
     }
 
     /// ペイン由来の状態 (Claude セッション / 実行状態 / タスク名 / git ブランチ)
@@ -292,7 +323,7 @@ impl App {
         let cwd = self.focused_pane_cwd();
         let new_id = self.next_pane_id;
         self.next_pane_id += 1;
-        let pane = Pane::spawn(new_id, &cwd, Uuid::new_v4())?;
+        let pane = Pane::spawn(new_id, &cwd, Uuid::new_v4(), self.wake_tx.clone())?;
         self.panes.insert(new_id, pane);
         let focused = self.current_tab().focused;
         let layout = std::mem::replace(&mut self.current_tab_mut().layout, Layout::Leaf(focused));
@@ -306,7 +337,7 @@ impl App {
         let cwd = self.focused_pane_cwd();
         let new_id = self.next_pane_id;
         self.next_pane_id += 1;
-        let pane = Pane::spawn(new_id, &cwd, Uuid::new_v4())?;
+        let pane = Pane::spawn(new_id, &cwd, Uuid::new_v4(), self.wake_tx.clone())?;
         self.panes.insert(new_id, pane);
         self.tabs.push(Tab {
             title: folder_title(&cwd),
@@ -536,3 +567,7 @@ mod tests {
 //                       re-discovery). Both stalls broke the PAIR_WINDOW
 //                       assumption of the phantom-arrow coalescer (wheel
 //                       reopened Claude prompt history).
+// ver0.2 - 2026-09-06 - Own the wake channel (WakeTx handed to every Pane's
+//                       reader, WakeRx taken by run_event_loop), pane_visible()
+//                       for output-driven redraw gating, and the
+//                       CCNEST_LATENCY_TRACE bookkeeping fields.

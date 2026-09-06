@@ -717,9 +717,9 @@ fn render_layout(
                         }
                     }
                 }
-
-                // Ensure pty is sized to the rendering area.
-                pane.resize(inner.height.max(1), inner.width.max(1));
+                // PTY / parser のサイズ合わせは描画後にイベントループが
+                // `pane_rects` の差分で行う (event.rs `sync_pane_sizes`)。
+                // ここで毎フレーム呼ぶと同サイズでも ResizePseudoConsole が走る。
             }
         }
         Layout::Split { dir, ratio, a, b } => {
@@ -780,10 +780,14 @@ impl<'a> Widget for PaneCells<'a> {
                     (sel.end.0, sel.end.1 - top),
                 )
             });
+        // セル内容は 1 本のスクラッチへ書き出して使い回す (`cell.contents()` は
+        // セルごとに String を確保していた: 200x50 で 1 万回/フレーム)。
+        let mut scratch = String::with_capacity(24);
         for y in 0..area.height {
             for x in 0..area.width {
                 if let Some(cell) = screen.cell(y, x) {
-                    let ch = cell.contents();
+                    scratch.clear();
+                    cell.write_contents(&mut scratch);
                     let mut style = style_from_cell(cell);
                     if let Some((start, end)) = selection {
                         if selection_contains((x as i64, y as i64), start, end) {
@@ -793,10 +797,10 @@ impl<'a> Widget for PaneCells<'a> {
                     let bx = area.x + x;
                     let by = area.y + y;
                     let bcell = &mut buf[(bx, by)];
-                    if ch.is_empty() {
+                    if scratch.is_empty() {
                         bcell.set_symbol(" ");
                     } else {
-                        bcell.set_symbol(&ch);
+                        bcell.set_symbol(&scratch);
                     }
                     bcell.set_style(style);
                 }
@@ -828,7 +832,7 @@ fn selection_contains(pos: (i64, i64), start: (u16, i64), end: (u16, i64)) -> bo
 /// 非表示 (`hidden` = DECTCEM off) / スクロールバック表示中 (`scrollback > 0`、
 /// live カーソルが可視領域外を指すため) / 領域外のときは `None` (= カーソルを
 /// 出さない)。`cursor` は vt100 の `(row, col)` (0 始まり)。vt100 parser は
-/// `pane.resize` で `inner` と同じサイズへ揃えられるため、通常 row < height /
+/// `sync_pane_sizes` で `inner` と同じサイズへ揃えられるため、通常 row < height /
 /// col < width に収まるが、リサイズ直後の 1 フレームずれに備えて範囲チェックする。
 fn cursor_draw_pos(
     inner: Rect,
@@ -1304,3 +1308,9 @@ mod tests {
 //                       含むタブのみ。文字色だけでは判別しづらいという実使用
 //                       フィードバックへの対応。
 // ver0.7 - 2026-08-11 - マーカーを四角セット 🟩🟨🟪 に変更 (ユーザー選定)。
+// ver0.8 - 2026-09-06 - 描画クロージャから毎フレームの pane.resize を撤去
+//                       (同サイズでも ResizePseudoConsole + vt100 set_size が
+//                       33 回/秒走っていた)。サイズ合わせは event.rs
+//                       sync_pane_sizes が描画後の矩形差分で行う。PaneCells は
+//                       cell.contents() のセルごと String 確保をやめ、
+//                       Cell::write_contents でスクラッチを使い回す。
