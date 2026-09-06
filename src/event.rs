@@ -46,9 +46,13 @@ pub fn run_event_loop<B: Backend>(term: &mut Terminal<B>, mut app: App) -> Resul
 
     // dirty: 次の周で描画が必要。input_dirty: その原因に入力/操作が含まれる
     // (frame cap を待たずに描く)。初回は必ず描く。
+    // last_output_draw: 直近の「出力起因」の描画時刻。frame cap は出力起因の
+    // 描画同士の間隔にだけ掛ける。打鍵直後の入力起因の描画を起点にすると、
+    // その直後に届くエコーの描画が cap (タイマー分解能込みで最大 16ms) だけ
+    // 遅れてしまう。
     let mut dirty = true;
     let mut input_dirty = true;
-    let mut last_draw = Instant::now() - min_output_frame;
+    let mut last_output_draw = Instant::now() - min_output_frame;
 
     while !app.quit {
         // 選択の前提 (ペイン存在 / alt 画面状態) が崩れていたら描画前に破棄する。
@@ -57,7 +61,7 @@ pub fn run_event_loop<B: Backend>(term: &mut Terminal<B>, mut app: App) -> Resul
             input_dirty = true;
         }
 
-        if dirty && (input_dirty || last_draw.elapsed() >= min_output_frame) {
+        if dirty && (input_dirty || last_output_draw.elapsed() >= min_output_frame) {
             term.draw(|f| {
                 crate::ui::draw(
                     &app,
@@ -68,7 +72,9 @@ pub fn run_event_loop<B: Backend>(term: &mut Terminal<B>, mut app: App) -> Resul
                     &mut menu_rect,
                 )
             })?;
-            last_draw = Instant::now();
+            if !input_dirty {
+                last_output_draw = Instant::now();
+            }
             dirty = false;
             input_dirty = false;
             // 描画で確定したペイン矩形に PTY / parser のサイズを揃える。変わった
@@ -102,7 +108,7 @@ pub fn run_event_loop<B: Backend>(term: &mut Terminal<B>, mut app: App) -> Resul
         // 入力 or PTY 出力 or タイムアウトを待つ。出力起因で dirty のときは
         // frame cap の残りだけ待ち、それ以外はアイドル上限まで待つ。
         let wait = if dirty {
-            min_output_frame.saturating_sub(last_draw.elapsed())
+            min_output_frame.saturating_sub(last_output_draw.elapsed())
         } else {
             idle_wait
         };
