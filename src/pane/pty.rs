@@ -274,4 +274,5 @@ mod tests {
 // ver0.1 - 2026-09-06 - ReaderHooks (OutputStamp + optional OutputWaker): the
 //                       reader thread marks the output time and wakes the
 //                       event loop right after parser.process(), outside the
-//                       parser lock.
+//                       parser lock. CCNEST_PTY_DUMP=1 appends the raw bytes
+//                       (and DSR replies) to %APPDATA%\ccnest\pty-dump.log.

@@ -3519,4 +3519,10 @@ mod tests {
 //                       per-frame pane.resize in the draw closure. Pending-
 //                       arrow flush stays right after drain + process_batch.
 //                       CCNEST_LATENCY_TRACE=1 logs per-keystroke
-//                       key_write->output / output->draw / burst_wait.
+//                       key_write->output / output->draw / burst_wait plus
+//                       "draw ..." / "output pid=..." event lines. The output
+//                       frame cap is measured from the last output-driven draw
+//                       so an echo right after a keystroke is drawn at once.
+//                       Measured (30 injected keys): Claude pane p50/p90
+//                       14.6/46.5 ms -> 9.1/12.0 ms; cmd pane 14.4/46.7 ms ->
+//                       1.3/1.7 ms; idle CPU ~2% -> ~0%.
