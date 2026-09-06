@@ -72,6 +72,13 @@ pub fn run_event_loop<B: Backend>(term: &mut Terminal<B>, mut app: App) -> Resul
                     &mut menu_rect,
                 )
             })?;
+            if latency_trace_enabled() {
+                latency_trace_append(&format!(
+                    "draw input_dirty={} pending_key={}",
+                    input_dirty,
+                    app.last_key_write_us.is_some()
+                ));
+            }
             if !input_dirty {
                 last_output_draw = Instant::now();
             }
@@ -246,8 +253,12 @@ fn absorb(app: &mut App, msg: LoopMsg, batch: &mut Vec<Event>, output_seen: &mut
             if let Some(pane) = app.panes.get(&pid) {
                 pane.waker.disarm();
             }
-            if app.pane_visible(pid) {
+            let visible = app.pane_visible(pid);
+            if visible {
                 *output_seen = true;
+            }
+            if latency_trace_enabled() {
+                latency_trace_append(&format!("output pid={pid} visible={visible}"));
             }
             false
         }
