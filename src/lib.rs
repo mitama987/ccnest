@@ -6,3 +6,4 @@ pub mod mouse;
 pub mod pane;
 pub mod sidebar;
 pub mod ui;
+pub mod wake;

@@ -64,6 +64,11 @@ pub struct App {
     /// 現存ペインの cwd だけで作り直すので、ペインを閉じてもエントリが残らない。
     /// 探索は `BRANCH_TTL` ごと (毎 tick ではない)。
     pub branch_cache: BranchCache,
+    /// `CCNEST_LATENCY_TRACE` 用: 直近にフォーカスペインへキーを書き込んだ時刻
+    /// (`wake::now_us`)。エコーが描画されたら None に戻す。無効時は常に None。
+    pub last_key_write_us: Option<u64>,
+    /// `CCNEST_LATENCY_TRACE` 用: 直近バッチのペースト判定待ち (us)。
+    pub last_burst_wait_us: u64,
 }
 
 /// cwd -> (ブランチ名, 最終探索時刻)。`plan_branch_refresh` と共用する型。
@@ -187,6 +192,8 @@ impl App {
             mouse_local_drag: false,
             context_menu: None,
             branch_cache: HashMap::new(),
+            last_key_write_us: None,
+            last_burst_wait_us: 0,
         })
     }
 

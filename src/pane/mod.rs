@@ -11,7 +11,9 @@ use uuid::Uuid;
 
 use crate::claude::launcher::{spawn_claude, spawn_shell};
 use crate::claude::session::{session_path, SessionTailer};
+use crate::pane::pty::ReaderHooks;
 use crate::pane::status::ClaudeStatus;
+use crate::wake::OutputStamp;
 
 pub type PaneId = u64;
 
@@ -44,12 +46,17 @@ pub struct Pane {
     /// 「今なにをしているか」の表示文字列 (OSC タイトル優先、無ければ
     /// セッション JSONL の最後のユーザー発話)。これも tick 更新キャッシュ。
     pub task: Option<String>,
+    /// reader スレッドが最後に出力を parser へ反映した時刻。
+    /// `CCNEST_LATENCY_TRACE` の計測専用 (描画・入力の判断には使わない)。
+    pub output_stamp: OutputStamp,
 }
 
 impl Pane {
     pub fn spawn(id: PaneId, cwd: &Path, session_id: Uuid) -> Result<Self> {
         let parser = Arc::new(Mutex::new(vt100::Parser::new(24, 80, 2000)));
-        let (pty, command, claude_running) = spawn_claude(cwd, session_id, Arc::clone(&parser))?;
+        let hooks = ReaderHooks::default();
+        let (pty, command, claude_running) =
+            spawn_claude(cwd, session_id, Arc::clone(&parser), hooks.clone())?;
         // claude が起動できなかった (shell フォールバック) ペインは追跡しない。
         let session = if claude_running {
             SessionTailer::new(session_path(cwd, &session_id.to_string()))
@@ -68,6 +75,7 @@ impl Pane {
             session,
             status: ClaudeStatus::default(),
             task: None,
+            output_stamp: hooks.stamp,
         })
     }
 
@@ -94,7 +102,10 @@ impl Pane {
     pub fn respawn_as_shell(&mut self) -> Result<()> {
         self.pty.kill();
         let new_parser = Arc::new(Mutex::new(vt100::Parser::new(24, 80, 2000)));
-        let (new_pty, cmd_label) = spawn_shell(&self.cwd, Arc::clone(&new_parser))?;
+        let hooks = ReaderHooks {
+            stamp: self.output_stamp.clone(),
+        };
+        let (new_pty, cmd_label) = spawn_shell(&self.cwd, Arc::clone(&new_parser), hooks)?;
         self.pty = new_pty;
         self.parser = new_parser;
         self.command = cmd_label;

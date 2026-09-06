@@ -11,6 +11,7 @@ use crate::keymap::{resolve, Action};
 use crate::pane::grid::Direction;
 use crate::pane::PaneId;
 use crate::sidebar::Section;
+use crate::wake::now_us;
 
 pub fn run_event_loop<B: Backend>(term: &mut Terminal<B>, mut app: App) -> Result<()> {
     let tick = Duration::from_millis(30);
@@ -42,6 +43,9 @@ pub fn run_event_loop<B: Backend>(term: &mut Terminal<B>, mut app: App) -> Resul
                 &mut menu_rect,
             )
         })?;
+        if latency_trace_enabled() {
+            trace_latency_after_draw(&mut app);
+        }
 
         // ドラッグ端 auto-scroll: ペイン外側まで持っていかれたドラッグを 30ms 毎に
         // 1 行ずつ scroll する。anchor は絶対座標で内容に張り付いており、cursor を
@@ -73,7 +77,8 @@ pub fn run_event_loop<B: Backend>(term: &mut Terminal<B>, mut app: App) -> Resul
             // bracketed-paste セグメントが 1 個になり、placeholder が分裂しない。
             // 5ms 間隔のしきい値は人間のタイピング (≥ 50ms 間隔) と十分離れている
             // ため誤検知しない。
-            let burst_deadline = Instant::now() + Duration::from_millis(500);
+            let burst_started = Instant::now();
+            let burst_deadline = burst_started + Duration::from_millis(500);
             while Instant::now() < burst_deadline && batch.last().is_some_and(is_paste_candidate) {
                 if event::poll(Duration::from_millis(5))? {
                     batch.push(event::read()?);
@@ -81,6 +86,7 @@ pub fn run_event_loop<B: Backend>(term: &mut Terminal<B>, mut app: App) -> Resul
                     break;
                 }
             }
+            app.last_burst_wait_us = burst_started.elapsed().as_micros() as u64;
             process_batch(
                 &mut app,
                 batch,
@@ -220,6 +226,86 @@ fn trace_pending_flush(key: &KeyEvent) {
         "pending_arrow_flush {}",
         fmt_event(&Event::Key(*key))
     ));
+}
+
+/// `CCNEST_LATENCY_TRACE` 環境変数を初回だけ評価。未設定なら以降ゼロコスト。
+fn latency_trace_enabled() -> bool {
+    use std::sync::OnceLock;
+    static ENABLED: OnceLock<bool> = OnceLock::new();
+    *ENABLED.get_or_init(|| std::env::var("CCNEST_LATENCY_TRACE").is_ok())
+}
+
+/// 遅延トレース 1 行を `%APPDATA%\ccnest\latency-trace.log` に追記する。
+/// `trace_append_line` と同じ best-effort (エラー無視・本体を壊さない)。
+fn latency_trace_append(line: &str) {
+    let Some(base) = dirs::data_dir() else {
+        return;
+    };
+    let dir = base.join("ccnest");
+    if std::fs::create_dir_all(&dir).is_err() {
+        return;
+    }
+    let path = dir.join("latency-trace.log");
+    if let Ok(mut f) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&path)
+    {
+        use std::io::Write as _;
+        let ts = chrono::Local::now().format("%Y-%m-%dT%H:%M:%S%.3f");
+        let _ = writeln!(f, "{} {}", ts, line);
+    }
+}
+
+/// 1 打鍵ぶんの遅延内訳を 1 行に整形する純粋関数 (単体テスト可能)。
+/// 単位はマイクロ秒で受け取り、ms 小数 1 桁で出す。
+///
+/// - `key_write_to_output`: キーを子 PTY へ書いてから、フォーカスペインの
+///   parser に次の出力が反映されるまで (子の応答 + ConPTY 往復)
+/// - `output_to_draw`: その出力が反映されてから描画が完了するまで
+///   (= ccnest 自身の表示遅延)
+/// - `burst_wait`: そのキーのバッチで費やしたペースト判定待ち
+fn format_latency_line(
+    key_write_to_output_us: u64,
+    output_to_draw_us: u64,
+    burst_wait_us: u64,
+) -> String {
+    format!(
+        "latency key_write->output={:.1}ms output->draw={:.1}ms burst_wait={:.1}ms total={:.1}ms",
+        key_write_to_output_us as f64 / 1000.0,
+        output_to_draw_us as f64 / 1000.0,
+        burst_wait_us as f64 / 1000.0,
+        (key_write_to_output_us + output_to_draw_us + burst_wait_us) as f64 / 1000.0,
+    )
+}
+
+/// 描画直後に呼ぶ。直近のキー書き込み後にフォーカスペインへ出力が反映されて
+/// いれば、その打鍵の遅延内訳を記録して計測をクリアする。まだ出力が来て
+/// いなければ (子が応答中) 何もせず次の描画で再判定する。
+///
+/// 「キー書き込み後に最初に来た出力」をエコーとみなす近似。スピナー等の
+/// 無関係な出力が先に来ると短めに出るので、計測はアイドルなプロンプトで行う。
+fn trace_latency_after_draw(app: &mut App) {
+    let Some(write_us) = app.last_key_write_us else {
+        return;
+    };
+    let focused = app.current_tab().focused;
+    let Some(pane) = app.panes.get(&focused) else {
+        app.last_key_write_us = None;
+        return;
+    };
+    let out_us = pane.output_stamp.last_us();
+    if out_us < write_us {
+        return;
+    }
+    let draw_us = now_us();
+    latency_trace_append(&format_latency_line(
+        out_us - write_us,
+        draw_us.saturating_sub(out_us),
+        app.last_burst_wait_us,
+    ));
+    app.last_key_write_us = None;
+    app.last_burst_wait_us = 0;
 }
 
 fn process_batch(
@@ -604,6 +690,9 @@ fn handle_key(app: &mut App, key: KeyEvent, pane_rects: &HashMap<PaneId, Rect>) 
                 if let Some(pane) = app.panes.get(&focused_id) {
                     pane.scroll_to_bottom();
                     pane.write(&bytes);
+                    if latency_trace_enabled() {
+                        app.last_key_write_us = Some(now_us());
+                    }
                 }
             }
         }
@@ -2156,6 +2245,23 @@ mod tests {
             KeyModifiers::CONTROL,
             KeyEventKind::Press,
         ))
+    }
+
+    #[test]
+    fn format_latency_line_reports_ms_with_total() {
+        let line = format_latency_line(12_345, 30_100, 15_600);
+        assert_eq!(
+            line,
+            "latency key_write->output=12.3ms output->draw=30.1ms burst_wait=15.6ms total=58.0ms"
+        );
+    }
+
+    #[test]
+    fn format_latency_line_zero_is_zero() {
+        assert_eq!(
+            format_latency_line(0, 0, 0),
+            "latency key_write->output=0.0ms output->draw=0.0ms burst_wait=0.0ms total=0.0ms"
+        );
     }
 
     #[test]

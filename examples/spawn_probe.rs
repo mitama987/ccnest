@@ -9,6 +9,7 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use ccnest::claude::launcher::spawn_claude;
+use ccnest::pane::pty::ReaderHooks;
 use uuid::Uuid;
 
 fn main() {
@@ -16,8 +17,13 @@ fn main() {
     let session_id = Uuid::new_v4();
     let cwd = std::env::current_dir().expect("cwd");
 
-    let (pty, cmd_label, claude_running) =
-        spawn_claude(&cwd, session_id, Arc::clone(&parser)).expect("spawn_claude");
+    let (pty, cmd_label, claude_running) = spawn_claude(
+        &cwd,
+        session_id,
+        Arc::clone(&parser),
+        ReaderHooks::default(),
+    )
+    .expect("spawn_claude");
     println!("spawned: {cmd_label} (claude_running={claude_running})");
 
     let start = Instant::now();

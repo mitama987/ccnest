@@ -5,7 +5,7 @@ use anyhow::{anyhow, Result};
 use portable_pty::CommandBuilder;
 use uuid::Uuid;
 
-use crate::pane::pty::PtyHandle;
+use crate::pane::pty::{PtyHandle, ReaderHooks};
 
 /// bypass (パーミッション確認スキップ) 系フラグの渡し方。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -81,6 +81,7 @@ pub fn spawn_claude(
     cwd: &Path,
     session_id: Uuid,
     parser: Arc<Mutex<vt100::Parser>>,
+    hooks: ReaderHooks,
 ) -> Result<(PtyHandle, String, bool)> {
     // Parallel ccnest panes share ~/.claude.json; a force-quit mid-write can
     // corrupt it. Self-heal right before launching so the new claude starts
@@ -107,7 +108,7 @@ pub fn spawn_claude(
         if std::env::var_os("CCNEST_CLAUDE_ALT_SCREEN").is_none() {
             cmd.env("CLAUDE_CODE_DISABLE_ALTERNATE_SCREEN", "1");
         }
-        if let Ok(h) = PtyHandle::spawn(cmd, Arc::clone(&parser)) {
+        if let Ok(h) = PtyHandle::spawn(cmd, Arc::clone(&parser), hooks.clone()) {
             let label = bin
                 .file_name()
                 .map(|s| s.to_string_lossy().to_string())
@@ -117,7 +118,7 @@ pub fn spawn_claude(
     }
 
     // Fallback: start the system shell so the pane is at least usable.
-    let (h, shell) = spawn_shell(cwd, parser)
+    let (h, shell) = spawn_shell(cwd, parser, hooks)
         .map_err(|e| anyhow!("failed to spawn both claude and shell: {e}"))?;
     Ok((h, shell, false))
 }
@@ -125,7 +126,11 @@ pub fn spawn_claude(
 /// Spawn the system shell in a PTY (cmd.exe on Windows, `$SHELL` otherwise).
 /// Used both as the initial fallback when `claude` is missing and when Ctrl+C
 /// 2 連打でペインを shell に切り戻すときの再起動先として使う。
-pub fn spawn_shell(cwd: &Path, parser: Arc<Mutex<vt100::Parser>>) -> Result<(PtyHandle, String)> {
+pub fn spawn_shell(
+    cwd: &Path,
+    parser: Arc<Mutex<vt100::Parser>>,
+    hooks: ReaderHooks,
+) -> Result<(PtyHandle, String)> {
     let shell = if cfg!(windows) {
         std::env::var("ComSpec").unwrap_or_else(|_| "cmd.exe".to_string())
     } else {
@@ -134,7 +139,8 @@ pub fn spawn_shell(cwd: &Path, parser: Arc<Mutex<vt100::Parser>>) -> Result<(Pty
     let mut cmd = CommandBuilder::new(&shell);
     cmd.cwd(cwd);
     apply_env(&mut cmd);
-    let h = PtyHandle::spawn(cmd, parser).map_err(|e| anyhow!("failed to spawn shell: {e}"))?;
+    let h =
+        PtyHandle::spawn(cmd, parser, hooks).map_err(|e| anyhow!("failed to spawn shell: {e}"))?;
     Ok((h, shell))
 }
 
