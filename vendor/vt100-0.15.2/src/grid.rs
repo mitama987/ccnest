@@ -66,6 +66,11 @@ impl Grid {
     }
 
     pub fn set_size(&mut self, size: Size) {
+        // ccnest patch: a same-size resize is a no-op. Without this every
+        // call walked all rows (`Row::resize`) and allocated a spare row.
+        if size == self.size {
+            return;
+        }
         if size.cols != self.size.cols {
             for row in &mut self.rows {
                 row.wrap(false);

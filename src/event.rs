@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::sync::mpsc::RecvTimeoutError;
 use std::time::{Duration, Instant};
 
 use anyhow::Result;
@@ -11,11 +12,20 @@ use crate::keymap::{resolve, Action};
 use crate::pane::grid::Direction;
 use crate::pane::PaneId;
 use crate::sidebar::Section;
-use crate::wake::now_us;
+use crate::wake::{now_us, LoopMsg};
 
 pub fn run_event_loop<B: Backend>(term: &mut Terminal<B>, mut app: App) -> Result<()> {
-    let tick = Duration::from_millis(30);
+    // 何も起きないときの最大待ち。入力と PTY 出力は LoopMsg で即座に起こされる
+    // ので、これはドラッグ auto-scroll / 2 秒 tick のための上限でしかない。
+    // (かつては `event::poll(30ms)` のタイムアウトが「エコーが画面に出るまでの
+    // 待ち」そのものだった: reader スレッドがループを起こす手段を持たず、
+    // Windows のタイマー分解能 15.6ms で切り上げられて実質 31〜47ms 遅れていた。)
+    let idle_wait = Duration::from_millis(30);
     let auto_scroll_interval = Duration::from_millis(30);
+    // 出力駆動の再描画の最短間隔。ストリーミング中に 4KB チャンクごとに描かず、
+    // 最初のチャンクは即描き、以降はこの間隔で束ねる。入力起因の変化はこの
+    // 制限を受けない (打鍵の反映を待たせない)。
+    let min_output_frame = Duration::from_millis(8);
     let mut last_refresh = Instant::now();
     let mut last_auto_scroll = Instant::now();
     let refresh_every = Duration::from_secs(2);
@@ -29,22 +39,48 @@ pub fn run_event_loop<B: Backend>(term: &mut Terminal<B>, mut app: App) -> Resul
     // 止めるため、表示された瞬間にここで 1 回だけ即時 refresh する。
     let mut sidebar_was_visible = app.sidebar.visible;
 
+    let rx = app
+        .take_wake_rx()
+        .ok_or_else(|| anyhow::anyhow!("wake receiver already taken"))?;
+    spawn_input_pump(app.wake_tx());
+
+    // dirty: 次の周で描画が必要。input_dirty: その原因に入力/操作が含まれる
+    // (frame cap を待たずに描く)。初回は必ず描く。
+    let mut dirty = true;
+    let mut input_dirty = true;
+    let mut last_draw = Instant::now() - min_output_frame;
+
     while !app.quit {
         // 選択の前提 (ペイン存在 / alt 画面状態) が崩れていたら描画前に破棄する。
-        validate_selection(&mut app);
+        if validate_selection(&mut app) {
+            dirty = true;
+            input_dirty = true;
+        }
 
-        term.draw(|f| {
-            crate::ui::draw(
-                &app,
-                f,
-                &mut pane_rects,
-                &mut sidebar_file_rect,
-                &mut tab_rects,
-                &mut menu_rect,
-            )
-        })?;
-        if latency_trace_enabled() {
-            trace_latency_after_draw(&mut app);
+        if dirty && (input_dirty || last_draw.elapsed() >= min_output_frame) {
+            term.draw(|f| {
+                crate::ui::draw(
+                    &app,
+                    f,
+                    &mut pane_rects,
+                    &mut sidebar_file_rect,
+                    &mut tab_rects,
+                    &mut menu_rect,
+                )
+            })?;
+            last_draw = Instant::now();
+            dirty = false;
+            input_dirty = false;
+            // 描画で確定したペイン矩形に PTY / parser のサイズを揃える。変わった
+            // ペインがあれば parser は即座に新サイズになるので、次の周でもう一度
+            // 描く (子の再描画は別途 Output 通知で追いかける)。
+            if sync_pane_sizes(&mut app, &pane_rects) {
+                dirty = true;
+                input_dirty = true;
+            }
+            if latency_trace_enabled() {
+                trace_latency_after_draw(&mut app);
+            }
         }
 
         // ドラッグ端 auto-scroll: ペイン外側まで持っていかれたドラッグを 30ms 毎に
@@ -59,32 +95,41 @@ pub fn run_event_loop<B: Backend>(term: &mut Terminal<B>, mut app: App) -> Resul
         {
             advance_drag_auto_scroll(&mut app, &pane_rects);
             last_auto_scroll = Instant::now();
+            dirty = true;
+            input_dirty = true;
         }
 
-        if event::poll(tick)? {
-            // 同一 tick 内に溜まっているイベントを一気に drain して batch 化する。
-            // ペーストは Windows 上で Event::Paste ではなく個別 Key イベント群として
-            // 届くことがあるため、batch を走査して Enter を含む複数文字の連続を
-            // paste として検出・束ねる (Event::Paste が発火する環境でも従来どおり動く)。
-            let mut batch: Vec<Event> = vec![event::read()?];
-            while event::poll(Duration::from_millis(0))? {
-                batch.push(event::read()?);
+        // 入力 or PTY 出力 or タイムアウトを待つ。出力起因で dirty のときは
+        // frame cap の残りだけ待ち、それ以外はアイドル上限まで待つ。
+        let wait = if dirty {
+            min_output_frame.saturating_sub(last_draw.elapsed())
+        } else {
+            idle_wait
+        };
+        let mut batch: Vec<Event> = Vec::new();
+        let mut output_seen = false;
+        match rx.recv_timeout(wait) {
+            Ok(msg) => {
+                absorb(&mut app, msg, &mut batch, &mut output_seen);
             }
-            // batch 末尾が paste 候補のままで終わっている場合、Windows ConPTY が
-            // 1 回の paste を複数 tick に分割して届けている可能性がある。
-            // burst が継続する限り (5ms 間隔で次イベントが到着する限り) 最大 500ms
-            // まで集め続けて 1 batch に統合する。これにより Claude CLI に届く
-            // bracketed-paste セグメントが 1 個になり、placeholder が分裂しない。
-            // 5ms 間隔のしきい値は人間のタイピング (≥ 50ms 間隔) と十分離れている
-            // ため誤検知しない。
+            Err(RecvTimeoutError::Timeout) => {}
+            Err(RecvTimeoutError::Disconnected) => break,
+        }
+        // 同時に溜まっているメッセージを一気に drain して batch 化する。
+        while let Ok(msg) = rx.try_recv() {
+            absorb(&mut app, msg, &mut batch, &mut output_seen);
+        }
+
+        if !batch.is_empty() {
+            // ペーストは Windows 上で Event::Paste ではなく個別 Key イベント群として
+            // 届くことがあり、さらに ConPTY が 1 回の paste を複数チャンクに分割して
+            // 届けることがある。バッチがペーストらしい (Press が 2 つ以上 /
+            // Event::Paste あり) ときだけ、5ms 間隔で続きが届く限り最大 500ms まで
+            // 集めて 1 batch に統合する。単発の打鍵はここで待たない (かつては
+            // 全ての印字キーで 5ms = 実質 16ms 待っていた)。
             let burst_started = Instant::now();
-            let burst_deadline = burst_started + Duration::from_millis(500);
-            while Instant::now() < burst_deadline && batch.last().is_some_and(is_paste_candidate) {
-                if event::poll(Duration::from_millis(5))? {
-                    batch.push(event::read()?);
-                } else {
-                    break;
-                }
+            if should_extend_burst(&batch) {
+                extend_paste_burst(&rx, &mut app, &mut batch, &mut output_seen, burst_started);
             }
             app.last_burst_wait_us = burst_started.elapsed().as_micros() as u64;
             process_batch(
@@ -95,11 +140,16 @@ pub fn run_event_loop<B: Backend>(term: &mut Terminal<B>, mut app: App) -> Resul
                 &tab_rects,
                 &mut menu_rect,
             )?;
+            dirty = true;
+            input_dirty = true;
+        }
+        if output_seen {
+            dirty = true;
         }
 
         // 保留中の plain Up/Down フラッシュ: PAIR_WINDOW 内に対のホイールが
-        // 来なければ実キー確定として子へ転送する。poll がタイムアウト (false)
-        // でも毎 tick ここを通るので、入力が途絶えても保留が取り残されない。
+        // 来なければ実キー確定として子へ転送する。recv がタイムアウトでも
+        // 毎周ここを通るので、入力が途絶えても保留が取り残されない。
         //
         // 必ず上の drain + process_batch の「直後」に置くこと (ループ先頭の
         // draw より前に停滞し得る処理を挟まない)。かつて draw の後・poll の前に
@@ -114,6 +164,8 @@ pub fn run_event_loop<B: Backend>(term: &mut Terminal<B>, mut app: App) -> Resul
                 app.pending_arrow = None;
                 trace_pending_flush(&key);
                 handle_key(&mut app, key, &pane_rects)?;
+                dirty = true;
+                input_dirty = true;
             }
         }
 
@@ -121,6 +173,7 @@ pub fn run_event_loop<B: Backend>(term: &mut Terminal<B>, mut app: App) -> Resul
         // する (トグル箇所は複数あるため、ここで遷移検知に一本化)。
         if app.sidebar.visible && !sidebar_was_visible {
             app.sidebar.refresh();
+            dirty = true;
         }
         sidebar_was_visible = app.sidebar.visible;
 
@@ -133,9 +186,139 @@ pub fn run_event_loop<B: Backend>(term: &mut Terminal<B>, mut app: App) -> Resul
             }
             app.refresh_pane_state();
             last_refresh = Instant::now();
+            dirty = true;
         }
     }
     Ok(())
+}
+
+/// crossterm の入力読み取りを専用スレッドへ逃がし、読めたイベントを
+/// `LoopMsg::Input` としてイベントループへ送る。`event::read()` はコンソール
+/// 入力ハンドルで無期限に待つので、ループ側はタイマーに頼らず「入力 or 出力」
+/// を `recv_timeout` 一本で待てる。
+///
+/// 1 回の read ごとに `poll(0)` でキューに残っているぶんも drain して 1 通に
+/// まとめる。人間の 1 打鍵はキューに 1 レコードしか無いので 1 イベントの
+/// バッチになり、ペーストや IME 確定はまとめて積まれるので複数イベントの
+/// バッチになる (`should_extend_burst` はこの差で判定する)。
+///
+/// 終了は考えない: メインが return → プロセス終了でこのスレッドも消える。
+fn spawn_input_pump(tx: crate::wake::WakeTx) {
+    std::thread::Builder::new()
+        .name("ccnest-input".to_string())
+        .spawn(move || loop {
+            let first = match event::read() {
+                Ok(ev) => ev,
+                Err(_) => {
+                    let _ = tx.send(LoopMsg::InputClosed);
+                    return;
+                }
+            };
+            let mut batch = vec![first];
+            while matches!(event::poll(Duration::ZERO), Ok(true)) {
+                match event::read() {
+                    Ok(ev) => batch.push(ev),
+                    Err(_) => break,
+                }
+            }
+            if tx.send(LoopMsg::Input(batch)).is_err() {
+                return;
+            }
+        })
+        .expect("spawn ccnest-input thread");
+}
+
+/// 受信したメッセージをループ状態へ取り込む。入力なら `batch` に連結して true、
+/// 出力通知なら (表示中のペインなら) `output_seen` を立てて false を返す。
+fn absorb(app: &mut App, msg: LoopMsg, batch: &mut Vec<Event>, output_seen: &mut bool) -> bool {
+    match msg {
+        LoopMsg::Input(events) => {
+            batch.extend(events);
+            true
+        }
+        LoopMsg::Output(pid) => {
+            if let Some(pane) = app.panes.get(&pid) {
+                pane.waker.disarm();
+            }
+            if app.pane_visible(pid) {
+                *output_seen = true;
+            }
+            false
+        }
+        LoopMsg::InputClosed => {
+            // 以後キー入力が届かないので、固まった TUI を残さず終了する。
+            app.quit = true;
+            false
+        }
+    }
+}
+
+/// 純粋判定: drain 直後のバッチが「ペーストの可能性がある」か。
+///
+/// 人間の打鍵は 1 drain に Press 1 つ (Release は後から別バッチ) しか入らない
+/// ので、paste 候補キー (Char/Enter/Tab、修飾なし) の Press が 2 つ以上並んで
+/// いるか、bracketed-paste の `Event::Paste` を含むときだけ true。単発キーは
+/// false = 即転送で、5ms (Windows 既定のタイマー分解能で実質 15.6ms) の
+/// burst 待ちを払わない。IME 確定 (複数文字が同時に積まれる) は true になる
+/// が、それは確定 1 回につき 1 度の待ちで、以前の「1 文字ごと」より軽い。
+fn should_extend_burst(batch: &[Event]) -> bool {
+    let mut presses = 0usize;
+    for e in batch {
+        match e {
+            Event::Paste(_) => return true,
+            Event::Key(k) if k.kind != KeyEventKind::Release && is_paste_candidate(e) => {
+                presses += 1;
+                if presses >= 2 {
+                    return true;
+                }
+            }
+            _ => {}
+        }
+    }
+    false
+}
+
+/// ペースト burst の続きを集める。直近の「入力」から 5ms 以内に次の入力が届く
+/// 限り、`started` から最大 500ms まで `batch` に連結する。PTY 出力の通知は
+/// 窓を延長しない (ペースト中は子がエコーを吐き続けるので、出力で延長すると
+/// 500ms いっぱい待ってしまう)。
+fn extend_paste_burst(
+    rx: &crate::wake::WakeRx,
+    app: &mut App,
+    batch: &mut Vec<Event>,
+    output_seen: &mut bool,
+    started: Instant,
+) {
+    let gap = Duration::from_millis(5);
+    let deadline = started + Duration::from_millis(500);
+    let mut window_end = Instant::now() + gap;
+    while batch.last().is_some_and(is_paste_candidate) {
+        let now = Instant::now();
+        let until = window_end.min(deadline);
+        if now >= until {
+            break;
+        }
+        match rx.recv_timeout(until - now) {
+            Ok(msg) => {
+                if absorb(app, msg, batch, output_seen) {
+                    window_end = Instant::now() + gap;
+                }
+            }
+            Err(_) => break,
+        }
+    }
+}
+
+/// 描画で確定したペイン矩形 (`pane_rects` = 枠の内側) に PTY と parser の
+/// サイズを揃える。変化があったペインが 1 つでもあれば true。
+fn sync_pane_sizes(app: &mut App, pane_rects: &HashMap<PaneId, Rect>) -> bool {
+    let mut changed = false;
+    for (pid, r) in pane_rects {
+        if let Some(pane) = app.panes.get_mut(pid) {
+            changed |= pane.resize_if_changed(r.h.max(1) as u16, r.w.max(1) as u16);
+        }
+    }
+    changed
 }
 
 /// 純粋判定: 保留中の plain Up/Down (Defer) を実キーとして確定フラッシュすべきか。
@@ -904,9 +1087,10 @@ fn advance_drag_auto_scroll(app: &mut App, pane_rects: &HashMap<PaneId, Rect>) {
 /// 状態が選択作成時と食い違った (グリッドが入れ替わり、abs 座標が別の内容を
 /// 指してしまう)、または RIS (ESC c) でグリッドが作り直された (reset 世代の
 /// 不一致) ケース。選択が存在するときだけロックを取る。
-fn validate_selection(app: &mut App) {
+/// 破棄したら true (再描画が要る)。
+fn validate_selection(app: &mut App) -> bool {
     let Some(sel) = app.selection else {
-        return;
+        return false;
     };
     let ok = app
         .panes
@@ -921,6 +1105,7 @@ fn validate_selection(app: &mut App) {
     if !ok {
         app.selection = None;
     }
+    !ok
 }
 
 fn handle_mouse(
@@ -2245,6 +2430,63 @@ mod tests {
             KeyModifiers::CONTROL,
             KeyEventKind::Press,
         ))
+    }
+
+    #[test]
+    fn burst_not_extended_for_single_char_press() {
+        assert!(!should_extend_burst(&[press(KeyCode::Char('a'))]));
+    }
+
+    #[test]
+    fn burst_not_extended_for_press_then_release_of_one_key() {
+        assert!(!should_extend_burst(&[
+            press(KeyCode::Char('a')),
+            release(KeyCode::Char('a')),
+        ]));
+        assert!(!should_extend_burst(&[release(KeyCode::Char('a'))]));
+    }
+
+    #[test]
+    fn burst_not_extended_for_single_enter_or_tab() {
+        assert!(!should_extend_burst(&[press(KeyCode::Enter)]));
+        assert!(!should_extend_burst(&[press(KeyCode::Tab)]));
+    }
+
+    #[test]
+    fn burst_extended_when_two_or_more_presses_queued_together() {
+        // ペースト / IME 確定はキューにまとめて積まれるので 1 drain に複数 Press。
+        assert!(should_extend_burst(&[
+            press(KeyCode::Char('a')),
+            press(KeyCode::Char('b')),
+        ]));
+        assert!(should_extend_burst(&[
+            press(KeyCode::Char('a')),
+            release(KeyCode::Char('a')),
+            press(KeyCode::Char('b')),
+        ]));
+        assert!(should_extend_burst(&[
+            press(KeyCode::Char('x')),
+            press(KeyCode::Enter),
+        ]));
+    }
+
+    #[test]
+    fn burst_extended_for_bracketed_paste_event() {
+        assert!(should_extend_burst(&[Event::Paste("hello".to_string())]));
+    }
+
+    #[test]
+    fn burst_not_extended_for_modified_keys() {
+        // Ctrl 付きは paste 候補ではない (ショートカット連打を束ねない)。
+        assert!(!should_extend_burst(&[
+            ctrl_press(KeyCode::Char('d')),
+            ctrl_press(KeyCode::Char('d')),
+        ]));
+        // 矢印など非印字キーも候補外。
+        assert!(!should_extend_burst(&[
+            press(KeyCode::Up),
+            press(KeyCode::Up)
+        ]));
     }
 
     #[test]

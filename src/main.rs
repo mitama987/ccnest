@@ -1,6 +1,6 @@
 use std::backtrace::Backtrace;
 use std::fs::{create_dir_all, OpenOptions};
-use std::io::{self, Write};
+use std::io::{self, BufWriter, Write};
 use std::path::PathBuf;
 
 use anyhow::{Context, Result};
@@ -33,7 +33,10 @@ fn main() -> Result<()> {
         EnableMouseCapture,
         EnableBracketedPaste
     )?;
-    let backend = CrosstermBackend::new(stdout);
+    // Rust の io::Stdout は 1KB の LineWriter。フレーム差分がそれを超えると
+    // 1KB ごとに WriteConsoleW が走るので、大きめのバッファで包む
+    // (ratatui は draw の要所で flush する)。
+    let backend = CrosstermBackend::new(BufWriter::with_capacity(1 << 20, stdout));
     let mut terminal = Terminal::new(backend)?;
 
     let app = App::new(cwd)?;

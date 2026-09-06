@@ -5,7 +5,7 @@ use std::thread;
 use anyhow::{Context, Result};
 use portable_pty::{CommandBuilder, MasterPty, NativePtySystem, PtyPair, PtySize, PtySystem};
 
-use crate::wake::OutputStamp;
+use crate::wake::{OutputStamp, OutputWaker};
 
 /// PTY reader スレッドが出力を parser へ反映した直後に呼ぶフック一式。
 /// reader はロックの外で呼ぶ (parser ロックを持ったまま他スレッドを起こさない)。
@@ -13,6 +13,8 @@ use crate::wake::OutputStamp;
 pub struct ReaderHooks {
     /// 最終出力時刻 (`CCNEST_LATENCY_TRACE` 用)。
     pub stamp: OutputStamp,
+    /// イベントループへの「出力あり」通知。None なら通知しない (probe 用)。
+    pub waker: Option<OutputWaker>,
 }
 
 pub struct PtyHandle {
@@ -64,6 +66,9 @@ impl PtyHandle {
                             p.process(&buf[..n]);
                         }
                         hooks.stamp.mark();
+                        if let Some(w) = &hooks.waker {
+                            w.notify();
+                        }
                         carry.extend_from_slice(&buf[..n]);
                         let replies = scan_replies(&mut carry, &parser);
                         if !replies.is_empty() {
