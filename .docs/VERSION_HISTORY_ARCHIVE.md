@@ -5,6 +5,52 @@
 
 ---
 
+## 2026-09-06 — 文字入力のもっさり／かくかく表示の修正（v0.1.11）
+
+ブランチ: `fix/typing-latency`
+
+### 症状と根本原因
+
+Claude Code ペインでの文字入力が、素の Windows Terminal + claude より明らかに
+遅く、表示がかくかくする（常に一定のもっさり。サイドバー非表示・スクロールは問題なし）。
+
+- **主因 1**: イベントループが `draw → event::poll(30ms) → drain` の単一スレッドで、
+  PTY reader スレッドがループを起こす手段を持たなかった。キーを子へ書いた直後に
+  poll で寝るため、エコーは次のタイムアウトまで描かれない。Windows の既定タイマー
+  分解能 15.6ms で待ちが切り上げられ、実質 31〜47ms。出力中の描画も約 25〜31fps 上限
+- **主因 2**: バッチ末尾が Char/Enter/Tab なら毎回 `event::poll(5ms)` でペースト
+  burst を待ってから転送していた（実質 16ms／打）。単発キーは `classify_run` で
+  絶対にペーストにならないのに待っていた
+- 副次: 描画クロージャから毎フレーム `pane.resize`（同サイズでも ResizePseudoConsole
+  + vt100 set_size×2）、無条件 33fps 描画とセルごとの String 確保、1KB LineWriter
+- 計測: PowerShell / Node の両方で `Wait(5ms)`≈16ms・`Wait(30ms)`≈33ms を実測。
+  4 レンズ並列監査 → 10 候補 → 2 視点の反証チェックで主因 1 だけが生存、主因 2 は加算
+
+### 変更点
+
+| ファイル | ver | 内容 |
+|---|---|---|
+| src/wake.rs | 0.1 | 新規。`now_us` / `OutputStamp`（計測）/ `LoopMsg` / `OutputWaker`（未処理 1 通に間引く出力通知） |
+| src/event.rs | 0.6 | ループを `recv_timeout` 一本に。入力ポンプスレッド `spawn_input_pump`（read + poll(0) drain で 1 通に束ねる）、`absorb`、`should_extend_burst`（Press 2 つ以上 or Event::Paste のときだけ burst 延長）、`extend_paste_burst`（出力通知では窓を延長しない）、`sync_pane_sizes`。dirty ゲート描画（出力は 8ms で束ね、入力は即描画）。`CCNEST_LATENCY_TRACE` |
+| src/app.rs | 0.2 | wake チャネルの生成・配布、`pane_visible`、計測用フィールド |
+| src/pane/mod.rs | 0.1 | `waker` / `last_size` / `resize_if_changed`（純関数 `next_size`）。respawn で last_size リセット |
+| src/pane/pty.rs | 0.1 | `ReaderHooks`（stamp + waker）。reader は parser 更新後・ロック外で通知 |
+| src/ui/mod.rs | 0.8 | 描画クロージャから `pane.resize` を撤去。`PaneCells` のセル文字列をスクラッチ再利用 |
+| src/main.rs | 0.1 | stdout を 1MB BufWriter で包む |
+| src/claude/launcher.rs | 1.2 | `spawn_claude` / `spawn_shell` が `ReaderHooks` を受け取る |
+| vendor/vt100-0.15.2 | - | `Cell::write_contents`、`Grid::set_size` の同サイズ早期 return |
+| Cargo.toml | - | 0.1.10 → 0.1.11 |
+
+守った不変条件: 保留矢印 flush は drain + `process_batch` 直後（v0.1.10）。
+`is_paste_candidate` の Press/Release 許容。classic モード既定。
+
+### 検証
+
+- 単体: `should_extend_burst` 6 件、`OutputWaker` 2 件、`next_size` 3 件、
+  `format_latency_line` 2 件、vt100 パッチ 2 件を追加（計 246 件緑）
+- E2E: `CCNEST_LATENCY_TRACE=1` で修正前後のバイナリに同じ 30 打鍵（SendKeys 120ms 間隔）
+  を送り、`%APPDATA%\ccnest\latency-trace.log` の p50/p90/p99 を比較（結果は本節末尾）
+
 ## 2026-08-11 — ホイールで Claude 履歴が開く回帰の修正（v0.1.10）
 
 ブランチ: `fix/wheel-history-regression`

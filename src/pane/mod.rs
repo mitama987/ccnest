@@ -204,3 +204,10 @@ mod tests {
         assert_eq!(next_size(Some((1, 1)), 0, 0), None);
     }
 }
+
+// Version History
+// ver0.1 - 2026-09-06 - Pane owns an OutputWaker (reader → event loop
+//                       notification) and caches last_size so
+//                       resize_if_changed() only touches the PTY / parser when
+//                       the drawn rect actually changed (pure next_size()).
+//                       respawn_as_shell resets the cache.

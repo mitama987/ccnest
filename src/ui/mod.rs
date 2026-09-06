@@ -1308,3 +1308,9 @@ mod tests {
 //                       含むタブのみ。文字色だけでは判別しづらいという実使用
 //                       フィードバックへの対応。
 // ver0.7 - 2026-08-11 - マーカーを四角セット 🟩🟨🟪 に変更 (ユーザー選定)。
+// ver0.8 - 2026-09-06 - 描画クロージャから毎フレームの pane.resize を撤去
+//                       (同サイズでも ResizePseudoConsole + vt100 set_size が
+//                       33 回/秒走っていた)。サイズ合わせは event.rs
+//                       sync_pane_sizes が描画後の矩形差分で行う。PaneCells は
+//                       cell.contents() のセルごと String 確保をやめ、
+//                       Cell::write_contents でスクラッチを使い回す。

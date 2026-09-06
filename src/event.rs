@@ -3486,3 +3486,20 @@ mod tests {
 //                       "pending_arrow_flush Key(...)" (leak signature for
 //                       E2E). Sidebar git status walk is skipped while hidden,
 //                       with an immediate refresh on the hidden→visible edge.
+// ver0.6 - 2026-09-06 - Event loop is now woken by PTY output: an input pump
+//                       thread reads crossterm events (read + poll(0) drain,
+//                       one LoopMsg::Input per drain) and each pane's reader
+//                       sends LoopMsg::Output, so run_event_loop waits on a
+//                       single recv_timeout instead of event::poll(30ms) —
+//                       echoes no longer sit until a timer tick (31–47ms on
+//                       Windows' 15.6ms timer). Draw only when dirty (output
+//                       frames coalesced at 8ms, input frames immediate).
+//                       should_extend_burst() limits the 5ms paste-burst wait
+//                       to drains holding >=2 presses or an Event::Paste, so a
+//                       lone keystroke is forwarded immediately;
+//                       extend_paste_burst() never extends the window on
+//                       output notifications. sync_pane_sizes() replaces the
+//                       per-frame pane.resize in the draw closure. Pending-
+//                       arrow flush stays right after drain + process_batch.
+//                       CCNEST_LATENCY_TRACE=1 logs per-keystroke
+//                       key_write->output / output->draw / burst_wait.

@@ -567,3 +567,7 @@ mod tests {
 //                       re-discovery). Both stalls broke the PAIR_WINDOW
 //                       assumption of the phantom-arrow coalescer (wheel
 //                       reopened Claude prompt history).
+// ver0.2 - 2026-09-06 - Own the wake channel (WakeTx handed to every Pane's
+//                       reader, WakeRx taken by run_event_loop), pane_visible()
+//                       for output-driven redraw gating, and the
+//                       CCNEST_LATENCY_TRACE bookkeeping fields.

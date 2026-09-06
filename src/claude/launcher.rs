@@ -292,6 +292,8 @@ mod tests {
 }
 
 // Version History
+// - ver1.2 (2026-09-06): spawn_claude / spawn_shell が ReaderHooks (出力時刻スタンプ +
+//   イベントループ起こし) を受け取り PtyHandle::spawn へ渡す。
 // - ver1.1 (2026-08-11): 起動フラグを SpawnOpts + build_claude_args に純関数化。
 //   既定を「--permission-mode plan + --allow-dangerously-skip-permissions」
 //   (プランモード開始・承認後 Shift+Tab で bypass 可) に変更。

@@ -150,3 +150,9 @@ mod tests {
         assert_eq!(c.last_us(), s.last_us());
     }
 }
+
+// Version History
+// ver0.1 - 2026-09-06 - Initial: now_us / OutputStamp (latency trace), LoopMsg
+//                       / WakeTx / WakeRx / OutputWaker (single wake channel
+//                       for input pump + PTY reader threads; notifications are
+//                       throttled to one outstanding message per pane).

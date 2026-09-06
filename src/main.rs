@@ -104,3 +104,7 @@ fn write_crash_log(info: &std::panic::PanicHookInfo<'_>) -> Option<PathBuf> {
     let _ = writeln!(file, "{}", Backtrace::force_capture());
     Some(path)
 }
+
+// Version History
+// ver0.1 - 2026-09-06 - Wrap stdout in a 1 MB BufWriter so a large frame diff is
+//                       not flushed to the console in 1 KB LineWriter chunks.

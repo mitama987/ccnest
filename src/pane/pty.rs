@@ -234,3 +234,9 @@ mod tests {
         assert_eq!(carry, b"\x1b[");
     }
 }
+
+// Version History
+// ver0.1 - 2026-09-06 - ReaderHooks (OutputStamp + optional OutputWaker): the
+//                       reader thread marks the output time and wakes the
+//                       event loop right after parser.process(), outside the
+//                       parser lock.
