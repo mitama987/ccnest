@@ -20,12 +20,15 @@ pub fn run_event_loop<B: Backend>(term: &mut Terminal<B>, mut app: App) -> Resul
     // (かつては `event::poll(30ms)` のタイムアウトが「エコーが画面に出るまでの
     // 待ち」そのものだった: reader スレッドがループを起こす手段を持たず、
     // Windows のタイマー分解能 15.6ms で切り上げられて実質 31〜47ms 遅れていた。)
-    let idle_wait = Duration::from_millis(30);
+    let idle_wait = env_ms("CCNEST_IDLE_WAIT_MS", 30);
     let auto_scroll_interval = Duration::from_millis(30);
     // 出力駆動の再描画の最短間隔。ストリーミング中に 4KB チャンクごとに描かず、
-    // 最初のチャンクは即描き、以降はこの間隔で束ねる。入力起因の変化はこの
-    // 制限を受けない (打鍵の反映を待たせない)。
-    let min_output_frame = Duration::from_millis(8);
+    // 最初のチャンクは即描き、以降はこの間隔で束ねる。入力起因の変化と、
+    // 打鍵直後の最初の出力 (= エコー) はこの制限を受けない。
+    // CCNEST_MIN_OUTPUT_FRAME_MS で上書き可 (二分探索用)。
+    let min_output_frame = env_ms("CCNEST_MIN_OUTPUT_FRAME_MS", 8);
+    // 打鍵からこの時間以内に届いた最初の出力はエコーとみなして cap を免除する。
+    let echo_window = env_ms("CCNEST_ECHO_WINDOW_MS", 100);
     let mut last_refresh = Instant::now();
     let mut last_auto_scroll = Instant::now();
     let refresh_every = Duration::from_secs(2);
@@ -52,6 +55,10 @@ pub fn run_event_loop<B: Backend>(term: &mut Terminal<B>, mut app: App) -> Resul
     // 遅れてしまう。
     let mut dirty = true;
     let mut input_dirty = true;
+    // echo_exempt: この周の dirty は打鍵直後の出力 (エコー) を含む → cap を待たない。
+    // input_dirty と違い、描画後の last_output_draw 更新は出力起因として行う
+    // (ストリーミングの束ね方を変えない)。
+    let mut echo_exempt = false;
     let mut last_output_draw = Instant::now() - min_output_frame;
 
     while !app.quit {
@@ -61,7 +68,7 @@ pub fn run_event_loop<B: Backend>(term: &mut Terminal<B>, mut app: App) -> Resul
             input_dirty = true;
         }
 
-        if dirty && (input_dirty || last_output_draw.elapsed() >= min_output_frame) {
+        if dirty && (input_dirty || echo_exempt || last_output_draw.elapsed() >= min_output_frame) {
             term.draw(|f| {
                 crate::ui::draw(
                     &app,
@@ -74,8 +81,9 @@ pub fn run_event_loop<B: Backend>(term: &mut Terminal<B>, mut app: App) -> Resul
             })?;
             if latency_trace_enabled() {
                 latency_trace_append(&format!(
-                    "draw input_dirty={} pending_key={}",
+                    "draw input_dirty={} echo_exempt={} pending_key={}",
                     input_dirty,
+                    echo_exempt,
                     app.last_key_write_us.is_some()
                 ));
             }
@@ -84,6 +92,7 @@ pub fn run_event_loop<B: Backend>(term: &mut Terminal<B>, mut app: App) -> Resul
             }
             dirty = false;
             input_dirty = false;
+            echo_exempt = false;
             // 描画で確定したペイン矩形に PTY / parser のサイズを揃える。変わった
             // ペインがあれば parser は即座に新サイズになるので、次の周でもう一度
             // 描く (子の再描画は別途 Output 通知で追いかける)。
@@ -114,8 +123,10 @@ pub fn run_event_loop<B: Backend>(term: &mut Terminal<B>, mut app: App) -> Resul
 
         // 入力 or PTY 出力 or タイムアウトを待つ。出力起因で dirty のときは
         // frame cap の残りだけ待ち、それ以外はアイドル上限まで待つ。
-        let wait = if dirty {
+        let wait = if dirty && !echo_exempt {
             min_output_frame.saturating_sub(last_output_draw.elapsed())
+        } else if dirty {
+            Duration::ZERO
         } else {
             idle_wait
         };
@@ -145,6 +156,7 @@ pub fn run_event_loop<B: Backend>(term: &mut Terminal<B>, mut app: App) -> Resul
                 extend_paste_burst(&rx, &mut app, &mut batch, &mut output_seen, burst_started);
             }
             app.last_burst_wait_us = burst_started.elapsed().as_micros() as u64;
+            let only_moves = batch_is_only_mouse_moves(&batch);
             process_batch(
                 &mut app,
                 batch,
@@ -153,11 +165,25 @@ pub fn run_event_loop<B: Backend>(term: &mut Terminal<B>, mut app: App) -> Resul
                 &tab_rects,
                 &mut menu_rect,
             )?;
-            dirty = true;
-            input_dirty = true;
+            // ポインタ移動だけのバッチは ccnest の見た目を変えない (メニューの
+            // ホバーとドラッグ中を除く) ので描かない。以前はマウスを動かすたびに
+            // 即時フル描画になっていた。
+            if !only_moves || moves_affect_ui(&app) {
+                dirty = true;
+                input_dirty = true;
+            }
         }
         if output_seen {
             dirty = true;
+            if app
+                .echo_pending
+                .take_if(|t| t.elapsed() <= echo_window)
+                .is_some()
+            {
+                echo_exempt = true;
+            } else {
+                app.echo_pending = None;
+            }
         }
 
         // 保留中の plain Up/Down フラッシュ: PAIR_WINDOW 内に対のホイールが
@@ -324,6 +350,41 @@ fn extend_paste_burst(
             Err(_) => break,
         }
     }
+}
+
+/// `NAME` 環境変数を ms として読む。未設定・不正値・0 未満は `default_ms`。
+/// 起動時に 1 回だけ評価する (ループ内で呼ばない)。
+fn env_ms(name: &str, default_ms: u64) -> Duration {
+    Duration::from_millis(parse_ms_override(
+        std::env::var(name).ok().as_deref(),
+        default_ms,
+    ))
+}
+
+/// 純粋判定: 環境変数の値 (あれば) を ms として解釈する。空/非数/範囲外は既定値。
+fn parse_ms_override(value: Option<&str>, default_ms: u64) -> u64 {
+    value
+        .map(str::trim)
+        .filter(|v| !v.is_empty())
+        .and_then(|v| v.parse::<u64>().ok())
+        .filter(|&v| v <= 10_000)
+        .unwrap_or(default_ms)
+}
+
+/// 純粋判定: バッチがマウス移動 (ボタン無し) だけで構成されているか。
+fn batch_is_only_mouse_moves(batch: &[Event]) -> bool {
+    !batch.is_empty()
+        && batch.iter().all(|e| {
+            matches!(
+                e,
+                Event::Mouse(m) if m.kind == crossterm::event::MouseEventKind::Moved
+            )
+        })
+}
+
+/// ポインタ移動が ccnest の見た目に影響する状態か (メニューのホバー / ドラッグ選択中)。
+fn moves_affect_ui(app: &App) -> bool {
+    app.context_menu.is_some() || app.selection.as_ref().is_some_and(|s| s.dragging)
 }
 
 /// 描画で確定したペイン矩形 (`pane_rects` = 枠の内側) に PTY と parser の
@@ -890,6 +951,7 @@ fn handle_key(app: &mut App, key: KeyEvent, pane_rects: &HashMap<PaneId, Rect>) 
                 if let Some(pane) = app.panes.get(&focused_id) {
                     pane.scroll_to_bottom();
                     pane.write(&bytes);
+                    app.echo_pending = Some(Instant::now());
                     if latency_trace_enabled() {
                         app.last_key_write_us = Some(now_us());
                     }
@@ -1562,6 +1624,18 @@ fn forward_or_swallow(
     lx: u16,
     ly: u16,
 ) -> bool {
+    // ボタン無しの移動は「セルが変わったときだけ」転送する。Windows のコンソールは
+    // ピクセル単位の移動ごとにレコードを出すので、AnyMotion (?1003h) を有効にした
+    // 子 (Claude Code のダイアログ中など) にそのまま流すと同じセルの報告が
+    // 毎秒数百件になり、子の入力処理を詰まらせる。
+    if me.kind == crossterm::event::MouseEventKind::Moved {
+        if app.last_forwarded_move == Some((pid, lx, ly)) {
+            return true;
+        }
+        app.last_forwarded_move = Some((pid, lx, ly));
+    } else {
+        app.last_forwarded_move = None;
+    }
     if let Some(bytes) = crate::mouse::encode_mouse_report(mode, enc, me, lx, ly) {
         if let Some(p) = app.panes.get(&pid) {
             p.write(&bytes);
@@ -2447,6 +2521,51 @@ mod tests {
             KeyModifiers::CONTROL,
             KeyEventKind::Press,
         ))
+    }
+
+    #[test]
+    fn parse_ms_override_defaults_on_missing_or_bad_values() {
+        assert_eq!(parse_ms_override(None, 8), 8);
+        assert_eq!(parse_ms_override(Some(""), 8), 8);
+        assert_eq!(parse_ms_override(Some("  "), 8), 8);
+        assert_eq!(parse_ms_override(Some("abc"), 8), 8);
+        assert_eq!(parse_ms_override(Some("-1"), 8), 8);
+        assert_eq!(parse_ms_override(Some("99999"), 8), 8, "上限超えは既定値");
+    }
+
+    #[test]
+    fn parse_ms_override_accepts_valid_values() {
+        assert_eq!(parse_ms_override(Some("0"), 8), 0);
+        assert_eq!(parse_ms_override(Some(" 16 "), 8), 16);
+        assert_eq!(parse_ms_override(Some("10000"), 8), 10_000);
+    }
+
+    fn moved(col: u16, row: u16) -> Event {
+        Event::Mouse(crossterm::event::MouseEvent {
+            kind: MouseEventKind::Moved,
+            column: col,
+            row,
+            modifiers: KeyModifiers::NONE,
+        })
+    }
+
+    #[test]
+    fn only_mouse_moves_detects_pure_motion_batches() {
+        assert!(batch_is_only_mouse_moves(&[moved(1, 1)]));
+        assert!(batch_is_only_mouse_moves(&[moved(1, 1), moved(2, 1)]));
+        assert!(!batch_is_only_mouse_moves(&[]));
+        assert!(!batch_is_only_mouse_moves(&[
+            moved(1, 1),
+            press(KeyCode::Char('a'))
+        ]));
+        assert!(!batch_is_only_mouse_moves(&[Event::Mouse(
+            crossterm::event::MouseEvent {
+                kind: MouseEventKind::Down(crossterm::event::MouseButton::Left),
+                column: 1,
+                row: 1,
+                modifiers: KeyModifiers::NONE,
+            }
+        )]));
     }
 
     #[test]
