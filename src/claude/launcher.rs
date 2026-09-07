@@ -144,9 +144,32 @@ pub fn spawn_shell(
     Ok((h, shell))
 }
 
+/// 純粋判定: 親 (ccnest を起動した端末) の環境変数を子へ渡すか。ホスト端末の
+/// 正体を示す変数は落とす。子 (Claude Code 等) はこれで描画経路を切り替える
+/// ので、ccnest をどの端末から起動したかで挙動が変わるのを防ぐ。
+pub fn should_pass_env(key: &str) -> bool {
+    const DROP_EXACT: &[&str] = &[
+        "WT_SESSION",
+        "WT_PROFILE_ID",
+        "TERM_PROGRAM",
+        "TERM_PROGRAM_VERSION",
+        "KITTY_WINDOW_ID",
+        "ZED_TERM",
+        "VTE_VERSION",
+        "TMUX",
+        "TMUX_PANE",
+        "ZELLIJ",
+        "ZELLIJ_SESSION_NAME",
+    ];
+    !DROP_EXACT.iter().any(|d| d.eq_ignore_ascii_case(key))
+        && !key.to_ascii_uppercase().starts_with("CONEMU")
+}
+
 fn apply_env(cmd: &mut CommandBuilder) {
     for (k, v) in std::env::vars() {
-        cmd.env(k, v);
+        if should_pass_env(&k) {
+            cmd.env(k, v);
+        }
     }
     // Keep interactive TUIs happy on ConPTY.
     cmd.env("TERM", "xterm-256color");
@@ -280,6 +303,19 @@ mod tests {
         );
     }
 
+    #[test]
+    fn env_hygiene_drops_terminal_identity_but_keeps_the_rest() {
+        assert!(!should_pass_env("WT_SESSION"));
+        assert!(!should_pass_env("wt_profile_id"));
+        assert!(!should_pass_env("TERM_PROGRAM"));
+        assert!(!should_pass_env("ConEmuANSI"));
+        assert!(!should_pass_env("TMUX"));
+        assert!(should_pass_env("PATH"));
+        assert!(should_pass_env("CCNEST_CLAUDE_BIN"));
+        assert!(should_pass_env("TERM"));
+        assert!(should_pass_env("ANTHROPIC_API_KEY"));
+    }
+
     // 空文字の PERMISSION_MODE は未設定と同じく既定 (plan) 扱い
     #[test]
     fn empty_mode_env_means_default_plan() {
@@ -292,6 +328,9 @@ mod tests {
 }
 
 // Version History
+// - ver1.3 (2026-09-07): should_pass_env() で端末アイデンティティ変数 (WT_SESSION /
+//   TERM_PROGRAM / ConEmu* / TMUX 等) を子へ渡さない。ccnest をどの端末から起動したかで
+//   子 (Claude Code) の描画経路が変わり、計測の交絡になっていた。
 // - ver1.2 (2026-09-06): spawn_claude / spawn_shell が ReaderHooks (出力時刻スタンプ +
 //   イベントループ起こし) を受け取り PtyHandle::spawn へ渡す。
 // - ver1.1 (2026-08-11): 起動フラグを SpawnOpts + build_claude_args に純関数化。

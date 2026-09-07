@@ -70,6 +70,14 @@ pub struct App {
     pub last_key_write_us: Option<u64>,
     /// `CCNEST_LATENCY_TRACE` 用: 直近バッチのペースト判定待ち (us)。
     pub last_burst_wait_us: u64,
+    /// 直近にフォーカスペインへキー/ペーストを書いた時刻。書き込み直後に届く
+    /// 最初の PTY 出力 (= エコー) は出力フレーム cap を待たずに描くための印。
+    /// ストリーミング中は cap が常に温まっているので、これが無いとエコーだけ
+    /// 0〜8ms (タイマー分解能込みで最大 16ms) 余計に遅れる。
+    pub echo_pending: Option<Instant>,
+    /// 直近に子へ転送したマウス移動 (pane, col, row)。同じセル内の Moved は
+    /// 子へ再送しない (AnyMotion モードの子にポインタ移動の洪水を流さない)。
+    pub last_forwarded_move: Option<(PaneId, u16, u16)>,
     /// イベントループを起こすチャネルの送信側。ペイン生成時に reader へ配る。
     wake_tx: WakeTx,
     /// 受信側。`run_event_loop` が起動時に `take_wake_rx` で持っていく。
@@ -200,6 +208,8 @@ impl App {
             branch_cache: HashMap::new(),
             last_key_write_us: None,
             last_burst_wait_us: 0,
+            echo_pending: None,
+            last_forwarded_move: None,
             wake_tx,
             wake_rx: Some(wake_rx),
         })
@@ -571,3 +581,7 @@ mod tests {
 //                       reader, WakeRx taken by run_event_loop), pane_visible()
 //                       for output-driven redraw gating, and the
 //                       CCNEST_LATENCY_TRACE bookkeeping fields.
+// ver0.3 - 2026-09-07 - Hold echo_pending (last key write to the focused pane,
+//                       so the echo frame can skip the output cap) and
+//                       last_forwarded_move (cell-granularity dedupe of motion
+//                       reports sent to a mouse-tracking child).
