@@ -581,3 +581,7 @@ mod tests {
 //                       reader, WakeRx taken by run_event_loop), pane_visible()
 //                       for output-driven redraw gating, and the
 //                       CCNEST_LATENCY_TRACE bookkeeping fields.
+// ver0.3 - 2026-09-07 - Hold echo_pending (last key write to the focused pane,
+//                       so the echo frame can skip the output cap) and
+//                       last_forwarded_move (cell-granularity dedupe of motion
+//                       reports sent to a mouse-tracking child).

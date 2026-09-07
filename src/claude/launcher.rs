@@ -328,6 +328,9 @@ mod tests {
 }
 
 // Version History
+// - ver1.3 (2026-09-07): should_pass_env() で端末アイデンティティ変数 (WT_SESSION /
+//   TERM_PROGRAM / ConEmu* / TMUX 等) を子へ渡さない。ccnest をどの端末から起動したかで
+//   子 (Claude Code) の描画経路が変わり、計測の交絡になっていた。
 // - ver1.2 (2026-09-06): spawn_claude / spawn_shell が ReaderHooks (出力時刻スタンプ +
 //   イベントループ起こし) を受け取り PtyHandle::spawn へ渡す。
 // - ver1.1 (2026-08-11): 起動フラグを SpawnOpts + build_claude_args に純関数化。

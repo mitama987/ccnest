@@ -3645,3 +3645,15 @@ mod tests {
 //                       Measured (30 injected keys): Claude pane p50/p90
 //                       14.6/46.5 ms -> 9.1/12.0 ms; cmd pane 14.4/46.7 ms ->
 //                       1.3/1.7 ms; idle CPU ~2% -> ~0%.
+// ver0.7 - 2026-09-07 - Typing while the child is busy: a keystroke now arms
+//                       app.echo_pending, and the first output-driven draw
+//                       inside CCNEST_ECHO_WINDOW_MS (default 100) skips the
+//                       output frame cap, so an echo is no longer delayed only
+//                       while the pane is streaming. A batch made purely of
+//                       Mouse(Moved) no longer marks the frame dirty (except
+//                       with a context menu open or a drag selection running),
+//                       and forward_or_swallow only forwards a motion report
+//                       when the cell changed - with the pointer moving, draws
+//                       over the same input fell 376 -> 151 and key->screen p90
+//                       22 -> 17 ms. idle_wait / min_output_frame / echo_window
+//                       are overridable via env (pure parse_ms_override).
