@@ -644,3 +644,7 @@ mod tests {
 //                       so the echo frame can skip the output cap) and
 //                       last_forwarded_move (cell-granularity dedupe of motion
 //                       reports sent to a mouse-tracking child).
+// ver0.4 - 2026-09-26 - close_tab(idx) terminates every pane of a tab (tab-bar
+//                       middle-click); remove_tab() + pure active_after_close()
+//                       are shared with close_focused_pane, which now also marks
+//                       the newly active tab seen.

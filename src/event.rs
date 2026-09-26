@@ -3807,3 +3807,12 @@ mod tests {
 //                       over the same input fell 376 -> 151 and key->screen p90
 //                       22 -> 17 ms. idle_wait / min_output_frame / echo_window
 //                       are overridable via env (pure parse_ms_override).
+// ver0.8 - 2026-09-26 - Middle-click (wheel click) on a tab closes the whole
+//                       tab: pure tab_at() / classify_tab_mouse() replace the
+//                       inline left-click loop, Down(Middle) -> App::close_tab,
+//                       and tab_rects is cleared right after a close so a
+//                       second click in the same batch cannot hit a stale
+//                       index. process_batch and run_event_loop stop once
+//                       app.quit is set, so no queued event or pending-arrow
+//                       flush touches current_tab() with zero tabs.
+//                       CCNEST_INPUT_TRACE logs "close_tab idx=N tabs_left=M".
