@@ -5,6 +5,35 @@
 
 ---
 
+## 2026-09-26 — シェルペインの枠線とタイトル行を描かない（v0.1.14）
+
+ブランチ: `feature/shell-pane-no-border`
+
+### 背景
+
+Ctrl+C×2 で Claude ペインをシェル (cmd.exe) に戻すと、フォーカス中シェルペインの水色の枠線と
+「[4] C:\WINDOWS\system32\cmd.exe」のタイトル行が付く。「通常の cmd に戻ってほしい（青枠やめて）」という
+本人フィードバック。確認の結果「見た目の話。ccnest の中に留まるのは OK」だったので、シェルペインだけ
+枠もタイトル行も描かない。
+
+### 変更点
+
+| ファイル | ver | 内容 |
+|---|---|---|
+| src/ui/mod.rs | 0.9 | 純関数 `pane_frame_style`: シェルペイン (claude_running=false) は None → `render_layout` が枠もタイトルも描かず `area` 全体をペインに使う（pane_rects / PTY サイズも全域）。Claude ペインはフォーカスでオレンジ、非フォーカスで暗いグレーのまま |
+| README.md | - | Version History |
+| Cargo.toml | - | 0.1.13 → 0.1.14 |
+
+`theme.border_focused`（水色）はサイドバー枠とコンテキストメニューで引き続き使用。
+分割中にシェルペイン同士が隣り合うと境界線が無くなる（Claude ペインが隣なら Claude 側の枠が境界になる）。
+必要になったら分割時だけ細い区切りを足す。
+
+### 検証
+
+- `cargo test --all` 246 件緑（新規 `pane_frame_style_table`）、`cargo clippy --all-targets -- -D warnings` 警告なし
+- 実機: conhost 独立窓でシェルペインの ccnest を起動しスクリーンショットで確認（枠線・タイトル行なし、
+  cmd のバナーが 1 行目から表示）
+
 ## 2026-09-26 — タブバーの中クリック（ホイールクリック）でタブを閉じる（v0.1.13）
 
 ブランチ: `feature/middle-click-close-tab`
