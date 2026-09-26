@@ -162,9 +162,15 @@ pub fn run_event_loop<B: Backend>(term: &mut Terminal<B>, mut app: App) -> Resul
                 batch,
                 &pane_rects,
                 sidebar_file_rect,
-                &tab_rects,
+                &mut tab_rects,
                 &mut menu_rect,
             )?;
+            // 終了が確定した (Ctrl+Q / 最後のタブを閉じた) 直後はタブが 0 枚に
+            // なり得る。以降の保留矢印フラッシュや tick は current_tab() を踏むので
+            // ここで抜ける (非 quit 経路のフラッシュ位置は変えない)。
+            if app.quit {
+                break;
+            }
             // ポインタ移動だけのバッチは ccnest の見た目を変えない (メニューの
             // ホバーとドラッグ中を除く) ので描かない。以前はマウスを動かすたびに
             // 即時フル描画になっていた。
@@ -574,7 +580,7 @@ fn process_batch(
     events: Vec<Event>,
     pane_rects: &HashMap<PaneId, Rect>,
     sidebar_file_rect: Option<Rect>,
-    tab_rects: &[(Rect, usize)],
+    tab_rects: &mut Vec<(Rect, usize)>,
     menu_rect: &mut Option<Rect>,
 ) -> Result<()> {
     use crossterm::event::MouseEventKind;
@@ -595,6 +601,11 @@ fn process_batch(
     // (DECSET 1007l は過去にホイールスクロールを壊したため撤回済み) ので、本層が
     // 唯一の防御である。
     while i < events.len() {
+        // quit 確定後 (Ctrl+Q / 最後のタブを閉じた) はタブが 0 枚になり得るので、
+        // 同一バッチの残りイベントは処理しない (current_tab() の範囲外 panic 予防)。
+        if app.quit {
+            break;
+        }
         // 連続する paste 系イベント (Event::Paste と classify_run でマッチする
         // Char/Enter/Tab run) をまとめて 1 回の handle_paste にする。
         // Windows ConPTY が大きいペーストを複数チャンク=複数 Event::Paste で
@@ -1192,7 +1203,7 @@ fn handle_mouse(
     me: MouseEvent,
     pane_rects: &HashMap<PaneId, Rect>,
     sidebar_file_rect: Option<Rect>,
-    tab_rects: &[(Rect, usize)],
+    tab_rects: &mut Vec<(Rect, usize)>,
     menu_rect: &mut Option<Rect>,
 ) {
     use crossterm::event::{MouseButton, MouseEventKind::*};
@@ -1275,6 +1286,37 @@ fn handle_mouse(
         return;
     }
 
+    // タブバー: 左クリック = 切替、中クリック (ホイールクリック) = そのタブを
+    // 配下の全ペインごと閉じる (ブラウザ流・確認なし)。try_forward の後に置くのは、
+    // 非左イベント到着時の保留クリック flush を従来どおり先に済ませるため
+    // (タブバー座標はペイン外なので子へは転送されない)。リネーム中は両方無視。
+    match classify_tab_mouse(
+        &me.kind,
+        tab_at(tab_rects, mx, my),
+        app.renaming_tab.is_some(),
+    ) {
+        TabMouseAction::Switch(i) if i < app.tabs.len() => {
+            app.active_tab = i;
+            // 未閲覧完了 (マゼンタ) はクリックで開いた瞬間に消す。
+            app.mark_active_tab_seen();
+            app.selection = None;
+            return;
+        }
+        TabMouseAction::Close(i) => {
+            // 範囲外 idx (閉じた直後の古い矩形) は App 側で no-op。
+            app.close_tab(i);
+            if input_trace_enabled() {
+                trace_append_line(&format!("close_tab idx={i} tabs_left={}", app.tabs.len()));
+            }
+            app.selection = None;
+            // 描画済みの矩形は閉じた瞬間に古くなる。次フレームで draw_tabbar が
+            // 組み直すまでヒットテストに使わせない (menu_rect = None と同じ考え方)。
+            tab_rects.clear();
+            return;
+        }
+        TabMouseAction::Switch(_) | TabMouseAction::Ignore => {}
+    }
+
     match me.kind {
         ScrollUp | ScrollDown => {
             let target = pane_rects
@@ -1303,19 +1345,6 @@ fn handle_mouse(
             }
         }
         Down(MouseButton::Left) => {
-            // タブバー上のクリック → アクティブタブ切替。リネーム中は無視。
-            if app.renaming_tab.is_none() {
-                for (rect, idx) in tab_rects {
-                    if mx >= rect.x && mx < rect.x + rect.w && my >= rect.y && my < rect.y + rect.h
-                    {
-                        app.active_tab = *idx;
-                        // 未閲覧完了 (マゼンタ) はクリックで開いた瞬間に消す。
-                        app.mark_active_tab_seen();
-                        app.selection = None;
-                        return;
-                    }
-                }
-            }
             // Ctrl+Left クリック → クリック位置の URL をデフォルトブラウザで開く。
             // 通常クリック (選択開始) より優先。
             if me.modifiers.contains(KeyModifiers::CONTROL) {
@@ -1710,6 +1739,16 @@ fn find_pane_at(pane_rects: &HashMap<PaneId, Rect>, mx: i32, my: i32) -> Option<
         .map(|(pid, r)| (*pid, *r))
 }
 
+/// タブバーの描画矩形列 (`draw_tabbar` が毎フレーム記録) から (mx,my) が乗っている
+/// タブの index を返す純粋関数。返すのは描画時に格納した index であって Vec 内の
+/// 位置ではない (右端に収まらないタブは記録されないため)。右端・下端は排他。
+fn tab_at(tab_rects: &[(Rect, usize)], mx: i32, my: i32) -> Option<usize> {
+    tab_rects
+        .iter()
+        .find(|(r, _)| mx >= r.x && mx < r.x + r.w && my >= r.y && my < r.y + r.h)
+        .map(|(_, idx)| *idx)
+}
+
 /// 右クリックをローカルのコンテキストメニューにするか。現状は常に true
 /// (Claude Code 側に右クリック固有の機能が無いため)。子へ転送したいケースが
 /// 出てきたらここを絞るだけで切り替えられる。
@@ -1832,6 +1871,40 @@ fn classify_menu_mouse(
             _ => MenuMouseAction::Consume,
         },
         Up(_) => MenuMouseAction::Consume,
+    }
+}
+
+/// タブバー上のマウス入力の分類。純粋関数。
+#[derive(Debug, PartialEq, Eq)]
+enum TabMouseAction {
+    /// タブ i をアクティブにする (左クリック)。
+    Switch(usize),
+    /// タブ i を配下ペインごと閉じる (中クリック)。
+    Close(usize),
+    /// タブバー処理としては何もしない (タブ外 / リネーム中 / Up・Drag・右・ホイール)。
+    Ignore,
+}
+
+/// `hit` はヒットしたタブ index (`tab_at`)。リネーム中はコミット先がアクティブ
+/// タブなので、切替も閉じるも無視する (別タブにリネームが乗るのを防ぐ)。
+/// 中ボタンは Down で確定し、対の Up(Middle) は追跡しない (`classify_menu_mouse`
+/// と同じ方針。mouse_local_drag を中ボタンから立てない)。
+fn classify_tab_mouse(
+    kind: &crossterm::event::MouseEventKind,
+    hit: Option<usize>,
+    renaming: bool,
+) -> TabMouseAction {
+    use crossterm::event::{MouseButton, MouseEventKind::*};
+    let Some(i) = hit else {
+        return TabMouseAction::Ignore;
+    };
+    if renaming {
+        return TabMouseAction::Ignore;
+    }
+    match kind {
+        Down(MouseButton::Left) => TabMouseAction::Switch(i),
+        Down(MouseButton::Middle) => TabMouseAction::Close(i),
+        _ => TabMouseAction::Ignore,
     }
 }
 
@@ -3214,6 +3287,83 @@ mod tests {
         );
     }
 
+    /// tab_at: 左端は含み右端は排他 (区切りの 1 桁は None)、別行は None、空は None。
+    #[test]
+    fn tab_at_table() {
+        let r = |x: i32, w: i32| Rect { x, y: 0, w, h: 1 };
+        // サイドバー表示時を模して x=21 起点。タブ 0 は 21..31、区切り 1 桁、
+        // タブ 1 は 32..40。
+        let rects = vec![(r(21, 10), 0usize), (r(32, 8), 1usize)];
+        assert_eq!(tab_at(&rects, 21, 0), Some(0), "左端は含む");
+        assert_eq!(tab_at(&rects, 30, 0), Some(0), "最終セル");
+        assert_eq!(tab_at(&rects, 31, 0), None, "区切り 1 桁 (右端排他)");
+        assert_eq!(tab_at(&rects, 32, 0), Some(1));
+        assert_eq!(tab_at(&rects, 39, 0), Some(1));
+        assert_eq!(tab_at(&rects, 40, 0), None);
+        assert_eq!(tab_at(&rects, 20, 0), None, "サイドバー側");
+        assert_eq!(tab_at(&rects, 25, 1), None, "別行");
+        assert_eq!(tab_at(&[], 25, 0), None, "空");
+    }
+
+    /// tab_at は Vec 内の位置ではなく描画時に格納した index を返す
+    /// (右端に収まらないタブは draw_tabbar が記録しないため index が飛ぶ)。
+    #[test]
+    fn tab_at_returns_recorded_index() {
+        let r = |x: i32, w: i32| Rect { x, y: 0, w, h: 1 };
+        let rects = vec![(r(0, 10), 0usize), (r(11, 10), 2usize)];
+        assert_eq!(tab_at(&rects, 15, 0), Some(2));
+    }
+
+    /// タブバー分類: Down(Left)→Switch、Down(Middle)→Close、リネーム中は両方 Ignore、
+    /// タブ外は Ignore、Up/Drag/右/ホイールは Ignore。
+    #[test]
+    fn classify_tab_mouse_table() {
+        use crossterm::event::{MouseButton, MouseEventKind::*};
+        assert_eq!(
+            classify_tab_mouse(&Down(MouseButton::Left), Some(1), false),
+            TabMouseAction::Switch(1)
+        );
+        assert_eq!(
+            classify_tab_mouse(&Down(MouseButton::Middle), Some(1), false),
+            TabMouseAction::Close(1)
+        );
+        assert_eq!(
+            classify_tab_mouse(&Down(MouseButton::Left), Some(1), true),
+            TabMouseAction::Ignore,
+            "リネーム中は切替しない"
+        );
+        assert_eq!(
+            classify_tab_mouse(&Down(MouseButton::Middle), Some(1), true),
+            TabMouseAction::Ignore,
+            "リネーム中は閉じない"
+        );
+        assert_eq!(
+            classify_tab_mouse(&Down(MouseButton::Left), None, false),
+            TabMouseAction::Ignore
+        );
+        assert_eq!(
+            classify_tab_mouse(&Down(MouseButton::Middle), None, false),
+            TabMouseAction::Ignore
+        );
+        assert_eq!(
+            classify_tab_mouse(&Up(MouseButton::Middle), Some(0), false),
+            TabMouseAction::Ignore,
+            "対の Up は追跡しない"
+        );
+        assert_eq!(
+            classify_tab_mouse(&Drag(MouseButton::Middle), Some(0), false),
+            TabMouseAction::Ignore
+        );
+        assert_eq!(
+            classify_tab_mouse(&Down(MouseButton::Right), Some(0), false),
+            TabMouseAction::Ignore
+        );
+        assert_eq!(
+            classify_tab_mouse(&ScrollUp, Some(0), false),
+            TabMouseAction::Ignore
+        );
+    }
+
     /// normalize_range は行優先・同一行では col 昇順に並べ替える (i64 版)。
     #[test]
     fn normalize_range_orders_row_major() {
@@ -3657,3 +3807,12 @@ mod tests {
 //                       over the same input fell 376 -> 151 and key->screen p90
 //                       22 -> 17 ms. idle_wait / min_output_frame / echo_window
 //                       are overridable via env (pure parse_ms_override).
+// ver0.8 - 2026-09-26 - Middle-click (wheel click) on a tab closes the whole
+//                       tab: pure tab_at() / classify_tab_mouse() replace the
+//                       inline left-click loop, Down(Middle) -> App::close_tab,
+//                       and tab_rects is cleared right after a close so a
+//                       second click in the same batch cannot hit a stale
+//                       index. process_batch and run_event_loop stop once
+//                       app.quit is set, so no queued event or pending-arrow
+//                       flush touches current_tab() with zero tabs.
+//                       CCNEST_INPUT_TRACE logs "close_tab idx=N tabs_left=M".

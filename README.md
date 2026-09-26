@@ -74,6 +74,8 @@ ccnest path\to\project
 | `Shift+Enter` / `Ctrl+Enter` | Insert a newline in the prompt instead of submitting (sent as `ESC + CR`) |
 | Mouse wheel | Scroll history in the pane under the cursor (3 lines per tick) |
 | `Ctrl` + Mouse wheel | Resize the focused split — the pane under the cursor grows on scroll-up, shrinks on scroll-down (5% per tick, clamped to 10–90%) |
+| Left-click on a tab | Switch to that tab |
+| Middle-click (wheel click) on a tab | Close that tab and every pane in it (no confirmation — same as `Ctrl+W` per pane; closing the last tab quits) |
 | `Shift+PageUp` / `Shift+PageDown` | Scroll the focused pane one screen of history |
 | `Shift+↑` / `Shift+↓` | Scroll the focused pane one line of history |
 | any keystroke | Snaps the view back to the live tail |
@@ -99,6 +101,11 @@ Each tab's title is initialized from the pane's current folder name
 (e.g. `ccnest` when launched from the repo root). Press `F2` to rename
 the active tab — type the new title, then `Enter` to commit or `Esc` to
 cancel. The cursor (`▎`) is shown inline while editing.
+
+Left-click a tab in the tab bar to switch to it. Middle-click (wheel
+click) a tab to close it together with every pane it holds — browser
+style, with no confirmation, the same way `Ctrl+W` closes a single pane.
+Closing the last tab quits ccnest.
 
 When the focused pane's Claude session has a current task (from the OSC
 window title, falling back to the last user message in the session
@@ -187,3 +194,4 @@ ver0.1.9 - 2026-08-11 - Status markers switched to the square set (🟩 running 
 ver0.1.10 - 2026-08-11 - Fixed a regressed wheel bug where a notch could reopen Claude prompt history: the deferred phantom-arrow flush now runs only immediately after the input queue is drained, so a stalled loop iteration can no longer flush past an unread paired wheel event. The 2s tick no longer blocks on the pane parser lock (try_lock, skip on contention), git branch discovery is cached with a 10s TTL, and the sidebar's full git status walk is skipped while the sidebar is hidden. CCNEST_INPUT_TRACE now logs pending-arrow flushes (`pending_arrow_flush`) so leaks are machine-checkable.
 ver0.1.11 - 2026-09-06 - Fixed sluggish, choppy typing in Claude panes. The event loop is now woken by PTY output (input pump thread + per-pane output notifications over one mpsc channel) instead of redrawing only when a 30 ms `event::poll` timed out (31–47 ms on Windows' default 15.6 ms timer), and it redraws only when something changed (output frames coalesced at 8 ms, input frames immediate). The 5 ms paste-detection wait (really ~16 ms) is no longer paid for single keystrokes — only when a drain holds two or more presses or a bracketed paste. Per-frame `ResizePseudoConsole` + vt100 `set_size` are replaced by a size-change check after each draw; the pane renderer reuses one scratch string instead of allocating per cell; stdout is wrapped in a 1 MB BufWriter. New opt-in `CCNEST_LATENCY_TRACE=1` writes per-keystroke `key_write->output / output->draw / burst_wait` timings (plus `draw` / `output` event lines) to `%APPDATA%\ccnest\latency-trace.log`, and `CCNEST_PTY_DUMP=1` records the raw bytes received from each pane's ConPTY in `pty-dump.log`. Measured with 30 injected keystrokes (SendInput, 60 ms hold, 120 ms gap): Claude pane key→screen p50/p90/p99 14.6/46.5/55.8 ms → 9.1/12.0/23.7 ms (≈7 ms of that is Claude Code's own render); cmd.exe pane 14.4/46.7/47.4 ms → 1.3/1.7/2.0 ms; idle CPU 1.6–2.5% → 0.0–0.3%.
 ver0.1.12 - 2026-09-07 - Typing while Claude Code is busy: the echo of a keystroke no longer waits for the output-frame cap (a pending-echo window exempts the first frame after a key write), a batch of pointer moves no longer forces a redraw, and pointer moves are only forwarded to a mouse-tracking child when the cell changes. Measured with 19 injected keys per phase (scripts/latency): with the pointer moving, redraws over the same input dropped 376 -> 151 and key->screen p90 22 -> 17 ms; under a busy Claude pane (40 s of live tool output) ccnest's own share stayed at 2 ms p50 / 3-6 ms p90 while the p90 rise to ~28 ms came from Claude Code's own render. New knobs CCNEST_MIN_OUTPUT_FRAME_MS / CCNEST_IDLE_WAIT_MS / CCNEST_ECHO_WINDOW_MS bisect the coalescing constants without a rebuild, and terminal-identity variables (WT_SESSION, TERM_PROGRAM, ...) are no longer leaked into the child.
+ver0.1.13 - 2026-09-26 - Middle-click (wheel click) on a tab in the tab bar closes that tab and all of its split panes, browser-style, with no confirmation (like Ctrl+W); closing the last tab quits. The tab hit-test is a pure function shared with left-click switching, and the drawn tab rectangles are invalidated the moment a tab closes so a second click in the same input batch cannot hit a stale index. Input queued behind a quit (Ctrl+Q or the last tab closing) is no longer processed, removing a latent out-of-range panic on tab lookups. CCNEST_INPUT_TRACE logs each close as `close_tab idx=N tabs_left=M`.

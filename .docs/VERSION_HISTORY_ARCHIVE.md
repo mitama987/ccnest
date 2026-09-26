@@ -5,6 +5,63 @@
 
 ---
 
+## 2026-09-26 — タブバーの中クリック（ホイールクリック）でタブを閉じる（v0.1.13）
+
+ブランチ: `feature/middle-click-close-tab`
+
+### 背景と設計
+
+タブ見出しは左クリックで切替できたが、閉じる手段は `Ctrl+W`（フォーカス中ペインのみ）だけだった。
+ブラウザと同じく中ボタンでタブを丸ごと閉じる。
+
+- **Down(Middle) で確定**。対の Up(Middle) は追跡しない（`classify_menu_mouse` と同じ方針。
+  中ボタンから `mouse_local_drag` を立てない）
+- **タブ丸ごと**（分割中の全ペインを terminate）。確認ダイアログ無し（Ctrl+W / Ctrl+Q と統一）
+- リネーム中・コンテキストメニュー表示中は無視（リネームのコミット先がアクティブタブのため）
+- **描画矩形は閉じた瞬間に無効化**: `tab_rects` を `&mut Vec` にして `clear()`。同一バッチ内の次クリックが
+  旧 index を踏まない（`menu_rect = None` と同じ考え方）。左クリック切替にも `i < tabs.len()` ガードを追加
+- **quit 後の残イベント不処理**: 最後のタブを閉じた／Ctrl+Q の直後に同一バッチの残りや保留矢印 flush が
+  `current_tab()` を踏む潜在 panic（Ctrl+W でも起き得た）を、`process_batch` と `run_event_loop` の
+  `if app.quit { break; }` で塞いだ
+
+### 変更点
+
+| ファイル | ver | 内容 |
+|---|---|---|
+| src/event.rs | 0.8 | 純関数 `tab_at` / `classify_tab_mouse`（`TabMouseAction`）。`Down(Left)` のインライン切替を置換、`Down(Middle)` → `App::close_tab`。`tab_rects` を `&mut Vec` にして閉じた直後に `clear()`。quit ガード。`CCNEST_INPUT_TRACE` に `close_tab idx=N tabs_left=M` |
+| src/app.rs | 0.4 | `close_tab(idx)`（配下全ペイン terminate）、`remove_tab`、純関数 `active_after_close`。`close_focused_pane` の空タブ分岐と共用（挙動差: Ctrl+W でタブが消えた時も新アクティブタブに `mark_active_tab_seen` が掛かる。次 tick で収束する処理の前倒し） |
+| README.md | - | キー表に左クリック／中クリック行、Tabs 節に 1 文、Version History |
+| scripts/e2e/mmb-close-tab.ps1 | - | 実機 E2E（新規）。conhost 独立窓 + WT 新規窓で SendInput の中クリックを注入し、input-trace の `close_tab` 行と子プロセス数で判定 |
+| Cargo.toml | - | 0.1.12 → 0.1.13 |
+
+守った不変条件: 保留矢印 flush は drain + `process_batch` 直後（quit 経路だけ手前で抜ける）。
+ホイール簿記（`last_wheel_at` / `pending_arrow`）と `mouse_local_drag` は中ボタンから触らない。
+閉じる処理は `TerminateProcess` のみでループを止めない。
+
+### 検証
+
+- `cargo fmt --all -- --check` 差分なし、`cargo clippy --all-targets -- -D warnings` 警告なし、
+  `cargo test --all` 245 件緑（新規 4: `active_after_close_table` / `tab_at_table` /
+  `tab_at_returns_recorded_index` / `classify_tab_mouse_table`）
+- 実機（`scripts/e2e/mmb-close-tab.ps1`、`CCNEST_INPUT_TRACE=1`、シェルペイン）:
+  - conhost 独立窓: `Ctrl+T`×2 + `Ctrl+D` で 3 タブ 4 ペイン（cmd.exe 4）→ 左端タブを中クリック ×3 →
+    `close_tab idx=0 tabs_left=2` / `tabs_left=1` / `tabs_left=0`、cmd.exe 4→3→2→0、最後で ccnest が
+    panic 無く終了（crash log なし）、`pending_arrow_flush` 0 件
+  - Windows Terminal 新規窓（`wt -w <unique>`）: `Mouse(Down(Middle)@2,0)` が WT→ConPTY 経由で届き
+    `close_tab idx=0 tabs_left=0` → ccnest 終了 → WT 窓が閉じる（WT が中ボタンを横取りしない実証）
+  - 本物の Claude ペイン（launcher 経由）でも同じ 3 クリックで同じ `close_tab` 行と正常終了を確認（初回実行）
+
+### 教訓（E2E ハーネス）
+
+- ユーザー環境は `CCNEST_CLAUDE_BIN` が launcher シムを指しているので、PATH を隠しても本物の Claude が起動する。
+  シェルペインにしたいときは `CCNEST_CLAUDE_BIN` を存在しないパスで上書きし、かつ PATH から claude を外す
+- WT は `-w <一意な名前>` で新規窓になるが**既存の WindowsTerminal.exe プロセス内**に作られる。
+  プロセス kill は不可。前面ウィンドウのタイトル（`--title` + `--suppressApplicationTitle`）で注入先を必ず照合する
+- マウス注入は `SetProcessDPIAware()` が必須（PowerShell 5.1 は DPI 非対応で座標が仮想化される）。
+  セル幅の較正は 2 点プローブだと量子化誤差が大きい（4 行差か 5 行差かで 25%）ので、trace が返す `@col,row` で
+  狙いを補正する反復にした
+- PowerShell の `@($a + 240, $b + 120)` は `$a + @(240, $b) + 120` と解釈される（カンマが `+` より強い）
+
 ## 2026-09-07 — 「Claude の処理中／処理後も打鍵がかくかくする」の調査と対策（v0.1.12）
 
 ブランチ: `fix/typing-while-processing`
