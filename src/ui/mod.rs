@@ -615,6 +615,20 @@ fn file_entry_style(kind: filetree::EntryKind, theme: &theme::Theme) -> Style {
     }
 }
 
+/// 純粋: ペインの枠線スタイル。シェルペイン (claude が走っていない) は枠線も
+/// タイトル行も描かないので None。Claude ペインはフォーカス中がオレンジ
+/// (`border_claude`)、非フォーカスが暗いグレー (`border_idle`)。
+fn pane_frame_style(claude: bool, is_focus: bool, theme: &theme::Theme) -> Option<Style> {
+    if !claude {
+        return None;
+    }
+    Some(if is_focus {
+        theme.border_claude
+    } else {
+        theme.border_idle
+    })
+}
+
 fn draw_panes(
     app: &App,
     frame: &mut Frame<'_>,
@@ -652,24 +666,26 @@ fn render_layout(
                 .get(pid)
                 .map(|p| p.claude_running)
                 .unwrap_or(false);
-            let border_style = if is_focus && claude {
-                theme.border_claude
-            } else if is_focus {
-                theme.border_focused
-            } else {
-                theme.border_idle
+            // シェルペインは枠線もタイトル行も描かず、素の cmd と同じ見た目にする
+            // (Ctrl+C×2 でシェルへ戻した後の水色の枠が邪魔、というフィードバック)。
+            // Claude ペインは従来どおり枠 + " [id] command " タイトル。
+            let inner = match pane_frame_style(claude, is_focus, theme) {
+                Some(border_style) => {
+                    let title = app
+                        .panes
+                        .get(pid)
+                        .map(|p| format!(" [{}] {} ", pid, p.command))
+                        .unwrap_or_else(|| format!(" [{pid}] (gone) "));
+                    let block = Block::default()
+                        .borders(Borders::ALL)
+                        .title(title)
+                        .border_style(border_style);
+                    let inner = block.inner(area);
+                    frame.render_widget(block, area);
+                    inner
+                }
+                None => area,
             };
-            let title = app
-                .panes
-                .get(pid)
-                .map(|p| format!(" [{}] {} ", pid, p.command))
-                .unwrap_or_else(|| format!(" [{pid}] (gone) "));
-            let block = Block::default()
-                .borders(Borders::ALL)
-                .title(title)
-                .border_style(border_style);
-            let inner = block.inner(area);
-            frame.render_widget(block, area);
 
             pane_rects.insert(
                 *pid,
@@ -1152,6 +1168,23 @@ mod tests {
         }
     }
 
+    // ---- pane frame ---------------------------------------------------------
+
+    /// シェルペインは枠なし (フォーカス有無によらず None)。Claude ペインはフォーカス中が
+    /// border_claude (オレンジ)、非フォーカスが border_idle (暗いグレー)。
+    #[test]
+    fn pane_frame_style_table() {
+        let t = theme::default_theme();
+        assert_eq!(
+            pane_frame_style(false, true, &t),
+            None,
+            "フォーカス中のシェルも枠なし"
+        );
+        assert_eq!(pane_frame_style(false, false, &t), None);
+        assert_eq!(pane_frame_style(true, true, &t), Some(t.border_claude));
+        assert_eq!(pane_frame_style(true, false, &t), Some(t.border_idle));
+    }
+
     // ---- tab label ---------------------------------------------------------
 
     // タスクがあれば「N:タスク」形式になる
@@ -1314,3 +1347,8 @@ mod tests {
 //                       sync_pane_sizes が描画後の矩形差分で行う。PaneCells は
 //                       cell.contents() のセルごと String 確保をやめ、
 //                       Cell::write_contents でスクラッチを使い回す。
+// ver0.9 - 2026-09-26 - Shell panes (claude_running == false) are drawn without
+//                       the frame and the " [id] command " title row so a pane
+//                       restarted as a shell (Ctrl+C x2) looks like a plain
+//                       console; pure pane_frame_style() decides (Claude panes
+//                       keep border_claude / border_idle).
