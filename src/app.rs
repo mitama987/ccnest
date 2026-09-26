@@ -373,13 +373,38 @@ impl App {
             }
             None => {
                 // Tab is empty — remove it.
-                self.tabs.remove(self.active_tab);
-                if self.tabs.is_empty() {
-                    self.quit = true;
-                } else if self.active_tab >= self.tabs.len() {
-                    self.active_tab = self.tabs.len() - 1;
-                }
+                self.remove_tab(self.active_tab);
             }
+        }
+    }
+
+    /// タブ `idx` を配下の全ペインごと閉じる (確認なし。タブバーの中クリック用)。
+    /// Ctrl+W (`close_focused_pane`) はフォーカス中の 1 ペインだけを閉じるのに対し、
+    /// こちらは分割中のペインもまとめて terminate する。`idx` が範囲外
+    /// (描画後に閉じられた古い矩形からのヒットなど) なら何もしない。
+    pub fn close_tab(&mut self, idx: usize) {
+        if idx >= self.tabs.len() {
+            return;
+        }
+        for pid in self.tabs[idx].layout.leaves() {
+            if let Some(p) = self.panes.remove(&pid) {
+                p.terminate();
+            }
+        }
+        self.remove_tab(idx);
+    }
+
+    /// `tabs[idx]` を取り除き、`active_tab` / `quit` を更新する。
+    /// `close_focused_pane` の「最後のペインを閉じた」分岐と `close_tab` で共用。
+    fn remove_tab(&mut self, idx: usize) {
+        self.tabs.remove(idx);
+        match active_after_close(self.active_tab, idx, self.tabs.len()) {
+            Some(active) => {
+                self.active_tab = active;
+                // 新しく前面に出たタブの未閲覧完了 (マゼンタ) は次 tick を待たず消す。
+                self.mark_active_tab_seen();
+            }
+            None => self.quit = true,
         }
     }
 
@@ -500,6 +525,17 @@ fn plan_branch_refresh(
     (next, stale)
 }
 
+/// 純粋: タブ `closed` を取り除いた後 (残り `remaining` 枚) のアクティブ index。
+/// `closed < active` なら 1 つ左へ、`closed == active` なら同 index (右隣が滑り込む)、
+/// 末尾を超えたら末尾へクランプ。`remaining == 0` なら None (= quit)。
+fn active_after_close(active: usize, closed: usize, remaining: usize) -> Option<usize> {
+    if remaining == 0 {
+        return None;
+    }
+    let next = if closed < active { active - 1 } else { active };
+    Some(next.min(remaining - 1))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -510,6 +546,29 @@ mod tests {
         let mut c = BranchCache::new();
         c.insert(PathBuf::from(cwd), (branch.map(str::to_string), at));
         c
+    }
+
+    /// タブ削除後のアクティブ index: 左が消えたら 1 つ左へ、自身が消えたら右隣が
+    /// 滑り込む (同 index)、末尾超えはクランプ、右が消えても不変、0 枚なら quit。
+    #[test]
+    fn active_after_close_table() {
+        assert_eq!(
+            active_after_close(2, 0, 2),
+            Some(1),
+            "左が消えたら 1 つ左へ"
+        );
+        assert_eq!(
+            active_after_close(1, 1, 2),
+            Some(1),
+            "自身が消えたら右隣が同 index に"
+        );
+        assert_eq!(
+            active_after_close(2, 2, 2),
+            Some(1),
+            "末尾のアクティブは末尾へクランプ"
+        );
+        assert_eq!(active_after_close(0, 1, 1), Some(0), "右が消えても不変");
+        assert_eq!(active_after_close(0, 0, 0), None, "最後の 1 枚 → quit");
     }
 
     /// TTL 内のエントリは再探索リストへ入れず、値と時刻ごと引き継ぐ。
