@@ -7,6 +7,7 @@ use std::path::Path;
 use ratatui::buffer::Buffer;
 use ratatui::layout::{Constraint, Direction as LDir, Layout as LLayout, Rect};
 use ratatui::style::{Color, Modifier, Style};
+use ratatui::symbols::border;
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Clear, Paragraph, Widget};
 use ratatui::Frame;
@@ -650,6 +651,18 @@ fn pane_title(pid: PaneId, cwd: &Path) -> String {
     format!(" [{pid}] {} ", folder_title(cwd))
 }
 
+/// 純粋: Claude ペインの枠。McGugan 式の細線 (`border::ONE_EIGHTH_TALL`) で描く。
+/// 上辺 ▔ は行の上端、左右 ▕ ▏ は内側の縁、下辺 ▁ は行の下端に引かれるので、
+/// 箱線 (─ は行の真ん中) より上辺が半行上に来て、フォルダ名はその線のすぐ下に並ぶ
+/// (タブバー下の空き行を「半行」に見せたい、というフィードバック)。
+fn pane_block(title: String, border_style: Style) -> Block<'static> {
+    Block::default()
+        .borders(Borders::ALL)
+        .border_set(border::ONE_EIGHTH_TALL)
+        .title(title)
+        .border_style(border_style)
+}
+
 fn draw_panes(
     app: &App,
     frame: &mut Frame<'_>,
@@ -689,7 +702,7 @@ fn render_layout(
                 .unwrap_or(false);
             // シェルペインは枠線もタイトル行も描かず、素の cmd と同じ見た目にする
             // (Ctrl+C×2 でシェルへ戻した後の水色の枠が邪魔、というフィードバック)。
-            // Claude ペインは従来どおり枠 + " [id] フォルダ名 " タイトル
+            // Claude ペインは細線の枠 (pane_block) + " [id] フォルダ名 " タイトル
             // (exe 名ではなく cwd の最後のフォルダ名。pane_title 参照)。
             let inner = match pane_frame_style(claude, is_focus, theme) {
                 Some(border_style) => {
@@ -698,10 +711,7 @@ fn render_layout(
                         .get(pid)
                         .map(|p| pane_title(*pid, &p.cwd))
                         .unwrap_or_else(|| format!(" [{pid}] (gone) "));
-                    let block = Block::default()
-                        .borders(Borders::ALL)
-                        .title(title)
-                        .border_style(border_style);
+                    let block = pane_block(title, border_style);
                     let inner = block.inner(area);
                     frame.render_widget(block, area);
                     inner
@@ -1279,18 +1289,47 @@ mod tests {
         use ratatui::backend::TestBackend;
         use ratatui::Terminal;
         let cwd = Path::new(r"C:\Users\mitam\Desktop\work\30_XTP3");
+        let theme = theme::default_theme();
         let mut term = Terminal::new(TestBackend::new(40, 3)).unwrap();
         term.draw(|f| {
-            let block = Block::default()
-                .borders(Borders::ALL)
-                .title(pane_title(1, cwd));
-            f.render_widget(block, f.area());
+            f.render_widget(
+                pane_block(pane_title(1, cwd), theme.border_claude),
+                f.area(),
+            );
         })
         .unwrap();
         let buf = term.backend().buffer();
         let top: String = (0..40).map(|x| buf[(x, 0)].symbol()).collect();
         assert!(top.contains("[1] 30_XTP3"), "top border: {top:?}");
         assert!(!top.contains(".exe"), "top border: {top:?}");
+    }
+
+    /// 枠は McGugan 式の細線 (ONE_EIGHTH_TALL)。上辺 ▔ は行の上端 (箱線 ─ より半行上) で
+    /// タイトルの後ろに続き、左右は内側の縁の ▕ ▏、下辺 ▁ は行の下端。
+    #[test]
+    fn pane_block_draws_one_eighth_tall_lines() {
+        use ratatui::backend::TestBackend;
+        use ratatui::Terminal;
+        let cwd = Path::new(r"C:\Users\mitam\Desktop\work\30_XTP3");
+        let theme = theme::default_theme();
+        let mut term = Terminal::new(TestBackend::new(24, 4)).unwrap();
+        term.draw(|f| {
+            f.render_widget(
+                pane_block(pane_title(1, cwd), theme.border_claude),
+                f.area(),
+            );
+        })
+        .unwrap();
+        let buf = term.backend().buffer();
+        let row = |y: u16| (0..24).map(|x| buf[(x, y)].symbol()).collect::<String>();
+        assert_eq!(row(0), "▕ [1] 30_XTP3 ▔▔▔▔▔▔▔▔▔▏");
+        assert_eq!(row(1), "▕                      ▏");
+        assert_eq!(row(2), "▕                      ▏");
+        assert_eq!(row(3), "▕▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▏");
+        // 線もフォルダ名も枠の色 (フォーカス中はオレンジ)。
+        assert_eq!(buf[(0, 0)].fg, theme.border_claude.fg.unwrap());
+        assert_eq!(buf[(14, 0)].fg, theme.border_claude.fg.unwrap());
+        assert_eq!(buf[(2, 0)].fg, theme.border_claude.fg.unwrap());
     }
 
     // ---- tab label ---------------------------------------------------------
@@ -1468,3 +1507,8 @@ mod tests {
 //                       the pane area, so the orange top border and its
 //                       " [id] folder " title no longer sit right under the tab
 //                       row. The vertical split lives in the pure main_layout().
+// ver0.12 - 2026-09-27 - Claude pane frame drawn with McGugan one-eighth lines
+//                       (border::ONE_EIGHTH_TALL via pure pane_block()): the top
+//                       edge ▔ sits on the top of its row, half a row higher than
+//                       the old box-drawing ─, with the folder-name title just
+//                       below it; sides ▕ ▏ on the inner edges, bottom ▁.
