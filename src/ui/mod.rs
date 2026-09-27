@@ -7,7 +7,6 @@ use std::path::Path;
 use ratatui::buffer::Buffer;
 use ratatui::layout::{Constraint, Direction as LDir, Layout as LLayout, Rect};
 use ratatui::style::{Color, Modifier, Style};
-use ratatui::symbols::border;
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Clear, Paragraph, Widget};
 use ratatui::Frame;
@@ -64,24 +63,20 @@ pub fn draw(
     }
 }
 
-/// タブバーとペイン領域の間の空き行数。ペインの上枠 (オレンジ線と
-/// " [id] フォルダ名 " タイトル) がタブ行に貼り付かないようにする。
-const TABBAR_GAP_ROWS: u16 = 1;
-
 /// 純粋: メイン列 (サイドバーの右) の縦割り。上から タブバー 1 行 /
-/// 空き `TABBAR_GAP_ROWS` 行 / ペイン領域 (残り全部) / ステータスバー 2 行。
-/// 返り値は (タブバー, ペイン領域, ステータスバー)。空き行は何も描かない。
+/// ペイン領域 (残り全部) / ステータスバー 2 行。返り値は
+/// (タブバー, ペイン領域, ステータスバー)。タブバーとペインの間に空き行は
+/// 入れない (v0.1.16 で 1 行空けたが、本人の判断で v0.1.18 に撤回)。
 fn main_layout(area: Rect) -> (Rect, Rect, Rect) {
     let vert = LLayout::default()
         .direction(LDir::Vertical)
         .constraints([
             Constraint::Length(1),
-            Constraint::Length(TABBAR_GAP_ROWS),
             Constraint::Min(3),
             Constraint::Length(2),
         ])
         .split(area);
-    (vert[0], vert[2], vert[3])
+    (vert[0], vert[1], vert[2])
 }
 
 /// クリックセル (ax, ay) を基準に、端末 (term_w × term_h) 内へ必ず収まる
@@ -651,14 +646,11 @@ fn pane_title(pid: PaneId, cwd: &Path) -> String {
     format!(" [{pid}] {} ", folder_title(cwd))
 }
 
-/// 純粋: Claude ペインの枠。McGugan 式の細線 (`border::ONE_EIGHTH_TALL`) で描く。
-/// 上辺 ▔ は行の上端、左右 ▕ ▏ は内側の縁、下辺 ▁ は行の下端に引かれるので、
-/// 箱線 (─ は行の真ん中) より上辺が半行上に来て、フォルダ名はその線のすぐ下に並ぶ
-/// (タブバー下の空き行を「半行」に見せたい、というフィードバック)。
+/// 純粋: Claude ペインの枠。通常の箱線 (┌ ─ ┐ │ └ ┘) に " [id] フォルダ名 "
+/// タイトル。v0.1.17 で試した細線 (1/8 ブロック) は本人の判断で v0.1.18 に撤回。
 fn pane_block(title: String, border_style: Style) -> Block<'static> {
     Block::default()
         .borders(Borders::ALL)
-        .border_set(border::ONE_EIGHTH_TALL)
         .title(title)
         .border_style(border_style)
 }
@@ -702,7 +694,7 @@ fn render_layout(
                 .unwrap_or(false);
             // シェルペインは枠線もタイトル行も描かず、素の cmd と同じ見た目にする
             // (Ctrl+C×2 でシェルへ戻した後の水色の枠が邪魔、というフィードバック)。
-            // Claude ペインは細線の枠 (pane_block) + " [id] フォルダ名 " タイトル
+            // Claude ペインは枠 (pane_block) + " [id] フォルダ名 " タイトル
             // (exe 名ではなく cwd の最後のフォルダ名。pane_title 参照)。
             let inner = match pane_frame_style(claude, is_focus, theme) {
                 Some(border_style) => {
@@ -1202,10 +1194,10 @@ mod tests {
 
     // ---- main layout ---------------------------------------------------------
 
-    /// メイン列の縦割り: タブバー 1 行 → 空き 1 行 → ペイン領域 → ステータスバー 2 行。
-    /// 空き行のぶんオレンジの上枠と " [id] フォルダ名 " タイトルがタブ行から 1 行下がる。
+    /// メイン列の縦割り: タブバー 1 行 → ペイン領域 → ステータスバー 2 行。ペインの上枠は
+    /// タブ行の真下 (空き行は入れない。v0.1.16 の空き行 1 行は本人判断で撤回)。
     #[test]
-    fn main_layout_leaves_one_blank_row_below_tabbar() {
+    fn main_layout_puts_panes_right_below_tabbar() {
         let area = Rect {
             x: 21,
             y: 0,
@@ -1222,8 +1214,8 @@ mod tests {
                 height: 1
             }
         );
-        assert_eq!(panes.y, 2, "row 1 is the blank gap below the tab bar");
-        assert_eq!((panes.x, panes.width, panes.height), (21, 100, 26));
+        assert_eq!(panes.y, 1, "the pane frame starts right below the tab bar");
+        assert_eq!((panes.x, panes.width, panes.height), (21, 100, 27));
         assert_eq!(
             status,
             Rect {
@@ -1235,7 +1227,7 @@ mod tests {
         );
     }
 
-    /// 領域は重ならず、上から順に隙間なく並ぶ (空き行は tabbar と panes の間だけ)。
+    /// 領域は重ならず、上から順に隙間なく並ぶ (空き行なし)。
     #[test]
     fn main_layout_rows_are_contiguous_at_various_heights() {
         for h in [10u16, 24, 30, 60] {
@@ -1246,7 +1238,7 @@ mod tests {
                 height: h,
             };
             let (tabbar, panes, status) = main_layout(area);
-            assert_eq!(panes.y, tabbar.y + tabbar.height + 1, "h={h}");
+            assert_eq!(panes.y, tabbar.y + tabbar.height, "h={h}");
             assert_eq!(status.y, panes.y + panes.height, "h={h}");
             assert_eq!(status.y + status.height, h, "h={h}");
         }
@@ -1304,10 +1296,9 @@ mod tests {
         assert!(!top.contains(".exe"), "top border: {top:?}");
     }
 
-    /// 枠は McGugan 式の細線 (ONE_EIGHTH_TALL)。上辺 ▔ は行の上端 (箱線 ─ より半行上) で
-    /// タイトルの後ろに続き、左右は内側の縁の ▕ ▏、下辺 ▁ は行の下端。
+    /// 枠は通常の箱線 (┌ ─ ┐ │ └ ┘)。v0.1.17 の細線 (1/8 ブロック) は本人判断で撤回。
     #[test]
-    fn pane_block_draws_one_eighth_tall_lines() {
+    fn pane_block_draws_plain_box_lines() {
         use ratatui::backend::TestBackend;
         use ratatui::Terminal;
         let cwd = Path::new(r"C:\Users\mitam\Desktop\work\30_XTP3");
@@ -1322,10 +1313,10 @@ mod tests {
         .unwrap();
         let buf = term.backend().buffer();
         let row = |y: u16| (0..24).map(|x| buf[(x, y)].symbol()).collect::<String>();
-        assert_eq!(row(0), "▕ [1] 30_XTP3 ▔▔▔▔▔▔▔▔▔▏");
-        assert_eq!(row(1), "▕                      ▏");
-        assert_eq!(row(2), "▕                      ▏");
-        assert_eq!(row(3), "▕▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▏");
+        assert_eq!(row(0), "┌ [1] 30_XTP3 ─────────┐");
+        assert_eq!(row(1), "│                      │");
+        assert_eq!(row(2), "│                      │");
+        assert_eq!(row(3), "└──────────────────────┘");
         // 線もフォルダ名も枠の色 (フォーカス中はオレンジ)。
         assert_eq!(buf[(0, 0)].fg, theme.border_claude.fg.unwrap());
         assert_eq!(buf[(14, 0)].fg, theme.border_claude.fg.unwrap());
@@ -1512,3 +1503,8 @@ mod tests {
 //                       edge ▔ sits on the top of its row, half a row higher than
 //                       the old box-drawing ─, with the folder-name title just
 //                       below it; sides ▕ ▏ on the inner edges, bottom ▁.
+// ver0.13 - 2026-09-27 - Reverted ver0.11 and ver0.12 per user feedback (the gap
+//                       and the thin lines looked odd): no blank row under the
+//                       tab bar and the plain box-drawing frame again, i.e. the
+//                       ver0.10 look with the folder-name title. main_layout() and
+//                       pane_block() stay as pure, tested helpers.
