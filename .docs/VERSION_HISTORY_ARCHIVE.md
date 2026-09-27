@@ -5,6 +5,34 @@
 
 ---
 
+## 2026-09-27 — 空き行と細線枠を撤回して v0.1.15 の見た目に戻す（v0.1.18）
+
+ブランチ: `fix/restore-pane-frame-look`
+
+### 背景
+
+v0.1.17（細線枠・空き行 1 行）を実機で見た本人から「微妙だったから空き行なし、設定も元に戻して」
+「線も元に戻して」。タブ行の真下に通常の箱線の枠と「[1] フォルダ名」が来る v0.1.15 の見た目に戻す。
+枠タイトルのフォルダ名表示（v0.1.15）はそのまま。
+
+### 変更点
+
+| ファイル | ver | 内容 |
+|---|---|---|
+| src/ui/mod.rs | 0.13 | `main_layout` から空き行（`TABBAR_GAP_ROWS`）を削除、`pane_block` から `border_set(ONE_EIGHTH_TALL)` を削除。描画は v0.1.15 と同じ（縦割り 1 / Min(3) / 2、`Borders::ALL` の箱線）。純関数 2 つとテストは残す |
+| README.md | - | Version History |
+| Cargo.toml | - | 0.1.17 → 0.1.18 |
+
+教訓: 行単位の端末で「半行」を 1/8 ブロックで擬似的に作ると、枠全体の線種が変わって見た目の印象が大きく変わる。
+見た目の微調整はプレビューだけでなく実機で並べて見てもらってから確定する。
+
+### 検証
+
+- `cargo test --all` 252 件緑（`main_layout_puts_panes_right_below_tabbar` / `main_layout_rows_are_contiguous_at_various_heights`
+  を空き行なしに、`pane_block_draws_plain_box_lines` で上辺 `┌ [1] 30_XTP3 ─────────┐`・側面・下辺と色を検証）、
+  `cargo clippy --all-targets -- -D warnings` 警告なし。v0.1.15（`7d75099`）との差分はコメント・関数の切り出し・テストのみ
+- 実機: Windows Terminal の新規ウィンドウで `ccnest C:\Users\mitam\Desktop\work\30_XTP3` を起動しスクリーンショットで確認
+
 ## 2026-09-27 — ペイン枠を細線（McGugan 式）にして上辺を半行上げる（v0.1.17）
 
 ブランチ: `feature/pane-border-one-eighth`
