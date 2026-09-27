@@ -5,6 +5,40 @@
 
 ---
 
+## 2026-09-27 — ペイン枠のタイトルを exe 名からフォルダ名へ（v0.1.15）
+
+ブランチ: `feature/pane-title-folder-name`
+
+### 背景
+
+Claude ペインの枠タイトルが「[1] ccnest-claude-launcher.exe」になっていた。`Pane.command`（spawn した
+実行ファイル名）をそのまま出しており、実運用では `CCNEST_CLAUDE_BIN` のシム名になるため、どのプロジェクトの
+ペインか枠だけでは分からない。「フォルダパスの名前にしてほしい」という本人依頼。表示形式は
+「~ 短縮パス／フォルダ名だけ／フルパス」の 3 択で確認し、**フォルダ名だけ**（`[1] 30_XTP3`）に決定。
+
+### 変更点
+
+| ファイル | ver | 内容 |
+|---|---|---|
+| src/ui/mod.rs | 0.10 | 純関数 `pane_title(pid, cwd)` = `" [id] {folder_title(cwd)} "`（タブ初期名と同じ `app::folder_title` を再利用）。`render_layout` の Claude ペイン枠タイトルを `p.command` からこれに差し替え。`(gone)` フォールバックは据え置き |
+| docs/index.html | 0.6 | モックアップのペインタイトル `[1] claude.exe` / `[2] claude.exe` → `[1] ccnest` / `[2] ccnest` |
+| README.md | - | Version History |
+| Cargo.toml | - | 0.1.14 → 0.1.15 |
+
+`Pane.cwd` は spawn 時に固定（split／新タブは親ペインの cwd を継承）で、ステータスバーの `cwd:` と同じ値。
+シェルペインは v0.1.14 から枠もタイトルも描かないので影響なし。サイドバーの Panes 行は `command`
+表示のまま（cwd を括弧で併記済み）。
+
+申し送り: README の「`F2` でタブ名変更」は実装が `Alt+F`（keymap.rs）でズレている（今回は対象外）。
+
+### 検証
+
+- `cargo test --all` 249 件緑（新規 `pane_title_shows_folder_name_not_exe` /
+  `pane_title_falls_back_to_full_path_at_drive_root` / `pane_frame_renders_folder_title_in_top_border`）、
+  `cargo clippy --all-targets -- -D warnings` 警告なし
+- 実機: conhost 独立窓で `ccnest C:\Users\mitam\Desktop\work\30_XTP3` を起動しスクリーンショットで確認
+  （上枠が「[1] 30_XTP3」）
+
 ## 2026-09-26 — シェルペインの枠線とタイトル行を描かない（v0.1.14）
 
 ブランチ: `feature/shell-pane-no-border`
