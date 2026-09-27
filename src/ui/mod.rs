@@ -2,6 +2,7 @@ pub mod cursor;
 pub mod theme;
 
 use std::collections::HashMap;
+use std::path::Path;
 
 use ratatui::buffer::Buffer;
 use ratatui::layout::{Constraint, Direction as LDir, Layout as LLayout, Rect};
@@ -10,7 +11,7 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Clear, Paragraph, Widget};
 use ratatui::Frame;
 
-use crate::app::{App, Rect as AppRect};
+use crate::app::{folder_title, App, Rect as AppRect};
 use crate::pane::grid::{Layout, SplitDir};
 use crate::pane::status::{aggregate_status, status_marker, ClaudeStatus};
 use crate::pane::PaneId;
@@ -629,6 +630,13 @@ fn pane_frame_style(claude: bool, is_focus: bool, theme: &theme::Theme) -> Optio
     })
 }
 
+/// 純粋: ペイン枠のタイトル。spawn した exe 名 (`Pane.command`、実運用では
+/// CCNEST_CLAUDE_BIN のシム名 "ccnest-claude-launcher.exe") ではなく、cwd の
+/// 最後のフォルダ名 (タブ初期名と同じ `folder_title`) を出す。
+fn pane_title(pid: PaneId, cwd: &Path) -> String {
+    format!(" [{pid}] {} ", folder_title(cwd))
+}
+
 fn draw_panes(
     app: &App,
     frame: &mut Frame<'_>,
@@ -668,13 +676,14 @@ fn render_layout(
                 .unwrap_or(false);
             // シェルペインは枠線もタイトル行も描かず、素の cmd と同じ見た目にする
             // (Ctrl+C×2 でシェルへ戻した後の水色の枠が邪魔、というフィードバック)。
-            // Claude ペインは従来どおり枠 + " [id] command " タイトル。
+            // Claude ペインは従来どおり枠 + " [id] フォルダ名 " タイトル
+            // (exe 名ではなく cwd の最後のフォルダ名。pane_title 参照)。
             let inner = match pane_frame_style(claude, is_focus, theme) {
                 Some(border_style) => {
                     let title = app
                         .panes
                         .get(pid)
-                        .map(|p| format!(" [{}] {} ", pid, p.command))
+                        .map(|p| pane_title(*pid, &p.cwd))
                         .unwrap_or_else(|| format!(" [{pid}] (gone) "));
                     let block = Block::default()
                         .borders(Borders::ALL)
@@ -1185,6 +1194,40 @@ mod tests {
         assert_eq!(pane_frame_style(true, false, &t), Some(t.border_idle));
     }
 
+    // ペイン枠のタイトルは spawn した exe 名 (Pane.command) ではなく cwd の最後の
+    // フォルダ名 (タブ初期名と同じ folder_title)。
+    #[test]
+    fn pane_title_shows_folder_name_not_exe() {
+        let cwd = Path::new(r"C:\Users\mitam\Desktop\work\30_XTP3");
+        assert_eq!(pane_title(1, cwd), " [1] 30_XTP3 ");
+    }
+
+    // ドライブ直下など file_name が無いパスは folder_title のフォールバック (フルパス)。
+    #[test]
+    fn pane_title_falls_back_to_full_path_at_drive_root() {
+        assert_eq!(pane_title(2, Path::new(r"C:\")), r" [2] C:\ ");
+    }
+
+    /// 実際に枠を描いた上辺 (0 行目) にフォルダ名のタイトルが載り、exe 名が出ないこと。
+    #[test]
+    fn pane_frame_renders_folder_title_in_top_border() {
+        use ratatui::backend::TestBackend;
+        use ratatui::Terminal;
+        let cwd = Path::new(r"C:\Users\mitam\Desktop\work\30_XTP3");
+        let mut term = Terminal::new(TestBackend::new(40, 3)).unwrap();
+        term.draw(|f| {
+            let block = Block::default()
+                .borders(Borders::ALL)
+                .title(pane_title(1, cwd));
+            f.render_widget(block, f.area());
+        })
+        .unwrap();
+        let buf = term.backend().buffer();
+        let top: String = (0..40).map(|x| buf[(x, 0)].symbol()).collect();
+        assert!(top.contains("[1] 30_XTP3"), "top border: {top:?}");
+        assert!(!top.contains(".exe"), "top border: {top:?}");
+    }
+
     // ---- tab label ---------------------------------------------------------
 
     // タスクがあれば「N:タスク」形式になる
@@ -1352,3 +1395,7 @@ mod tests {
 //                       restarted as a shell (Ctrl+C x2) looks like a plain
 //                       console; pure pane_frame_style() decides (Claude panes
 //                       keep border_claude / border_idle).
+// ver0.10 - 2026-09-27 - Pane frame title shows the cwd folder name
+//                       (" [id] folder ", pure pane_title() via app::folder_title)
+//                       instead of the spawned exe name, which in practice was the
+//                       CCNEST_CLAUDE_BIN shim ("ccnest-claude-launcher.exe").
