@@ -49,17 +49,10 @@ pub fn draw(
         draw_sidebar(app, frame, area, &theme, sidebar_file_rect);
     }
 
-    let vert = LLayout::default()
-        .direction(LDir::Vertical)
-        .constraints([
-            Constraint::Length(1),
-            Constraint::Min(3),
-            Constraint::Length(2),
-        ])
-        .split(main_area);
-    draw_tabbar(app, frame, vert[0], &theme, tab_rects);
-    draw_panes(app, frame, vert[1], pane_rects, &theme);
-    draw_statusbar(app, frame, vert[2], &theme);
+    let (tabbar_area, panes_area, status_area) = main_layout(main_area);
+    draw_tabbar(app, frame, tabbar_area, &theme, tab_rects);
+    draw_panes(app, frame, panes_area, pane_rects, &theme);
+    draw_statusbar(app, frame, status_area, &theme);
 
     // コンテキストメニューは最後に描いて最前面に重ねる。実際に描いた矩形を
     // イベント側へ返し、マウスヒットテストは常に「画面に出ているもの」と
@@ -68,6 +61,26 @@ pub fn draw(
     if let Some(menu) = &app.context_menu {
         *menu_rect = Some(draw_context_menu(menu, frame, size, &theme));
     }
+}
+
+/// タブバーとペイン領域の間の空き行数。ペインの上枠 (オレンジ線と
+/// " [id] フォルダ名 " タイトル) がタブ行に貼り付かないようにする。
+const TABBAR_GAP_ROWS: u16 = 1;
+
+/// 純粋: メイン列 (サイドバーの右) の縦割り。上から タブバー 1 行 /
+/// 空き `TABBAR_GAP_ROWS` 行 / ペイン領域 (残り全部) / ステータスバー 2 行。
+/// 返り値は (タブバー, ペイン領域, ステータスバー)。空き行は何も描かない。
+fn main_layout(area: Rect) -> (Rect, Rect, Rect) {
+    let vert = LLayout::default()
+        .direction(LDir::Vertical)
+        .constraints([
+            Constraint::Length(1),
+            Constraint::Length(TABBAR_GAP_ROWS),
+            Constraint::Min(3),
+            Constraint::Length(2),
+        ])
+        .split(area);
+    (vert[0], vert[2], vert[3])
 }
 
 /// クリックセル (ax, ay) を基準に、端末 (term_w × term_h) 内へ必ず収まる
@@ -1177,6 +1190,58 @@ mod tests {
         }
     }
 
+    // ---- main layout ---------------------------------------------------------
+
+    /// メイン列の縦割り: タブバー 1 行 → 空き 1 行 → ペイン領域 → ステータスバー 2 行。
+    /// 空き行のぶんオレンジの上枠と " [id] フォルダ名 " タイトルがタブ行から 1 行下がる。
+    #[test]
+    fn main_layout_leaves_one_blank_row_below_tabbar() {
+        let area = Rect {
+            x: 21,
+            y: 0,
+            width: 100,
+            height: 30,
+        };
+        let (tabbar, panes, status) = main_layout(area);
+        assert_eq!(
+            tabbar,
+            Rect {
+                x: 21,
+                y: 0,
+                width: 100,
+                height: 1
+            }
+        );
+        assert_eq!(panes.y, 2, "row 1 is the blank gap below the tab bar");
+        assert_eq!((panes.x, panes.width, panes.height), (21, 100, 26));
+        assert_eq!(
+            status,
+            Rect {
+                x: 21,
+                y: 28,
+                width: 100,
+                height: 2
+            }
+        );
+    }
+
+    /// 領域は重ならず、上から順に隙間なく並ぶ (空き行は tabbar と panes の間だけ)。
+    #[test]
+    fn main_layout_rows_are_contiguous_at_various_heights() {
+        for h in [10u16, 24, 30, 60] {
+            let area = Rect {
+                x: 0,
+                y: 0,
+                width: 80,
+                height: h,
+            };
+            let (tabbar, panes, status) = main_layout(area);
+            assert_eq!(panes.y, tabbar.y + tabbar.height + 1, "h={h}");
+            assert_eq!(status.y, panes.y + panes.height, "h={h}");
+            assert_eq!(status.y + status.height, h, "h={h}");
+        }
+    }
+
     // ---- pane frame ---------------------------------------------------------
 
     /// シェルペインは枠なし (フォーカス有無によらず None)。Claude ペインはフォーカス中が
@@ -1399,3 +1464,7 @@ mod tests {
 //                       (" [id] folder ", pure pane_title() via app::folder_title)
 //                       instead of the spawned exe name, which in practice was the
 //                       CCNEST_CLAUDE_BIN shim ("ccnest-claude-launcher.exe").
+// ver0.11 - 2026-09-27 - One blank row (TABBAR_GAP_ROWS) between the tab bar and
+//                       the pane area, so the orange top border and its
+//                       " [id] folder " title no longer sit right under the tab
+//                       row. The vertical split lives in the pure main_layout().
