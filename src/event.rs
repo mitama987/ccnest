@@ -2049,7 +2049,9 @@ fn open_url(url: &str) {
 }
 
 /// 選択範囲内のテキストを vt100 スクリーンから抜き出す。行末のスペースは
-/// trim し、行間は '\n' で結合。
+/// trim し、行間は '\n' で結合。ただし端末のソフトラップ行と、アプリ
+/// (Claude Code 等) が長いパス・URL を右端で割っただけの行 (`app_wrapped`) は
+/// 改行を挟まずにつなぐ。
 ///
 /// 選択行はバッファ絶対座標なので、各行を「その行が画面 y=0 に来る scrollback
 /// offset」で可視化しながら読み取り、抜き出し終わったら元の offset に復元する。
@@ -2080,10 +2082,10 @@ fn extract_selected_text_from_parser(
     let total = parser.screen().total_scrolled_off() as i64;
     let (start, end) = normalize_range(sel.anchor, sel.cursor);
 
-    // (text, wrapped_to_next): wrapped_to_next が true の行は次行と
+    // 行ごとの抽出結果と連結判定用の形。soft_wrapped の行は次行と
     // ソフトラップで連結しているので、コピー時に '\n' を挟まず、末尾の
     // trim_end も行わない (URL 末尾文字が削れないように)。
-    let mut rows: Vec<(String, bool)> = Vec::new();
+    let mut rows: Vec<RowShape> = Vec::new();
     let mut row = start.1;
 
     // 各反復で「abs 行 row が画面 y=0 に来るような scrollback offset」をセットし、
@@ -2185,7 +2187,12 @@ fn extract_selected_text_from_parser(
             } else {
                 line
             };
-            rows.push((line, wrapped_to_next));
+            rows.push(RowShape {
+                text: line,
+                soft_wrapped: wrapped_to_next,
+                at_row_end,
+                traits: app_wrap_traits(screen, y_u16),
+            });
             row = our_row + 1;
             progressed = true;
             y += 1;
@@ -2198,22 +2205,175 @@ fn extract_selected_text_from_parser(
 
     parser.set_scrollback(saved_scrollback);
 
-    // ソフトラップ行は改行・末尾trim無しで結合。それ以外は trim_end + '\n'。
+    // ソフトラップ行は改行・末尾trim無しで結合。アプリ折り返し行は末尾の余白と
+    // 次行の字下げを落として改行無しで結合。それ以外は trim_end + '\n'。
     let mut out = String::new();
-    let last_idx = rows.len().saturating_sub(1);
-    for (i, (line, wrapped)) in rows.iter().enumerate() {
-        let is_last = i == last_idx;
-        if *wrapped {
+    let mut strip_indent = false;
+    for (i, row) in rows.iter().enumerate() {
+        let line = if strip_indent {
+            row.text.trim_start()
+        } else {
+            row.text.as_str()
+        };
+        strip_indent = false;
+        let next = rows.get(i + 1);
+        if row.soft_wrapped {
             // 折り返し行: 末尾の URL/英数字が削れないよう trim せず連結し、改行も挟まない。
             out.push_str(line);
+        } else if next.is_some_and(|n| app_wrapped(row, n)) {
+            out.push_str(line.trim_end());
+            strip_indent = true;
         } else {
             out.push_str(line.trim_end());
-            if !is_last {
+            if next.is_some() {
                 out.push('\n');
             }
         }
     }
     out
+}
+
+/// アプリ折り返しの判定で「右端に届いた」とみなす許容幅 (列数)。
+///
+/// Claude Code は長い行を端末の自動折り返しに任せず、自分で幅を計算して
+/// 改行と字下げを出力する (ConPTY 経由では `CR` + `CSI n C` + `CSI 1 B`)。
+/// 実測 (Claude Code v2.1.289 / 89 桁): 応答本文は右端の列まで埋めて割り、
+/// 入力欄のエコーは右に 1 桁空けて割る。全角文字が残り 1 桁に入らず次行へ
+/// 送られる分をさらに +1 して 2 とする。
+const APP_WRAP_EDGE_SLACK: u16 = 2;
+
+/// コピー時の 1 行ぶんの抽出結果と、次行との連結判定に使う形。
+struct RowShape {
+    text: String,
+    /// 端末のソフトラップ (row_wrapped / 遅延ワイドラップ) で次行へ続く。
+    soft_wrapped: bool,
+    /// 選択範囲が行の右端まで届いている (範囲の終端で切れていない)。
+    at_row_end: bool,
+    traits: AppWrapTraits,
+}
+
+/// 画面の 1 行を見て決まる、アプリ折り返し判定用の特徴。隣の行は見ないので、
+/// scrollback を窓ごとに読む抽出ループの境目でも同じ結果になる。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct AppWrapTraits {
+    /// 最後の非空白セルが右端から APP_WRAP_EDGE_SLACK 列以内にある。
+    reaches_edge: bool,
+    /// 行末の語 (空白を含まない文字の並び) が、割られた長い文字列らしい。
+    /// 英数字か CJK を含み、かつ「行の本文の先頭から始まる 1 語」か
+    /// 「`\` か `/` を含む (パス・URL)」。
+    tail_splittable: bool,
+    /// 行頭の空白セル数。
+    lead_ws: u16,
+    /// 前の行の続きとして連結してはいけない行頭 (空行・箇条書き記号・
+    /// 新しいパス/URL の始まり)。
+    head_blocks_join: bool,
+}
+
+/// 行 a の末尾と行 b の先頭が、アプリ (Claude Code 等) が長い語を右端で
+/// 割っただけの「見た目の改行」かどうか。
+fn app_wrapped(a: &RowShape, b: &RowShape) -> bool {
+    !a.soft_wrapped
+        && a.at_row_end
+        && a.traits.reaches_edge
+        && a.traits.tail_splittable
+        && !b.traits.head_blocks_join
+        && b.traits.lead_ws >= a.traits.lead_ws
+}
+
+/// 行 y のアプリ折り返し判定用の特徴を画面セルから求める。
+fn app_wrap_traits(screen: &vt100::Screen, y: u16) -> AppWrapTraits {
+    let (_, cols) = screen.size();
+    // 列ごとの文字。空セル / 空白は None、全角の 2 セル目は直前の文字と同じ語の一部。
+    let cells: Vec<Option<char>> = (0..cols)
+        .map(|x| match screen.cell(y, x) {
+            Some(c) if c.is_wide_continuation() => Some('\0'),
+            Some(c) => c.contents().chars().next().filter(|ch| !ch.is_whitespace()),
+            None => None,
+        })
+        .collect();
+    let blank = AppWrapTraits {
+        reaches_edge: false,
+        tail_splittable: false,
+        lead_ws: cols,
+        head_blocks_join: true,
+    };
+    let Some(first) = cells.iter().position(Option::is_some) else {
+        return blank;
+    };
+    let last = cells.iter().rposition(Option::is_some).unwrap_or(first);
+
+    // 行末の語 [tail_start, last]。
+    let tail_start = cells[..=last]
+        .iter()
+        .rposition(Option::is_none)
+        .map_or(0, |p| p + 1);
+    let tail: Vec<char> = cells[tail_start..=last]
+        .iter()
+        .flatten()
+        .copied()
+        .filter(|&c| c != '\0')
+        .collect();
+    let body_start = skip_list_markers(&cells, first);
+    let tail_splittable = tail.iter().any(|c| c.is_alphanumeric())
+        && (tail_start == body_start || tail.iter().any(|&c| c == '\\' || c == '/'));
+
+    AppWrapTraits {
+        reaches_edge: last as u16 + 1 + APP_WRAP_EDGE_SLACK >= cols,
+        tail_splittable,
+        lead_ws: first as u16,
+        head_blocks_join: body_start != first || starts_new_path(&cells[first..]),
+    }
+}
+
+/// 行頭の箇条書き記号 (`●` `-` `*` `⎿` `│` などの 1 文字記号、または `1.` `12)`
+/// のような番号) とその後ろの空白を飛ばし、本文が始まる列を返す。記号が
+/// 無ければ `first` をそのまま返す。`⎿  - item` のような重ね書きも飛ばす。
+fn skip_list_markers(cells: &[Option<char>], first: usize) -> usize {
+    let mut pos = first;
+    loop {
+        // 語 [pos, end) を取り出す。
+        let end = cells[pos..]
+            .iter()
+            .position(Option::is_none)
+            .map_or(cells.len(), |p| pos + p);
+        if end == cells.len() {
+            // 後ろに空白が無い = 記号＋空白の形ではない。
+            return pos;
+        }
+        let word: Vec<char> = cells[pos..end]
+            .iter()
+            .flatten()
+            .copied()
+            .filter(|&c| c != '\0')
+            .collect();
+        let is_symbol = word.len() == 1 && !word[0].is_alphanumeric();
+        let is_number = word.len() >= 2
+            && matches!(word[word.len() - 1], '.' | ')')
+            && word[..word.len() - 1].iter().all(|c| c.is_ascii_digit());
+        if !(is_symbol || is_number) {
+            return pos;
+        }
+        match cells[end..].iter().position(Option::is_some) {
+            Some(p) => pos = end + p,
+            None => return pos,
+        }
+    }
+}
+
+/// 行頭が新しいパス / URL の始まり (`C:\` `C:/` `\\server` `http://` `https://`)。
+/// 割られた長い語の続きがこの形で始まることはまず無いので、長いパスを 1 行ずつ
+/// 並べた一覧を誤ってつながないための目印に使う。
+fn starts_new_path(cells: &[Option<char>]) -> bool {
+    let head: String = cells
+        .iter()
+        .take(8)
+        .map_while(|c| *c)
+        .filter(|&c| c != '\0')
+        .collect();
+    let b = head.as_bytes();
+    let drive =
+        b.len() >= 3 && b[0].is_ascii_alphabetic() && b[1] == b':' && matches!(b[2], b'\\' | b'/');
+    drive || head.starts_with("\\\\") || head.starts_with("http://") || head.starts_with("https://")
 }
 
 /// 行 y の「実テキスト範囲」を返す。
@@ -3190,6 +3350,176 @@ mod tests {
         );
     }
 
+    /// アプリ折り返しテスト用の選択 (anchor から cursor まで)。
+    fn sel_range(anchor: (u16, i64), cursor: (u16, i64)) -> crate::app::Selection {
+        crate::app::Selection {
+            pane_id: 1,
+            anchor,
+            cursor,
+            dragging: false,
+            auto_scroll: 0,
+            alt: false,
+            grid_gen: 0,
+        }
+    }
+
+    /// Claude Code が ConPTY 越しに送ってくる「自前の改行」。実測 (v2.1.289) では
+    /// 右端まで埋めた行のあと `CR` + `CSI 2 C` (字下げ分だけ右へ) + `CSI 1 B`
+    /// (1 行下へ) で次行に移る。LF も自動折り返しも使わないので row_wrapped は立たない。
+    const CLAUDE_NEXT_ROW: &str = "\r\x1b[2C\x1b[1B";
+
+    const LONG_PATH: &str =
+        "C:\\work\\received_logs\\a00138_20260930_2348\\follow_list_fetch_ui_e2e\\20261004_112643\\";
+
+    /// ユーザー報告そのもの: 字下げ 2 桁の段落で、長いパスが右端で割られて
+    /// 次行も字下げ 2 桁で続く。改行と字下げを入れずに 1 本のパスとしてコピーする。
+    #[test]
+    fn extract_selected_text_joins_app_wrapped_path() {
+        let mut parser = vt100::Parser::new(6, 48, 100);
+        let (head, tail) = LONG_PATH.split_at(46);
+        parser.process(format!("  {head}\r\n  {tail}").as_bytes());
+        assert!(
+            !parser.screen().row_wrapped(0),
+            "前提: アプリの改行は row_wrapped にならない"
+        );
+        let text = extract_selected_text_from_parser(&mut parser, sel_range((0, 0), (47, 1)));
+        assert_eq!(text, format!("  {LONG_PATH}"));
+    }
+
+    /// 応答本文の 1 行目 (`● ` 付き) から割れたパス。ConPTY の実バイト列
+    /// (CR + CSI C + CSI B) で次行へ移る形でもつながる。
+    #[test]
+    fn extract_selected_text_joins_claude_bullet_path_via_cursor_moves() {
+        let mut parser = vt100::Parser::new(6, 48, 100);
+        let (head, tail) = LONG_PATH.split_at(46);
+        parser.process(format!("● {head}{CLAUDE_NEXT_ROW}{tail}").as_bytes());
+        let text = extract_selected_text_from_parser(&mut parser, sel_range((0, 0), (47, 1)));
+        assert_eq!(text, format!("● {LONG_PATH}"));
+    }
+
+    /// 「保存先: C:\...」のようにラベルの後ろから始まり右端で割れたパス
+    /// (全角のラベル付き)。
+    #[test]
+    fn extract_selected_text_joins_app_wrapped_path_after_label() {
+        let mut parser = vt100::Parser::new(6, 48, 100);
+        // "  保存先: " は 2 + 6 + 2 = 10 桁。残り 38 桁をパスで埋める。
+        let (head, tail) = LONG_PATH.split_at(38);
+        parser.process(format!("  保存先: {head}\r\n  {tail}").as_bytes());
+        let text = extract_selected_text_from_parser(&mut parser, sel_range((0, 0), (47, 1)));
+        assert_eq!(text, format!("  保存先: {LONG_PATH}"));
+    }
+
+    /// 箇条書きの中で割れたパス。続きの行は箇条書きの本文位置 (4 桁) に揃う。
+    #[test]
+    fn extract_selected_text_joins_app_wrapped_path_in_list_item() {
+        let mut parser = vt100::Parser::new(6, 50, 100);
+        // "  - item " は 9 桁。残り 41 桁。
+        let (head, tail) = LONG_PATH.split_at(41);
+        parser.process(format!("  - item {head}{CLAUDE_NEXT_ROW}  {tail}").as_bytes());
+        let text = extract_selected_text_from_parser(&mut parser, sel_range((0, 0), (49, 1)));
+        assert_eq!(text, format!("  - item {LONG_PATH}"));
+    }
+
+    /// 3 行以上に割れたパスも順につながる。
+    #[test]
+    fn extract_selected_text_joins_path_split_over_three_rows() {
+        let mut parser = vt100::Parser::new(6, 30, 100);
+        let (a, rest) = LONG_PATH.split_at(28);
+        let (b, c) = rest.split_at(28);
+        parser.process(format!("  {a}\r\n  {b}\r\n  {c}").as_bytes());
+        let text = extract_selected_text_from_parser(&mut parser, sel_range((0, 0), (29, 2)));
+        assert_eq!(text, format!("  {LONG_PATH}"));
+    }
+
+    /// 入力エコーは右に 1 桁余白を残して割られる (実測)。右端から 1 桁内側で
+    /// 割れた行もつながる。
+    #[test]
+    fn extract_selected_text_joins_path_wrapped_one_column_short() {
+        let mut parser = vt100::Parser::new(6, 48, 100);
+        let (head, tail) = LONG_PATH.split_at(45);
+        parser.process(format!("  {head}\r\n  {tail}").as_bytes());
+        let text = extract_selected_text_from_parser(&mut parser, sel_range((0, 0), (47, 1)));
+        assert_eq!(text, format!("  {LONG_PATH}"));
+    }
+
+    /// scrollback の読み取り窓の境目 (A が窓の最終行、B が次の窓の先頭) を
+    /// またいでも判定が崩れない。
+    #[test]
+    fn extract_selected_text_joins_app_wrap_across_scrollback_window() {
+        let mut parser = vt100::Parser::new(3, 48, 100);
+        let (head, tail) = LONG_PATH.split_at(46);
+        // abs 0 = x1, abs 1 = x2, abs 2 = パス前半, abs 3 = パス後半, 以降は押し出し用。
+        parser.process(format!("x1\r\nx2\r\n  {head}\r\n  {tail}\r\nx3\r\nx4\r\nx5").as_bytes());
+        assert!(parser.screen().total_scrolled_off() >= 4);
+        let text = extract_selected_text_from_parser(&mut parser, sel_range((0, 0), (47, 3)));
+        assert_eq!(text, format!("x1\nx2\n  {LONG_PATH}"));
+    }
+
+    /// 回帰: 箇条書きの次の項目は別の行として改行を残す。
+    #[test]
+    fn extract_selected_text_keeps_newline_before_next_list_item() {
+        let mut parser = vt100::Parser::new(6, 40, 100);
+        let first = format!("  - {}", &LONG_PATH[..36]);
+        parser.process(format!("{first}\r\n  - next item").as_bytes());
+        let text = extract_selected_text_from_parser(&mut parser, sel_range((0, 0), (39, 1)));
+        assert_eq!(text, format!("{first}\n  - next item"));
+    }
+
+    /// 回帰: 長いパスを 1 行ずつ並べた一覧は、次行が新しいパスの始まり
+    /// (`C:\`) なのでつながない。
+    #[test]
+    fn extract_selected_text_keeps_newline_between_listed_paths() {
+        let mut parser = vt100::Parser::new(6, 40, 100);
+        let p1 = "  C:\\work\\out\\20261004\\shots\\before1.png";
+        let p2 = "  C:\\work\\out\\20261004\\shots\\after01.png";
+        assert_eq!(p1.len(), 40, "前提: 1 行目は右端まで埋まる");
+        parser.process(format!("{p1}\r\n{p2}").as_bytes());
+        let text = extract_selected_text_from_parser(&mut parser, sel_range((0, 0), (39, 1)));
+        assert_eq!(text, format!("{p1}\n{p2}"));
+    }
+
+    /// 回帰: 右端に届かない行 (普通の改行) はつながない。
+    #[test]
+    fn extract_selected_text_keeps_newline_for_short_path_line() {
+        let mut parser = vt100::Parser::new(6, 40, 100);
+        parser.process(b"  see C:\\work\\a.txt\r\n  b.txt is next");
+        let text = extract_selected_text_from_parser(&mut parser, sel_range((0, 0), (39, 1)));
+        assert_eq!(text, "  see C:\\work\\a.txt\n  b.txt is next");
+    }
+
+    /// 回帰: 罫線だけの行 (英数字なし) は右端まで届いてもつながない。
+    #[test]
+    fn extract_selected_text_keeps_newline_after_rule_line() {
+        let mut parser = vt100::Parser::new(6, 40, 100);
+        let rule = "─".repeat(40);
+        parser.process(format!("{rule}{CLAUDE_NEXT_ROW}text").as_bytes());
+        let text = extract_selected_text_from_parser(&mut parser, sel_range((0, 0), (39, 1)));
+        assert_eq!(text, format!("{rule}\n  text"));
+    }
+
+    /// 回帰: 字下げが浅くなる次行は別のブロックとみなしてつながない。
+    #[test]
+    fn extract_selected_text_keeps_newline_when_indent_decreases() {
+        let mut parser = vt100::Parser::new(6, 40, 100);
+        let (head, _) = LONG_PATH.split_at(36);
+        parser.process(format!("    {head}\r\n  next block").as_bytes());
+        let text = extract_selected_text_from_parser(&mut parser, sel_range((0, 0), (39, 1)));
+        assert_eq!(text, format!("    {head}\n  next block"));
+    }
+
+    /// 回帰: 英文の単語折り返し (行末の単語がパスでも行頭からの 1 語でもない)
+    /// はつながない。
+    #[test]
+    fn extract_selected_text_keeps_newline_for_word_wrapped_prose() {
+        let mut parser = vt100::Parser::new(6, 40, 100);
+        let line = "  the quick brown fox jumps over a lazy";
+        let line = format!("{line}x"); // 40 桁ちょうどにする
+        assert_eq!(line.len(), 40);
+        parser.process(format!("{line}\r\n  dog and keeps running").as_bytes());
+        let text = extract_selected_text_from_parser(&mut parser, sel_range((0, 0), (39, 1)));
+        assert_eq!(text, format!("{line}\n  dog and keeps running"));
+    }
+
     fn mi(enabled: bool) -> crate::app::MenuItem {
         crate::app::MenuItem {
             label: "テスト",
@@ -3816,3 +4146,10 @@ mod tests {
 //                       app.quit is set, so no queued event or pending-arrow
 //                       flush touches current_tab() with zero tabs.
 //                       CCNEST_INPUT_TRACE logs "close_tab idx=N tabs_left=M".
+// ver0.9 - 2026-10-04 - Copy joins rows that Claude Code hard-wrapped itself:
+//                       a long path/URL split at the right edge (within
+//                       APP_WRAP_EDGE_SLACK = 2 columns, measured on Claude Code
+//                       v2.1.289) is copied as one line with the next row's
+//                       indent removed. Rows stay apart when the next row starts
+//                       a list item or a new path/URL, when its indent is
+//                       shallower, or when the row's last word is not path-like.
