@@ -12,6 +12,7 @@ use ratatui::widgets::{Block, Borders, Clear, Paragraph, Widget};
 use ratatui::Frame;
 
 use crate::app::{folder_title, App, Rect as AppRect};
+use crate::claude::usage::UsageLevel;
 use crate::pane::grid::{Layout, SplitDir};
 use crate::pane::status::{aggregate_status, status_marker, ClaudeStatus};
 use crate::pane::PaneId;
@@ -259,6 +260,8 @@ struct StatusLayout {
     cwd: String,
     model: String,
     branch: String,
+    /// 利用制限 % (`5h 42% · wk 18% · Fable 7%`)。切り詰めず、入らなければ丸ごと落とす。
+    usage: String,
 }
 
 impl StatusLayout {
@@ -267,6 +270,7 @@ impl StatusLayout {
             (self.cwd.as_str(), 0u8),
             (self.model.as_str(), 1),
             (self.branch.as_str(), 2),
+            (self.usage.as_str(), 3),
         ]
         .into_iter()
         .filter(|(s, _)| !s.is_empty())
@@ -340,52 +344,64 @@ fn joined_width(parts: &[&str]) -> usize {
 
 /// 幅 `width` に収まるようセグメントを削る。
 ///
-/// **モデル名とブランチを最優先で守る**（それが今回追加した情報であり、cwd は
-/// 既にタブタイトルにも出ているため）。削る順は cwd → ブランチ → モデル。
-fn layout_status(cwd: &str, model: &str, branch: &str, width: usize) -> StatusLayout {
-    let mut cwd = cwd.to_string();
-    let mut branch = branch.to_string();
-    let model = model.to_string();
+/// **モデル名を最後まで守る**（cwd は既にタブタイトルにも出ているため）。
+/// 削る順は cwd → ブランチ → 利用制限 % → モデル。利用制限 % は途中で切ると
+/// 読み違えるので、詰めずに丸ごと落とす。
+fn layout_status(cwd: &str, model: &str, branch: &str, usage: &str, width: usize) -> StatusLayout {
+    let mut l = StatusLayout {
+        cwd: cwd.to_string(),
+        model: model.to_string(),
+        branch: branch.to_string(),
+        usage: usage.to_string(),
+    };
+    let fits = |l: &StatusLayout| joined_width(&[&l.cwd, &l.model, &l.branch, &l.usage]) <= width;
 
-    if joined_width(&[&cwd, &model, &branch]) <= width {
-        return StatusLayout { cwd, model, branch };
+    if fits(&l) {
+        return l;
     }
 
     // 1) cwd を左から詰める。確保できる幅が足りなければ丸ごと落とす。
-    if !cwd.is_empty() {
-        let others = joined_width(&[&model, &branch]);
+    if !l.cwd.is_empty() {
+        let others = joined_width(&[&l.model, &l.branch, &l.usage]);
         let sep = if others > 0 { STATUS_SEP_W } else { 0 };
         let avail = width.saturating_sub(others + sep);
-        cwd = if avail >= MIN_CWD_WIDTH {
-            ellipsize_left(&cwd, avail)
+        l.cwd = if avail >= MIN_CWD_WIDTH {
+            ellipsize_left(&l.cwd, avail)
         } else {
             String::new()
         };
-        if joined_width(&[&cwd, &model, &branch]) <= width {
-            return StatusLayout { cwd, model, branch };
+        if fits(&l) {
+            return l;
         }
     }
 
     // 2) ブランチを右から詰める。
-    if !branch.is_empty() {
-        let others = joined_width(&[&cwd, &model]);
+    if !l.branch.is_empty() {
+        let others = joined_width(&[&l.cwd, &l.model, &l.usage]);
         let sep = if others > 0 { STATUS_SEP_W } else { 0 };
         let avail = width.saturating_sub(others + sep);
-        branch = if avail >= MIN_BRANCH_WIDTH {
-            ellipsize_right(&branch, avail)
+        l.branch = if avail >= MIN_BRANCH_WIDTH {
+            ellipsize_right(&l.branch, avail)
         } else {
             String::new()
         };
-        if joined_width(&[&cwd, &model, &branch]) <= width {
-            return StatusLayout { cwd, model, branch };
+        if fits(&l) {
+            return l;
         }
     }
 
-    // 3) 最後の砦。モデル名だけを幅に押し込む。
+    // 3) 利用制限 % を丸ごと落とす。
+    if !l.usage.is_empty() {
+        l.usage = String::new();
+        if fits(&l) {
+            return l;
+        }
+    }
+
+    // 4) 最後の砦。モデル名だけを幅に押し込む。
     StatusLayout {
-        cwd: String::new(),
-        model: ellipsize_right(&model, width),
-        branch: String::new(),
+        model: ellipsize_right(&l.model, width),
+        ..StatusLayout::default()
     }
 }
 
@@ -395,10 +411,12 @@ fn status_line<'a>(
     cwd: &str,
     model: &str,
     branch: &str,
+    usage: &str,
+    usage_level: UsageLevel,
     width: usize,
     theme: &theme::Theme,
 ) -> Line<'a> {
-    let layout = layout_status(cwd, model, branch, width);
+    let layout = layout_status(cwd, model, branch, usage, width);
     let mut spans: Vec<Span> = Vec::new();
     for (text, kind) in layout.segments() {
         if !spans.is_empty() {
@@ -407,6 +425,11 @@ fn status_line<'a>(
         let style = match kind {
             1 => theme.status_model,
             2 => theme.status_branch,
+            3 => match usage_level {
+                UsageLevel::Normal => theme.status_usage,
+                UsageLevel::Warn => theme.status_usage_warn,
+                UsageLevel::Crit => theme.status_usage_crit,
+            },
             _ => theme.hint,
         };
         spans.push(Span::styled(text.to_string(), style));
@@ -478,10 +501,20 @@ fn draw_statusbar(app: &App, frame: &mut Frame<'_>, area: Rect, theme: &theme::T
         .focused_branch()
         .map(|b| format!("⎇ {b}"))
         .unwrap_or_default();
+    // 利用制限 % はアカウント全体の値なので、どのペインにフォーカスしても同じ。
+    let (usage, usage_level) = app.usage_label().unwrap_or_default();
 
-    // 上段: cwd / status + モデル + ブランチ、下段: ショートカットヒント
+    // 上段: cwd / status + モデル + ブランチ + 利用制限 %、下段: ショートカットヒント
     let lines = vec![
-        status_line(&cwd, &model, &branch, area.width as usize, theme),
+        status_line(
+            &cwd,
+            &model,
+            &branch,
+            &usage,
+            usage_level,
+            area.width as usize,
+            theme,
+        ),
         Line::from(Span::styled(hint_text, theme.hint)),
     ];
     frame.render_widget(Paragraph::new(lines), area);
@@ -1074,7 +1107,7 @@ mod tests {
 
     #[test]
     fn statusbar_keeps_everything_when_wide() {
-        let l = layout_status(CWD, MODEL, BRANCH, 140);
+        let l = layout_status(CWD, MODEL, BRANCH, "", 140);
         assert_eq!(l.cwd, CWD);
         assert_eq!(l.model, MODEL);
         assert_eq!(l.branch, BRANCH);
@@ -1082,7 +1115,7 @@ mod tests {
 
     #[test]
     fn statusbar_truncates_cwd_before_model_and_branch() {
-        let l = layout_status(CWD, MODEL, BRANCH, 80);
+        let l = layout_status(CWD, MODEL, BRANCH, "", 80);
         // 追加した情報は無傷、cwd だけが削られる。
         assert_eq!(l.model, MODEL);
         assert_eq!(l.branch, BRANCH);
@@ -1094,7 +1127,7 @@ mod tests {
 
     #[test]
     fn statusbar_drops_cwd_then_truncates_branch() {
-        let l = layout_status(CWD, MODEL, BRANCH, 40);
+        let l = layout_status(CWD, MODEL, BRANCH, "", 40);
         assert_eq!(l.model, MODEL, "モデル名は最後まで守る");
         assert!(l.cwd.is_empty(), "cwd が先に落ちる: {:?}", l.cwd);
         assert!(
@@ -1107,7 +1140,7 @@ mod tests {
 
     #[test]
     fn statusbar_model_survives_at_minimum_width() {
-        let l = layout_status(CWD, MODEL, BRANCH, 12);
+        let l = layout_status(CWD, MODEL, BRANCH, "", 12);
         assert!(l.cwd.is_empty());
         assert!(l.branch.is_empty());
         assert!(!l.model.is_empty(), "モデル名が最後の砦");
@@ -1117,7 +1150,7 @@ mod tests {
     #[test]
     fn statusbar_never_exceeds_width_across_the_whole_range() {
         for w in 0..=160usize {
-            let l = layout_status(CWD, MODEL, BRANCH, w);
+            let l = layout_status(CWD, MODEL, BRANCH, "", w);
             assert!(
                 rendered_width(&l) <= w,
                 "width {w} overflowed: {l:?} -> {}",
@@ -1131,36 +1164,125 @@ mod tests {
         // 全角は 1 文字 2 桁。バイト長で測っていると必ずはみ出す。
         let cwd = "cwd: C:\\Users\\mitam\\Desktop\\work\\50_ブログ\\記事";
         for w in 0..=120usize {
-            let l = layout_status(cwd, MODEL, "⎇ main", w);
+            let l = layout_status(cwd, MODEL, "⎇ main", "", w);
             assert!(rendered_width(&l) <= w, "width {w}: {l:?}");
         }
     }
 
     #[test]
     fn statusbar_without_branch_outside_repo() {
-        let l = layout_status(CWD, MODEL, "", 140);
+        let l = layout_status(CWD, MODEL, "", "", 140);
         assert!(l.branch.is_empty());
         assert_eq!(l.cwd, CWD);
         assert_eq!(l.model, MODEL);
     }
 
-    /// 実際に端末バッファへ描いた 1 行目の文字列を取り出す。
-    fn render_status_row(cwd: &str, model: &str, branch: &str, width: u16) -> String {
+    /// ステータスバー 1 行目を端末バッファへ描く。
+    fn render_status_buffer(
+        cwd: &str,
+        model: &str,
+        branch: &str,
+        usage: &str,
+        level: UsageLevel,
+        width: u16,
+    ) -> Buffer {
         use ratatui::backend::TestBackend;
         use ratatui::Terminal;
         let theme = theme::default_theme();
         let mut term = Terminal::new(TestBackend::new(width, 1)).unwrap();
         term.draw(|f| {
-            let line = status_line(cwd, model, branch, width as usize, &theme);
+            let line = status_line(cwd, model, branch, usage, level, width as usize, &theme);
             f.render_widget(Paragraph::new(vec![line]), f.area());
         })
         .unwrap();
-        let buf = term.backend().buffer();
+        term.backend().buffer().clone()
+    }
+
+    fn row_text(buf: &Buffer, width: u16) -> String {
         (0..width)
             .map(|x| buf[(x, 0)].symbol())
             .collect::<String>()
             .trim_end()
             .to_string()
+    }
+
+    /// 実際に端末バッファへ描いた 1 行目の文字列を取り出す (利用制限 % なし)。
+    fn render_status_row(cwd: &str, model: &str, branch: &str, width: u16) -> String {
+        let buf = render_status_buffer(cwd, model, branch, "", UsageLevel::Normal, width);
+        row_text(&buf, width)
+    }
+
+    // ---- status bar: usage % -------------------------------------------------
+
+    const USAGE: &str = "5h 42% · wk 18% · Fable 7%";
+
+    #[test]
+    fn statusbar_appends_usage_after_branch() {
+        let l = layout_status(CWD, MODEL, BRANCH, USAGE, 160);
+        assert_eq!(l.usage, USAGE);
+        assert_eq!(l.cwd, CWD);
+        let order: Vec<u8> = l.segments().map(|(_, k)| k).collect();
+        assert_eq!(
+            order,
+            vec![0, 1, 2, 3],
+            "cwd → モデル → ブランチ → 利用制限"
+        );
+    }
+
+    #[test]
+    fn statusbar_trims_cwd_and_branch_before_usage() {
+        // cwd → ブランチの順に削り、利用制限 % は最後まで丸ごと残す。
+        let l = layout_status(CWD, MODEL, BRANCH, USAGE, 60);
+        assert_eq!(l.usage, USAGE);
+        assert_eq!(l.model, MODEL);
+        assert!(l.cwd.is_empty(), "{l:?}");
+        assert!(rendered_width(&l) <= 60);
+    }
+
+    #[test]
+    fn statusbar_drops_usage_whole_before_model() {
+        // 利用制限 % は途中で切らない。入らなければ丸ごと落としてモデル名を残す。
+        let w = width_of(MODEL) + STATUS_SEP_W + width_of(USAGE) - 1;
+        let l = layout_status(CWD, MODEL, BRANCH, USAGE, w);
+        assert!(l.usage.is_empty(), "{l:?}");
+        assert_eq!(l.model, MODEL);
+        assert!(rendered_width(&l) <= w);
+    }
+
+    #[test]
+    fn statusbar_with_usage_never_exceeds_width() {
+        for w in 0..=160usize {
+            let l = layout_status(CWD, MODEL, BRANCH, USAGE, w);
+            assert!(
+                rendered_width(&l) <= w,
+                "width {w} overflowed: {l:?} -> {}",
+                rendered_width(&l)
+            );
+            assert!(
+                l.usage.is_empty() || l.usage == USAGE,
+                "利用制限 % は詰めない: {l:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn statusbar_renders_usage_row_and_level_colors() {
+        let theme = theme::default_theme();
+        let row_with =
+            |level| render_status_buffer("cwd: C:\\tmp", "Fable 5.1", "⎇ main", USAGE, level, 100);
+        let buf = row_with(UsageLevel::Normal);
+        assert_eq!(
+            row_text(&buf, 100),
+            "cwd: C:\\tmp │ Fable 5.1 │ ⎇ main │ 5h 42% · wk 18% · Fable 7%"
+        );
+        // 利用制限 % の先頭セル ("5") の色が段階どおり。
+        let x = width_of("cwd: C:\\tmp │ Fable 5.1 │ ⎇ main │ ") as u16;
+        assert_eq!(buf[(x, 0)].symbol(), "5");
+        assert_eq!(buf[(x, 0)].fg, theme.status_usage.fg.unwrap());
+        let buf = row_with(UsageLevel::Warn);
+        assert_eq!(buf[(x, 0)].fg, theme.status_usage_warn.fg.unwrap());
+        let buf = row_with(UsageLevel::Crit);
+        assert_eq!(buf[(x, 0)].fg, theme.status_usage_crit.fg.unwrap());
     }
 
     #[test]
@@ -1508,3 +1630,8 @@ mod tests {
 //                       tab bar and the plain box-drawing frame again, i.e. the
 //                       ver0.10 look with the folder-name title. main_layout() and
 //                       pane_block() stay as pure, tested helpers.
+// ver0.14 - 2026-10-06 - Status bar row 1 gets a 4th segment after the branch:
+//                        plan usage "5h 42% · wk 18% · Fable 7%" (App::usage_label),
+//                        coloured by level (sky / yellow ≥70% / bold red ≥90%).
+//                        Trim order is cwd → branch → usage (dropped whole, never
+//                        ellipsized) → model.

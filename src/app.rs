@@ -5,6 +5,7 @@ use std::time::{Duration, Instant};
 use anyhow::Result;
 use uuid::Uuid;
 
+use crate::claude::usage::{UsageCell, UsageLevel, UsageSnapshot};
 use crate::pane::grid::{Direction, Layout};
 use crate::pane::status::{detect_status, sanitize_task, ClaudeStatus};
 use crate::pane::{Pane, PaneId};
@@ -78,6 +79,11 @@ pub struct App {
     /// 直近に子へ転送したマウス移動 (pane, col, row)。同じセル内の Moved は
     /// 子へ再送しない (AnyMotion モードの子にポインタ移動の洪水を流さない)。
     pub last_forwarded_move: Option<(PaneId, u16, u16)>,
+    /// 利用制限ポーラー (`claude::usage::spawn_usage_poller`) が最新値を置く所。
+    pub usage_cell: UsageCell,
+    /// 描画用の利用制限。`refresh_pane_state` が `usage_cell` からコピーする
+    /// (描画パスではロックを取らない)。
+    pub usage: Option<UsageSnapshot>,
     /// イベントループを起こすチャネルの送信側。ペイン生成時に reader へ配る。
     wake_tx: WakeTx,
     /// 受信側。`run_event_loop` が起動時に `take_wake_rx` で持っていく。
@@ -210,6 +216,8 @@ impl App {
             last_burst_wait_us: 0,
             echo_pending: None,
             last_forwarded_move: None,
+            usage_cell: UsageCell::default(),
+            usage: None,
             wake_tx,
             wake_rx: Some(wake_rx),
         })
@@ -285,6 +293,17 @@ impl App {
             next.insert(cwd, (branch, now));
         }
         self.branch_cache = next;
+        // ポーラーが書き込み中なら前回値のまま、次 tick で拾う (parser と同じ)。
+        if let Ok(slot) = self.usage_cell.try_lock() {
+            self.usage = slot.clone();
+        }
+    }
+
+    /// ステータスバーに出す利用制限 (`5h 42% · wk 18% · Fable 7%`) と色の段階。
+    /// アカウント全体の値なので、フォーカス中のペインが shell でも出す。
+    /// 未取得・古すぎる値は None。
+    pub fn usage_label(&self) -> Option<(String, UsageLevel)> {
+        crate::claude::usage::status_label(self.usage.as_ref()?, chrono::Utc::now())
     }
 
     /// フォーカス中ペインのモデル名 (短縮表記)。claude が走っていなければ None。
@@ -648,3 +667,7 @@ mod tests {
 //                       middle-click); remove_tab() + pure active_after_close()
 //                       are shared with close_focused_pane, which now also marks
 //                       the newly active tab seen.
+// ver0.5 - 2026-10-06 - usage_cell (filled by the usage poller thread) is copied
+//                       into usage on the 2 s tick with try_lock; usage_label()
+//                       gives the status-bar text and level, None when missing
+//                       or older than 30 minutes.

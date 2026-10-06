@@ -46,6 +46,9 @@ pub fn run_event_loop<B: Backend>(term: &mut Terminal<B>, mut app: App) -> Resul
         .take_wake_rx()
         .ok_or_else(|| anyhow::anyhow!("wake receiver already taken"))?;
     spawn_input_pump(app.wake_tx());
+    // 利用制限 % の問い合わせ (別スレッド)。結果は 2 秒 tick で拾って描くので
+    // ループを起こす必要はない。CCNEST_USAGE=off なら起動しない。
+    crate::claude::usage::spawn_usage_poller(app.usage_cell.clone());
 
     // dirty: 次の周で描画が必要。input_dirty: その原因に入力/操作が含まれる
     // (frame cap を待たずに描く)。初回は必ず描く。
@@ -4153,3 +4156,5 @@ mod tests {
 //                       indent removed. Rows stay apart when the next row starts
 //                       a list item or a new path/URL, when its indent is
 //                       shallower, or when the row's last word is not path-like.
+// ver0.10 - 2026-10-06 - Start the plan-usage poller thread next to the input
+//                        pump (claude::usage::spawn_usage_poller).
