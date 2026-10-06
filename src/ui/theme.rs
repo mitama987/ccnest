@@ -14,6 +14,12 @@ pub struct Theme {
     pub status_model: Style,
     /// ステータスバーの git ブランチ。
     pub status_branch: Style,
+    /// ステータスバーの利用制限 % (最大の枠が 70% 未満)。
+    pub status_usage: Style,
+    /// 利用制限 % (70% 以上)。
+    pub status_usage_warn: Style,
+    /// 利用制限 % (90% 以上)。
+    pub status_usage_crit: Style,
     pub file_directory: Style,
     pub file_git: Style,
     pub file_markdown: Style,
@@ -62,6 +68,11 @@ pub fn default_theme() -> Theme {
         hint: Style::default().fg(Color::DarkGray),
         status_model: Style::default().fg(Color::Rgb(255, 140, 0)),
         status_branch: Style::default().fg(Color::Rgb(148, 163, 184)),
+        status_usage: Style::default().fg(Color::Rgb(125, 211, 252)),
+        status_usage_warn: Style::default().fg(Color::Rgb(250, 204, 21)),
+        status_usage_crit: Style::default()
+            .fg(Color::Rgb(248, 113, 113))
+            .add_modifier(Modifier::BOLD),
         file_directory: Style::default()
             .fg(Color::Rgb(255, 204, 64))
             .add_modifier(Modifier::BOLD),
@@ -103,3 +114,6 @@ pub fn default_theme() -> Theme {
 // ver0.3 - 2026-07-20 - Added status bar styles (status_model / status_branch).
 // ver0.4 - 2026-08-11 - Added Claude pane status colors
 //                       (status_busy / status_attention / status_done).
+// ver0.5 - 2026-10-06 - Added plan-usage styles for the status bar
+//                       (status_usage sky / status_usage_warn yellow /
+//                       status_usage_crit bold red).
