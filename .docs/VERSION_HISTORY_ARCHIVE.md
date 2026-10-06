@@ -33,7 +33,14 @@
 
 ### 検証
 
-（CI と実機 E2E の結果をここに追記する）
+- 応答の形は、実装前に本物の `/api/oauth/usage` を 1 回叩いて確かめた（200・2,235 文字）。テストのフィクスチャはこの実物から作った
+- CI（windows-latest）: `cargo fmt --check` / `cargo clippy --all-targets -- -D warnings` は警告なし、`cargo test --all` 288 件緑。新規テストは usage.rs 18 件（解析・切り捨て・リセット済み 0%・色の段階・30 分で隠す・トークン期限・`CLAUDE_CONFIG_DIR`・間隔の env・失敗ごとの待ち・キャッシュの読み書き）と ui/mod.rs 5 件（並び順・削る順・丸ごと落とす・0〜160 桁ではみ出さない・色）
+- release.yml をブランチで試し実行（`dry_run_tag=v0.1.20-rc1`）し、4 プラットフォームともビルド成功。Windows の exe は 3.7 MB → 5.7 MB（rustls と ring のぶん）
+- 実機 E2E（Windows Terminal の新しいウィンドウ・shell ペイン・キー入力なし）
+  - 起動 9 秒後のステータスバーが `cwd: C:\work\90_other\ccnest │ shell │ ⎇ feature/usage-in-statusbar │ 5h 2% · wk 0% · Fable 0%`。`usage-cache.json` の値（5h 2.0 / 週 0.0 / Fable 0.0）と一致
+  - `CCNEST_USAGE=off` では利用制限 % が出ない
+  - 2 つ目の窓は共有キャッシュの値をそのまま出し、`fetched_at` は変わらなかった（問い合わせは増えない）
+  - 3 回とも、自分で起動した ccnest だけを止め、WT はそのウィンドウだけ閉じた（残骸 0）
 
 ## 2026-10-04 — Claude Code が割った長いパスを改行なしでコピーする（v0.1.19）
 
