@@ -5,6 +5,36 @@
 
 ---
 
+## 2026-10-06 — ステータスバーに利用制限 %（5h・週・Fable）を出す（v0.1.20）
+
+ブランチ: `feature/usage-in-statusbar`
+
+### 背景
+
+本人質問「ccnest の表示の中に、Claude Code のセッション、Weekly、Fable の制限を今何%か表示させられる？」。
+
+- 公式のステータスライン（`rate_limits.five_hour` / `seven_day`）には Fable が無い。さらに、ステータスラインを設定すると Claude Code が `esc to interrupt` を出さなくなり、タブの 🟩🟨🟪 判定（`detect_status`）が壊れる。そのため使わない
+- `/usage` は `GET /api/oauth/usage`（非公式・ドキュメント無し）を叩いている。2026-10-06 の実物では、`five_hour.utilization` / `seven_day.utilization`（0〜100）が返る。Fable は `limits[]` の `kind: "weekly_scoped"` の行（`scope.model.display_name: "Fable"`、`percent`）で返る。`/usage` の「Current week (Fable)」はこの行
+- 本人が「非公式でも 3 つとも出す」「下のステータスバー」を選んだ
+
+### 変更点
+
+| ファイル | ver | 内容 |
+|---|---|---|
+| src/claude/usage.rs | 0.1 | 新規。応答の解析 `parse_usage`（5h・週と、`limits[]` のモデル別週枠。5h・週が null なら `kind: session` / `weekly_all` で補う）、表示文字列 `format_usage`（切り捨て・リセット時刻を過ぎた枠は 0%）、色の段階 `usage_level`（70% / 90%）、30 分より古い値を隠す `status_label`。問い合わせスレッド `spawn_usage_poller` は、トークンを `.credentials.json` から読むだけで更新しない。結果は `%APPDATA%\ccnest\usage-cache.json` で窓どうし共有し、問い合わせは全体で 5 分に 1 回。429 のあとは 15 分、トークン無し・期限切れのときは 60 秒あけて再確認する |
+| src/app.rs | 0.5 | `usage_cell`（スレッドが書く）を 2 秒 tick で `try_lock` して `usage` にコピー。`usage_label()` |
+| src/event.rs | 0.10 | 入力ポンプの隣で問い合わせスレッドを起動 |
+| src/ui/mod.rs | 0.14 | ステータスバー 1 行目の 4 つ目のセグメント。削る順は cwd → ブランチ → 利用制限 %（丸ごと落とす）→ モデル |
+| src/ui/theme.rs | 0.5 | `status_usage` / `status_usage_warn` / `status_usage_crit` |
+| Cargo.toml | - | 0.1.19 → 0.1.20。`ureq` 2（rustls。OpenSSL 不要）を追加 |
+| README.md | - | 「Plan usage in the status bar」節、Version History |
+
+環境変数: `CCNEST_USAGE=off`（機能ごと無効）、`CCNEST_USAGE_POLL_SECS`（既定 300・最小 60）。
+
+### 検証
+
+（CI と実機 E2E の結果をここに追記する）
+
 ## 2026-10-04 — Claude Code が割った長いパスを改行なしでコピーする（v0.1.19）
 
 ブランチ: `fix/copy-app-wrapped-path`

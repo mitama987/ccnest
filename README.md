@@ -137,6 +137,35 @@ bypass-permissions for fully automatic execution.
 - `CCNEST_CLAUDE_NO_SKIP_PERMISSIONS=1` still removes every bypass flag
   (plan mode stays unless turned off as above).
 
+## Plan usage in the status bar
+
+The first status-bar row ends with your claude.ai plan usage, the same
+numbers `/usage` shows:
+
+```
+cwd: C:\work\…\my-app │ Fable 5.1 │ ⎇ main │ 5h 42% · wk 18% · Fable 7%
+```
+
+- `5h` = current session (5-hour window), `wk` = current week (all models),
+  then one entry per model-specific weekly limit (e.g. `Fable`).
+- Colors: sky below 70%, yellow from 70%, bold red from 90% (by the
+  highest of the numbers).
+- When the row is too narrow, the cwd and then the branch shrink first;
+  the usage part is dropped whole before the model name.
+- ccnest asks `https://api.anthropic.com/api/oauth/usage` every 5 minutes
+  on a background thread, using the access token Claude Code saved in
+  `~/.claude/.credentials.json` (or `$CLAUDE_CONFIG_DIR`). It only reads
+  the token and **never refreshes it**; when the token has expired it waits
+  for Claude Code to renew it. Results are shared between ccnest windows
+  through `%APPDATA%\ccnest\usage-cache.json`, so several windows still
+  make one request per interval.
+- **This endpoint is undocumented** (it is what Claude Code's `/usage`
+  calls). If it changes or fails, the usage part simply disappears (values
+  older than 30 minutes are hidden); nothing else in ccnest is affected.
+  On macOS the token lives in the Keychain, so the usage part stays hidden.
+- `CCNEST_USAGE=off` turns the feature off (no requests at all).
+  `CCNEST_USAGE_POLL_SECS` changes the interval (default 300, minimum 60).
+
 ## Sidebar
 
 The left sidebar is always available (`Ctrl+B` toggles the whole sidebar,
@@ -201,3 +230,4 @@ ver0.1.16 - 2026-09-27 - One blank row between the tab bar and the pane area, so
 ver0.1.17 - 2026-09-27 - The Claude pane frame is drawn with thin one-eighth block lines (McGugan box, `▔ ▕ ▏ ▁`) instead of box-drawing characters: the top edge sits on the top of its row, half a row higher than before, with the folder-name title right below it.
 ver0.1.18 - 2026-09-27 - Reverted 0.1.16 and 0.1.17 after trying them: no blank row under the tab bar and the plain box-drawing pane frame again (the 0.1.15 look, keeping the folder-name title).
 ver0.1.19 - 2026-10-04 - Copying a long path or URL that Claude Code wrapped onto the next line no longer inserts a newline: when a row ends at the right edge with a path-like word and the next row continues it, ccnest joins them and drops the continuation indent (Ctrl+C and the right-click Copy). List items, a new path on the next row, rule lines and ordinary word-wrapped prose keep their line breaks.
+ver0.1.20 - 2026-10-06 - The status bar shows claude.ai plan usage after the branch: `5h 42% · wk 18% · Fable 7%` (session, week, and each model-specific weekly limit), colored yellow from 70% and red from 90%. A background thread polls the undocumented `/api/oauth/usage` endpoint (the one `/usage` uses) every 5 minutes with the token from `~/.claude/.credentials.json`, never refreshing it, and shares the result across windows via `%APPDATA%\ccnest\usage-cache.json`. `CCNEST_USAGE=off` disables it; `CCNEST_USAGE_POLL_SECS` changes the interval.
