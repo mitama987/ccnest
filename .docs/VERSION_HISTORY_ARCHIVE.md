@@ -5,6 +5,40 @@
 
 ---
 
+## 2026-10-10 — ステータスバーの利用制限に解除までの残り時間を出す（v0.1.22）
+
+ブランチ: `feature/usage-reset-countdown`
+
+### 背景
+
+v0.1.20 で利用制限 %（`5h 42% · wk 18% · Fable 7%`）は出るようになったが、「いつ解除されるか」が分からず結局 `/usage` を開いていた。API 応答の `resets_at` は v0.1.20 の時点で取得・保存済み（`Bucket.resets_at`）だったので、表示を足すだけでよい。
+
+本人の決定: 形式はカウントダウン（絶対時刻ではない）・常に出す（幅が足りないときだけ自動で落とす）・週枠（wk と Fable）は解除が同じなら末尾に 1 回だけ。
+
+### 変更点
+
+| ファイル | ver | 内容 |
+|---|---|---|
+| src/claude/usage.rs | 0.2 | `format_remaining`（1 時間未満 `59m`・1 日未満 `2h10m`・以上 `2d9h`・解除済みは None）、`format_usage_with_reset`（隣接する枠の `resets_at` が 60 秒以内なら 1 グループにして末尾に 1 回 ` ⏳…`）、`status_label` の戻りを `UsageLabel { full, bare, level }` に。`buckets()` で表示順の列挙を共通化 |
+| src/app.rs | 0.6 | `usage_label()` が `UsageLabel` を返す |
+| src/ui/mod.rs | 0.15 | `layout_status` に `usage_bare` を追加。削る順を cwd → ブランチ → 残り時間（full→bare 差し替え）→ 利用制限を丸ごと → モデル に |
+| README.md | - | Plan usage 節に ⏳ の書式・グループ化・落とし順、Version History |
+| Cargo.toml | - | 0.1.21 → 0.1.22 |
+
+表示例: `5h 42% ⏳2h10m · wk 18% · Fable 7% ⏳2d9h`（wk と Fable の解除が違えば `wk 18% ⏳2d9h · Fable 7% ⏳4d1h`）。
+
+設計メモ:
+
+- 残り時間は `now` を引数に取る純粋関数なので、既存の 2 秒 tick の再描画でそのまま進む（タイマー追加なし）。タイムゾーン変換も不要
+- `⏳`（U+231B）は unicode-width が 2・Windows Terminal も絵文字 2 桁で描くので行幅の計算と食い違わない（`hourglass_is_two_cells_wide` で固定）。ステータスバーの他の記号で起きた「申告 1 桁・描画 2 桁」のはみ出し（`draw_statusbar` のコメント）とは逆に、両方 2 で揃っている
+- 実応答では wk が `18:00:00.254094`、Fable が `18:00:00` と秒以下だけ違うため、完全一致ではなく 60 秒の許容幅でまとめる
+
+### 検証
+
+- TDD: usage.rs に 8 件・ui/mod.rs に 2 件のテストを先に書いて赤を確認してから実装。`cargo fmt --all` 差分なし、`cargo clippy --all-targets -- -D warnings` 警告なし、`cargo test --all` 307 件（lib）＋ 9 件（統合）緑
+- 実応答 FIXTURE（2026-10-06 10:00 UTC）で `5h 1% ⏳4h40m · wk 0% · Fable 0% ⏳6d8h`
+- 幅 45 の描画バッファで `Fable 5.1 │ 5h 42% · wk 18% · Fable 7%`（残り時間だけ落ちて % が残る）
+
 ## 2026-10-10 — 最終列まで埋まった行のコピーで字下げの空白が混ざらないようにする（v0.1.21）
 
 ブランチ: `fix/copy-soft-wrapped-indent`

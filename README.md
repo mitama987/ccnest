@@ -143,15 +143,21 @@ The first status-bar row ends with your claude.ai plan usage, the same
 numbers `/usage` shows:
 
 ```
-cwd: C:\work\…\my-app │ Fable 5.1 │ ⎇ main │ 5h 42% · wk 18% · Fable 7%
+cwd: C:\work\…\my-app │ Fable 5.1 │ ⎇ main │ 5h 42% ⏳2h10m · wk 18% · Fable 7% ⏳2d9h
 ```
 
 - `5h` = current session (5-hour window), `wk` = current week (all models),
   then one entry per model-specific weekly limit (e.g. `Fable`).
 - Colors: sky below 70%, yellow from 70%, bold red from 90% (by the
   highest of the numbers).
+- `⏳` is the countdown to that limit's reset: minutes under an hour
+  (`59m`), hours and minutes under a day (`2h10m`), days and hours beyond
+  (`2d9h`). Adjacent limits that reset at the same time (the weekly ones
+  usually do) share one countdown at the end of the group. A limit whose
+  reset time has passed shows `0%` with no countdown until the next poll.
 - When the row is too narrow, the cwd and then the branch shrink first;
-  the usage part is dropped whole before the model name.
+  then the countdowns are dropped (the %-only text stays), and finally the
+  usage part is dropped whole before the model name.
 - ccnest asks `https://api.anthropic.com/api/oauth/usage` every 5 minutes
   on a background thread, using the access token Claude Code saved in
   `~/.claude/.credentials.json` (or `$CLAUDE_CONFIG_DIR`). It only reads
@@ -232,3 +238,4 @@ ver0.1.18 - 2026-09-27 - Reverted 0.1.16 and 0.1.17 after trying them: no blank 
 ver0.1.19 - 2026-10-04 - Copying a long path or URL that Claude Code wrapped onto the next line no longer inserts a newline: when a row ends at the right edge with a path-like word and the next row continues it, ccnest joins them and drops the continuation indent (Ctrl+C and the right-click Copy). List items, a new path on the next row, rule lines and ordinary word-wrapped prose keep their line breaks.
 ver0.1.20 - 2026-10-06 - The status bar shows claude.ai plan usage after the branch: `5h 42% · wk 18% · Fable 7%` (session, week, and each model-specific weekly limit), colored yellow from 70% and red from 90%. A background thread polls the undocumented `/api/oauth/usage` endpoint (the one `/usage` uses) every 5 minutes with the token from `~/.claude/.credentials.json`, never refreshing it, and shares the result across windows via `%APPDATA%\ccnest\usage-cache.json`. `CCNEST_USAGE=off` disables it; `CCNEST_USAGE_POLL_SECS` changes the interval.
 ver0.1.21 - 2026-10-10 - Copying a long unbroken string (such as a token list) that Claude Code wrapped exactly at the last column no longer keeps the continuation row's indent spaces: when ConPTY continues such a row through the terminal's own auto-wrap instead of a cursor move, the next row's leading spaces are recognized as Claude Code's hanging indent (same width as the paragraph's body position) and dropped, so the copy is one unbroken line. Plain shell soft wraps, list items and rows whose indent differs keep their spaces.
+ver0.1.22 - 2026-10-10 - The status bar's plan usage shows the countdown to each limit's reset: `5h 42% ⏳2h10m · wk 18% · Fable 7% ⏳2d9h` (minutes under an hour, hours+minutes under a day, days+hours beyond; weekly limits that reset at the same time share one countdown). When the row is too narrow the countdowns go first and the %-only text stays, then the whole usage part as before.
