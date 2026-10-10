@@ -2223,6 +2223,9 @@ fn extract_selected_text_from_parser(
         if row.soft_wrapped {
             // 折り返し行: 末尾の URL/英数字が削れないよう trim せず連結し、改行も挟まない。
             out.push_str(line);
+            // 最終列まで埋まったアプリ折り返し (ConPTY が自動折り返しで次行へ進み、
+            // 字下げの空白をそのまま書く) なら、次行の字下げは本文ではないので落とす。
+            strip_indent = next.is_some_and(|n| app_wrapped_after_autowrap(row, n));
         } else if next.is_some_and(|n| app_wrapped(row, n)) {
             out.push_str(line.trim_end());
             strip_indent = true;
@@ -2267,6 +2270,9 @@ struct AppWrapTraits {
     tail_splittable: bool,
     /// 行頭の空白セル数。
     lead_ws: u16,
+    /// 本文が始まる列 (行頭の空白と箇条書き記号を飛ばした位置)。アプリの
+    /// 続き行はこの列に字下げして置かれる。
+    body_indent: u16,
     /// 前の行の続きとして連結してはいけない行頭 (空行・箇条書き記号・
     /// 新しいパス/URL の始まり)。
     head_blocks_join: bool,
@@ -2281,6 +2287,23 @@ fn app_wrapped(a: &RowShape, b: &RowShape) -> bool {
         && a.traits.tail_splittable
         && !b.traits.head_blocks_join
         && b.traits.lead_ws >= a.traits.lead_ws
+}
+
+/// 行 a が端末のソフトラップで行 b へ続いているが、実体はアプリ (Claude Code
+/// 等) の折り返しで、b の行頭の空白がアプリの字下げかどうか。
+///
+/// Claude Code が長い語を **最終列まで** 埋めて割ると、ConPTY は `CR` +
+/// カーソル移動ではなく端末の自動折り返しのまま次行へ進み、続き行の字下げを
+/// 空白として書く (ユーザー報告 2026-10-10: `…247e  4b44…` と空白 2 つが混ざる)。
+/// 字下げなら a の本文位置 (`body_indent`) と同じ幅で、b の本文はその直後から
+/// 始まる。字下げの無い行 (`body_indent == 0`、シェル出力の素のソフトラップ) や
+/// 幅が違う空白は本文の一部とみなし、落とさない。
+fn app_wrapped_after_autowrap(a: &RowShape, b: &RowShape) -> bool {
+    a.soft_wrapped
+        && a.traits.tail_splittable
+        && !b.traits.head_blocks_join
+        && a.traits.body_indent >= 1
+        && b.traits.lead_ws == a.traits.body_indent
 }
 
 /// 行 y のアプリ折り返し判定用の特徴を画面セルから求める。
@@ -2298,6 +2321,7 @@ fn app_wrap_traits(screen: &vt100::Screen, y: u16) -> AppWrapTraits {
         reaches_edge: false,
         tail_splittable: false,
         lead_ws: cols,
+        body_indent: cols,
         head_blocks_join: true,
     };
     let Some(first) = cells.iter().position(Option::is_some) else {
@@ -2324,6 +2348,7 @@ fn app_wrap_traits(screen: &vt100::Screen, y: u16) -> AppWrapTraits {
         reaches_edge: last as u16 + 1 + APP_WRAP_EDGE_SLACK >= cols,
         tail_splittable,
         lead_ws: first as u16,
+        body_indent: body_start as u16,
         head_blocks_join: body_start != first || starts_new_path(&cells[first..]),
     }
 }
@@ -3523,6 +3548,148 @@ mod tests {
         assert_eq!(text, format!("{line}\n  dog and keeps running"));
     }
 
+    /// ユーザー報告 (2026-10-10) の形をダミーで再現した、空白を含まない長い
+    /// 文字列 (`数値ID:hex|数値ID:hex|…`)。実トークンではない。
+    const LONG_TOKEN: &str = "1000000000000000001:0123456789abcdef0123456789abcdef01234567|1000000000000000002:89abcdef0123456789abcdef01234567|1000000000000000003:fedcba9876543210fedcba9876543210fedcba98";
+
+    /// ユーザー報告そのもの: 字下げ 2 桁の段落で、長い文字列が **最終列まで**
+    /// 埋まって割れた。この形では ConPTY が CR + カーソル移動ではなく端末の
+    /// 自動折り返しで次行へ進み、字下げの空白 2 つをそのまま書く (vt100 の
+    /// `row_wrapped` が立つ)。コピーは改行も字下げの空白も入れずに 1 本につなぐ。
+    #[test]
+    fn extract_selected_text_strips_indent_after_terminal_autowrap() {
+        let mut parser = vt100::Parser::new(6, 48, 100);
+        let token = &LONG_TOKEN[..90];
+        let (head, tail) = token.split_at(46);
+        // CR も LF も無し: 46 字で行が埋まった直後に "  " + 続きを書く。
+        parser.process(format!("  {head}  {tail}").as_bytes());
+        assert!(
+            parser.screen().row_wrapped(0),
+            "前提: 最終列まで埋めた直後の書き込みは自動折り返しになる"
+        );
+        let text = extract_selected_text_from_parser(&mut parser, sel_range((0, 0), (47, 1)));
+        assert_eq!(text, format!("  {token}"));
+    }
+
+    /// 3 行版 (満杯・満杯・途中まで)。報告の 5 本つなぎと同じ形。
+    #[test]
+    fn extract_selected_text_strips_indent_after_terminal_autowrap_three_rows() {
+        let mut parser = vt100::Parser::new(6, 48, 100);
+        let token = &LONG_TOKEN[..130];
+        let (a, rest) = token.split_at(46);
+        let (b, c) = rest.split_at(46);
+        parser.process(format!("  {a}  {b}  {c}").as_bytes());
+        assert!(parser.screen().row_wrapped(0) && parser.screen().row_wrapped(1));
+        let text = extract_selected_text_from_parser(&mut parser, sel_range((0, 0), (47, 2)));
+        assert_eq!(text, format!("  {token}"));
+    }
+
+    /// `● ` 始まりの応答 1 行目 (本文位置 2 桁) が最終列まで埋まり、次行が
+    /// 字下げ 2 桁で続く。
+    #[test]
+    fn extract_selected_text_strips_indent_after_terminal_autowrap_bullet() {
+        let mut parser = vt100::Parser::new(6, 48, 100);
+        let token = &LONG_TOKEN[..90];
+        let (head, tail) = token.split_at(46);
+        parser.process(format!("● {head}  {tail}").as_bytes());
+        assert!(parser.screen().row_wrapped(0));
+        let text = extract_selected_text_from_parser(&mut parser, sel_range((0, 0), (47, 1)));
+        assert_eq!(text, format!("● {token}"));
+    }
+
+    /// 箇条書き `  - ` (本文位置 4 桁) の直後から始まる長い文字列が最終列まで
+    /// 埋まり、次行が字下げ 4 桁で続く。
+    #[test]
+    fn extract_selected_text_strips_indent_after_terminal_autowrap_list_item() {
+        let mut parser = vt100::Parser::new(6, 50, 100);
+        // "  - " は 4 桁。残り 46 桁。
+        let token = &LONG_TOKEN[..88];
+        let (head, tail) = token.split_at(46);
+        parser.process(format!("  - {head}    {tail}").as_bytes());
+        assert!(parser.screen().row_wrapped(0));
+        let text = extract_selected_text_from_parser(&mut parser, sel_range((0, 0), (49, 1)));
+        assert_eq!(text, format!("  - {token}"));
+    }
+
+    /// 実測 (Claude Code v2.1.296・ConPTY・ペイン幅 118 桁・2026-10-10) の形。
+    /// `● ` の応答 1 行目が最終列まで埋まると、1 つ目の折り返しは `CSI r;3H`
+    /// (絶対カーソル移動・`row_wrapped` 立たず) で、2 つ目は最終列まで埋まった
+    /// 直後に `  ` + 続きが直接書かれる自動折り返し (`row_wrapped` 立つ)。
+    /// 同じ応答の中に両方の形が混ざっても 1 本につながる。
+    #[test]
+    fn extract_selected_text_joins_claude_reply_mixed_cursor_move_and_autowrap() {
+        let mut parser = vt100::Parser::new(6, 48, 100);
+        let token = &LONG_TOKEN[..130];
+        let (a, rest) = token.split_at(46);
+        let (b, c) = rest.split_at(46);
+        parser.process(format!("● {a}[2;3H{b}  {c}").as_bytes());
+        assert!(
+            !parser.screen().row_wrapped(0),
+            "前提: 絶対移動では wrapped にならない"
+        );
+        assert!(
+            parser.screen().row_wrapped(1),
+            "前提: 直接続けると wrapped になる"
+        );
+        let text = extract_selected_text_from_parser(&mut parser, sel_range((0, 0), (47, 2)));
+        assert_eq!(text, format!("● {token}"));
+    }
+
+    /// 回帰: 字下げの無い行 (シェル出力など) の素のソフトラップでは、次行頭の
+    /// 空白は本文の一部なので落とさない。
+    #[test]
+    fn extract_selected_text_keeps_spaces_after_plain_autowrap() {
+        let mut parser = vt100::Parser::new(6, 20, 100);
+        parser.process(b"abcdefghijklmnopqrst  next");
+        assert!(parser.screen().row_wrapped(0));
+        let text = extract_selected_text_from_parser(&mut parser, sel_range((0, 0), (19, 1)));
+        assert_eq!(text, "abcdefghijklmnopqrst  next");
+    }
+
+    /// 回帰: 自動折り返しの次行が箇条書き記号で始まるなら字下げを落とさない。
+    #[test]
+    fn extract_selected_text_keeps_spaces_before_list_item_after_autowrap() {
+        let mut parser = vt100::Parser::new(6, 20, 100);
+        parser.process(b"  abcdefghijklmnopqr  - item");
+        assert!(parser.screen().row_wrapped(0));
+        let text = extract_selected_text_from_parser(&mut parser, sel_range((0, 0), (19, 1)));
+        assert_eq!(text, "  abcdefghijklmnopqr  - item");
+    }
+
+    /// 回帰: 次行の字下げが本文位置と違う (2 に対して 4) なら落とさない。
+    #[test]
+    fn extract_selected_text_keeps_spaces_when_autowrap_indent_differs() {
+        let mut parser = vt100::Parser::new(6, 20, 100);
+        parser.process(b"  abcdefghijklmnopqr    deeper");
+        assert!(parser.screen().row_wrapped(0));
+        let text = extract_selected_text_from_parser(&mut parser, sel_range((0, 0), (19, 1)));
+        assert_eq!(text, "  abcdefghijklmnopqr    deeper");
+    }
+
+    /// 実機で採取した ConPTY の生バイト列 (Claude Code v2.1.296・ペイン幅 118 桁・
+    /// conhost 120×30・2026-10-10・`CCNEST_PTY_DUMP=1`)。応答 1 行目 `● ` の後ろに
+    /// ダミーのトークン列を出させたもの。1 つ目の折り返しは `CSI 12;3H`、2 つ目は
+    /// 最終列まで埋まった直後に `  210|…` が直接続く (自動折り返し)。
+    const CAPTURED_REPLY: &str = "\x1b[?25l\x1b[38;2;255;255;255m\x1b[11;1H●\x1b[m\x1b[1C1000000000000000001:0123456789abcdef0123456789abcdef01234567|1000000000000000002:89abcdef0123456789abcdef01234567|10\x1b[12;3H00000000000000003:fedcba9876543210fedcba9876543210fedcba98|1000000000000000004:76543210fedcba9876543210fedcba9876543  210|1000000000000000005:a1b2c3d4e5f60718293a4b5c6d7e8f9001122334";
+    const CAPTURED_TOKEN: &str = "1000000000000000001:0123456789abcdef0123456789abcdef01234567|1000000000000000002:89abcdef0123456789abcdef01234567|1000000000000000003:fedcba9876543210fedcba9876543210fedcba98|1000000000000000004:76543210fedcba9876543210fedcba9876543210|1000000000000000005:a1b2c3d4e5f60718293a4b5c6d7e8f9001122334";
+
+    /// 採取した実バイト列をそのまま流し、3 行を選択してコピーすると、改行も
+    /// 字下げの空白も入らず元のトークン列と一致する。
+    #[test]
+    fn extract_selected_text_replays_captured_claude_reply() {
+        let mut parser = vt100::Parser::new(30, 118, 100);
+        parser.process(CAPTURED_REPLY.as_bytes());
+        let screen = parser.screen();
+        assert!(!screen.row_wrapped(10), "前提: 1 つ目の折り返しは絶対移動");
+        assert!(
+            screen.row_wrapped(11),
+            "前提: 2 つ目の折り返しは自動折り返し"
+        );
+        let text = extract_selected_text_from_parser(&mut parser, sel_range((0, 10), (117, 12)));
+        assert_eq!(text, format!("● {CAPTURED_TOKEN}"));
+        assert!(!text.contains('\n') && !text.contains("  "));
+    }
+
     fn mi(enabled: bool) -> crate::app::MenuItem {
         crate::app::MenuItem {
             label: "テスト",
@@ -4158,3 +4325,13 @@ mod tests {
 //                       shallower, or when the row's last word is not path-like.
 // ver0.10 - 2026-10-06 - Start the plan-usage poller thread next to the input
 //                        pump (claude::usage::spawn_usage_poller).
+// ver0.11 - 2026-10-10 - Copy drops the continuation row's indent after a terminal
+//                        auto-wrap too (app_wrapped_after_autowrap): when Claude
+//                        Code fills a row to the last column, ConPTY continues
+//                        through the terminal's own wrap (row_wrapped set) and
+//                        writes the hanging indent as spaces, which used to be
+//                        copied verbatim ("...247e  4b44..."). AppWrapTraits gains
+//                        body_indent; the spaces are dropped only when they match
+//                        the previous row's body position, the previous row ends
+//                        in a splittable word, and the next row is not a list item
+//                        or a new path. Measured on Claude Code v2.1.296 / 118 cols.
