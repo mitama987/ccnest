@@ -158,29 +158,105 @@ fn effective_pct(b: &Bucket, now: DateTime<Utc>) -> u32 {
     b.pct.clamp(0.0, 100.0).floor() as u32
 }
 
-/// ステータスバーに出す文字列: `5h 42% · wk 18% · Fable 7%`。
-pub fn format_usage(s: &UsageSnapshot, now: DateTime<Utc>) -> String {
-    let mut parts: Vec<String> = Vec::new();
+/// 表示順 (5h → wk → モデル別) に並べた枠。
+fn buckets(s: &UsageSnapshot) -> Vec<(&str, &Bucket)> {
+    let mut out: Vec<(&str, &Bucket)> = Vec::new();
     if let Some(b) = &s.five_hour {
-        parts.push(format!("5h {}%", effective_pct(b, now)));
+        out.push(("5h", b));
     }
     if let Some(b) = &s.seven_day {
-        parts.push(format!("wk {}%", effective_pct(b, now)));
+        out.push(("wk", b));
     }
     for (name, b) in &s.models {
-        parts.push(format!("{name} {}%", effective_pct(b, now)));
+        out.push((name.as_str(), b));
     }
-    parts.join(" · ")
+    out
+}
+
+/// ステータスバーに出す文字列: `5h 42% · wk 18% · Fable 7%`。
+pub fn format_usage(s: &UsageSnapshot, now: DateTime<Utc>) -> String {
+    buckets(s)
+        .into_iter()
+        .map(|(name, b)| format!("{name} {}%", effective_pct(b, now)))
+        .collect::<Vec<_>>()
+        .join(" · ")
+}
+
+/// 解除までの残り時間の前に置く記号。Windows Terminal は絵文字 (2 桁) で描き、
+/// unicode-width の申告も 2 なので行幅の計算と食い違わない。
+pub const HOURGLASS: &str = "⏳";
+/// 隣り合う枠の解除時刻がこの秒数以内なら同じ時刻とみなして 1 回にまとめる
+/// (実応答では wk と Fable が秒以下だけ違う)。
+const SAME_RESET_TOLERANCE_SECS: i64 = 60;
+
+/// 解除までの残り時間。解除済み (`now >= reset`) は None。
+///
+/// - 1 時間未満: `{m}m` (切り上げ。`0m` は出さず最小 `1m`)
+/// - 1 日未満: `{h}h{m}m` (分は切り捨て・ゼロ埋めなし)
+/// - 1 日以上: `{d}d{h}h` (分は捨てる)
+pub fn format_remaining(reset: DateTime<Utc>, now: DateTime<Utc>) -> Option<String> {
+    let secs = (reset - now).num_seconds();
+    if secs <= 0 {
+        return None;
+    }
+    if secs < 3600 {
+        return Some(format!("{}m", ((secs + 59) / 60).max(1)));
+    }
+    let mins = secs / 60;
+    let hours = mins / 60;
+    if hours < 24 {
+        return Some(format!("{hours}h{}m", mins % 60));
+    }
+    Some(format!("{}d{}h", hours / 24, hours % 24))
+}
+
+/// まだ先の解除時刻 (None・解除済みは None)。
+fn pending_reset(b: &Bucket, now: DateTime<Utc>) -> Option<DateTime<Utc>> {
+    b.resets_at.filter(|t| *t > now)
+}
+
+/// ステータスバーに出す文字列 (残り時間つき):
+/// `5h 42% ⏳2h10m · wk 18% · Fable 7% ⏳2d9h`。
+///
+/// 隣り合う枠の解除時刻が [`SAME_RESET_TOLERANCE_SECS`] 以内なら 1 つのグループに
+/// して、末尾に 1 回だけ ⏳ を付ける (wk と Fable は普段同じ時刻)。解除時刻が
+/// 無い・解除済みの枠は % だけで、グループにも入らない。
+pub fn format_usage_with_reset(s: &UsageSnapshot, now: DateTime<Utc>) -> String {
+    let buckets = buckets(s);
+    let mut groups: Vec<String> = Vec::new();
+    let mut i = 0;
+    while i < buckets.len() {
+        let (name, b) = buckets[i];
+        let mut names = vec![format!("{name} {}%", effective_pct(b, now))];
+        let reset = pending_reset(b, now);
+        let mut j = i + 1;
+        if let Some(r) = reset {
+            while j < buckets.len() {
+                let (next_name, next) = buckets[j];
+                let same = pending_reset(next, now)
+                    .is_some_and(|r2| (r2 - r).num_seconds().abs() <= SAME_RESET_TOLERANCE_SECS);
+                if !same {
+                    break;
+                }
+                names.push(format!("{next_name} {}%", effective_pct(next, now)));
+                j += 1;
+            }
+        }
+        let mut text = names.join(" · ");
+        if let Some(rem) = reset.and_then(|r| format_remaining(r, now)) {
+            text.push_str(&format!(" {HOURGLASS}{rem}"));
+        }
+        groups.push(text);
+        i = j;
+    }
+    groups.join(" · ")
 }
 
 /// 一番使っている枠で色の段階を決める。
 pub fn usage_level(s: &UsageSnapshot, now: DateTime<Utc>) -> UsageLevel {
-    let max = s
-        .five_hour
-        .iter()
-        .chain(s.seven_day.iter())
-        .chain(s.models.iter().map(|(_, b)| b))
-        .map(|b| effective_pct(b, now))
+    let max = buckets(s)
+        .into_iter()
+        .map(|(_, b)| effective_pct(b, now))
         .max()
         .unwrap_or(0);
     if max >= 90 {
@@ -192,16 +268,29 @@ pub fn usage_level(s: &UsageSnapshot, now: DateTime<Utc>) -> UsageLevel {
     }
 }
 
+/// ステータスバーに出す利用制限。`full` は残り時間つき、`bare` は % だけ
+/// (幅が足りないときの代替)。
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct UsageLabel {
+    pub full: String,
+    pub bare: String,
+    pub level: UsageLevel,
+}
+
 /// 描画用: 古すぎる値・空の値は None (セグメントごと出さない)。
-pub fn status_label(s: &UsageSnapshot, now: DateTime<Utc>) -> Option<(String, UsageLevel)> {
+pub fn status_label(s: &UsageSnapshot, now: DateTime<Utc>) -> Option<UsageLabel> {
     if !is_younger_than(s, now, STALE_AFTER) {
         return None;
     }
-    let text = format_usage(s, now);
-    if text.is_empty() {
+    let bare = format_usage(s, now);
+    if bare.is_empty() {
         return None;
     }
-    Some((text, usage_level(s, now)))
+    Some(UsageLabel {
+        full: format_usage_with_reset(s, now),
+        bare,
+        level: usage_level(s, now),
+    })
 }
 
 /// `fetched_at` から `max_age` 未満か。未来の時刻 (時計ずれ) は新しいとみなす。
@@ -523,11 +612,159 @@ mod tests {
         let s = snap(Some(42.0), Some(18.0), &[("Fable", 7.0)]);
         assert_eq!(
             status_label(&s, t(10, 29)),
-            Some(("5h 42% · wk 18% · Fable 7%".to_string(), UsageLevel::Normal))
+            Some(UsageLabel {
+                full: "5h 42% · wk 18% · Fable 7%".to_string(),
+                bare: "5h 42% · wk 18% · Fable 7%".to_string(),
+                level: UsageLevel::Normal,
+            })
         );
         assert_eq!(status_label(&s, t(10, 30)), None);
         // 時計ずれで fetched_at が未来でも出す。
         assert!(status_label(&s, t(9, 50)).is_some());
+    }
+
+    // ---- remaining time / reset grouping -------------------------------------
+
+    /// `t(10, 0)` から秒数ぶん先の時刻。
+    fn after(secs: i64) -> DateTime<Utc> {
+        t(10, 0) + chrono::Duration::seconds(secs)
+    }
+
+    #[test]
+    fn remaining_formats_each_range() {
+        let now = t(10, 0);
+        // 1 時間未満は分 (切り上げ)。0 にはしない。
+        assert_eq!(format_remaining(after(1), now), Some("1m".to_string()));
+        assert_eq!(format_remaining(after(60), now), Some("1m".to_string()));
+        assert_eq!(format_remaining(after(61), now), Some("2m".to_string()));
+        assert_eq!(
+            format_remaining(after(59 * 60), now),
+            Some("59m".to_string())
+        );
+        // 1 日未満は 時h分m (分は切り捨て、ゼロ埋めなし)。
+        assert_eq!(format_remaining(after(3600), now), Some("1h0m".to_string()));
+        assert_eq!(
+            format_remaining(after(2 * 3600 + 10 * 60 + 59), now),
+            Some("2h10m".to_string())
+        );
+        assert_eq!(
+            format_remaining(after(23 * 3600 + 59 * 60), now),
+            Some("23h59m".to_string())
+        );
+        // 1 日以上は 日d時h (分は捨てる)。
+        assert_eq!(
+            format_remaining(after(86_400), now),
+            Some("1d0h".to_string())
+        );
+        assert_eq!(
+            format_remaining(after(2 * 86_400 + 9 * 3600 + 30 * 60), now),
+            Some("2d9h".to_string())
+        );
+        // 解除済み (ちょうど・過去) は出さない。
+        assert_eq!(format_remaining(now, now), None);
+        assert_eq!(format_remaining(after(-1), now), None);
+    }
+
+    #[test]
+    fn with_reset_appends_remaining_per_bucket() {
+        // 解除時刻が違う枠は個別に ⏳ が付く。
+        let mut s = snap(Some(42.0), Some(18.0), &[("Fable", 7.0)]);
+        s.five_hour.as_mut().unwrap().resets_at = Some(after(2 * 3600 + 10 * 60));
+        s.seven_day.as_mut().unwrap().resets_at = Some(after(2 * 86_400 + 9 * 3600));
+        s.models[0].1.resets_at = Some(after(4 * 86_400 + 3600));
+        assert_eq!(
+            format_usage_with_reset(&s, t(10, 0)),
+            "5h 42% ⏳2h10m · wk 18% ⏳2d9h · Fable 7% ⏳4d1h"
+        );
+        // % だけの表示はそのまま。
+        assert_eq!(format_usage(&s, t(10, 0)), "5h 42% · wk 18% · Fable 7%");
+    }
+
+    #[test]
+    fn with_reset_groups_adjacent_buckets_within_a_minute() {
+        // wk と Fable の解除が 60 秒以内なら、末尾に 1 回だけ。
+        let mut s = snap(Some(42.0), Some(18.0), &[("Fable", 7.0)]);
+        s.five_hour.as_mut().unwrap().resets_at = Some(after(2 * 3600 + 10 * 60));
+        s.seven_day.as_mut().unwrap().resets_at = Some(after(2 * 86_400 + 9 * 3600 + 1));
+        s.models[0].1.resets_at = Some(after(2 * 86_400 + 9 * 3600 + 60));
+        assert_eq!(
+            format_usage_with_reset(&s, t(10, 0)),
+            "5h 42% ⏳2h10m · wk 18% · Fable 7% ⏳2d9h"
+        );
+        // 61 秒離れたら別々。
+        s.models[0].1.resets_at = Some(after(2 * 86_400 + 9 * 3600 + 62));
+        assert_eq!(
+            format_usage_with_reset(&s, t(10, 0)),
+            "5h 42% ⏳2h10m · wk 18% ⏳2d9h · Fable 7% ⏳2d9h"
+        );
+    }
+
+    #[test]
+    fn with_reset_groups_only_adjacent_buckets() {
+        // 隣接していれば 5h と wk も同じ規則でまとまる (一般則)。
+        // 隣接していない 5h と Fable は、同じ時刻でもまとまらない。
+        let mut s = snap(Some(42.0), Some(18.0), &[("Fable", 7.0)]);
+        s.five_hour.as_mut().unwrap().resets_at = Some(after(3600));
+        s.seven_day.as_mut().unwrap().resets_at = Some(after(3600));
+        s.models[0].1.resets_at = Some(after(2 * 86_400));
+        assert_eq!(
+            format_usage_with_reset(&s, t(10, 0)),
+            "5h 42% · wk 18% ⏳1h0m · Fable 7% ⏳2d0h"
+        );
+        s.seven_day.as_mut().unwrap().resets_at = Some(after(2 * 86_400));
+        s.models[0].1.resets_at = Some(after(3600));
+        assert_eq!(
+            format_usage_with_reset(&s, t(10, 0)),
+            "5h 42% ⏳1h0m · wk 18% ⏳2d0h · Fable 7% ⏳1h0m"
+        );
+    }
+
+    #[test]
+    fn with_reset_omits_remaining_when_unknown_or_passed() {
+        // resets_at が無い / 解除済みの枠は % だけ (0% 扱いは format_usage と同じ)。
+        let mut s = snap(Some(55.0), Some(30.0), &[("Fable", 7.0)]);
+        s.five_hour.as_mut().unwrap().resets_at = Some(t(11, 0));
+        s.models[0].1.resets_at = Some(after(3 * 86_400));
+        assert_eq!(
+            format_usage_with_reset(&s, t(10, 59)),
+            "5h 55% ⏳1m · wk 30% · Fable 7% ⏳2d23h"
+        );
+        assert_eq!(
+            format_usage_with_reset(&s, t(11, 0)),
+            "5h 0% · wk 30% · Fable 7% ⏳2d23h"
+        );
+        // 解除済みの枠は次の枠とまとまらない (resets_at None と同じ扱い)。
+        s.seven_day.as_mut().unwrap().resets_at = Some(t(11, 0));
+        assert_eq!(
+            format_usage_with_reset(&s, t(11, 0)),
+            "5h 0% · wk 0% · Fable 7% ⏳2d23h"
+        );
+    }
+
+    #[test]
+    fn with_reset_reads_real_response() {
+        // 実応答: 5h は 14:40 (4h40m 後)、wk と Fable は 10/12 18:00 (秒以下だけ違う) で 1 回。
+        let s = parse_usage(FIXTURE, t(10, 0)).unwrap();
+        assert_eq!(
+            format_usage_with_reset(&s, t(10, 0)),
+            "5h 1% ⏳4h40m · wk 0% · Fable 0% ⏳6d8h"
+        );
+    }
+
+    #[test]
+    fn status_label_carries_full_and_bare_text() {
+        let s = parse_usage(FIXTURE, t(10, 0)).unwrap();
+        let label = status_label(&s, t(10, 0)).unwrap();
+        assert_eq!(label.full, "5h 1% ⏳4h40m · wk 0% · Fable 0% ⏳6d8h");
+        assert_eq!(label.bare, "5h 1% · wk 0% · Fable 0%");
+        assert_eq!(label.level, UsageLevel::Normal);
+    }
+
+    #[test]
+    fn hourglass_is_two_cells_wide() {
+        // Windows Terminal は ⏳ を絵文字 (2 桁) で描く。unicode-width の申告も
+        // 2 でないと行がはみ出す (ui のレイアウトは unicode-width で測る)。
+        assert_eq!(unicode_width::UnicodeWidthStr::width(HOURGLASS), 2);
     }
 
     // ---- credentials --------------------------------------------------------
@@ -675,3 +912,10 @@ mod tests {
 //                       shares results across ccnest windows via
 //                       %APPDATA%\ccnest\usage-cache.json. CCNEST_USAGE=off /
 //                       CCNEST_USAGE_POLL_SECS.
+// ver0.2 - 2026-10-10 - Countdown to each reset: format_remaining (59m / 2h10m /
+//                       2d9h, None once passed) and format_usage_with_reset,
+//                       which groups adjacent buckets whose resets_at are within
+//                       60 s and appends one " ⏳…" per group ("5h 42% ⏳2h10m ·
+//                       wk 18% · Fable 7% ⏳2d9h"). status_label returns
+//                       UsageLabel { full, bare, level } so the status bar can
+//                       fall back to the %-only text when the row is narrow.

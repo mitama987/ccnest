@@ -5,7 +5,7 @@ use std::time::{Duration, Instant};
 use anyhow::Result;
 use uuid::Uuid;
 
-use crate::claude::usage::{UsageCell, UsageLevel, UsageSnapshot};
+use crate::claude::usage::{UsageCell, UsageLabel, UsageSnapshot};
 use crate::pane::grid::{Direction, Layout};
 use crate::pane::status::{detect_status, sanitize_task, ClaudeStatus};
 use crate::pane::{Pane, PaneId};
@@ -299,10 +299,11 @@ impl App {
         }
     }
 
-    /// ステータスバーに出す利用制限 (`5h 42% · wk 18% · Fable 7%`) と色の段階。
+    /// ステータスバーに出す利用制限: 残り時間つき (`5h 42% ⏳2h10m · wk 18% ·
+    /// Fable 7% ⏳2d9h`)、% だけ (`5h 42% · wk 18% · Fable 7%`)、色の段階。
     /// アカウント全体の値なので、フォーカス中のペインが shell でも出す。
     /// 未取得・古すぎる値は None。
-    pub fn usage_label(&self) -> Option<(String, UsageLevel)> {
+    pub fn usage_label(&self) -> Option<UsageLabel> {
         crate::claude::usage::status_label(self.usage.as_ref()?, chrono::Utc::now())
     }
 
@@ -671,3 +672,6 @@ mod tests {
 //                       into usage on the 2 s tick with try_lock; usage_label()
 //                       gives the status-bar text and level, None when missing
 //                       or older than 30 minutes.
+// ver0.6 - 2026-10-10 - usage_label() returns UsageLabel { full, bare, level }:
+//                       the status-bar text with the countdown to each reset
+//                       and the %-only fallback for narrow rows.

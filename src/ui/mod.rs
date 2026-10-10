@@ -12,7 +12,7 @@ use ratatui::widgets::{Block, Borders, Clear, Paragraph, Widget};
 use ratatui::Frame;
 
 use crate::app::{folder_title, App, Rect as AppRect};
-use crate::claude::usage::UsageLevel;
+use crate::claude::usage::{UsageLabel, UsageLevel};
 use crate::pane::grid::{Layout, SplitDir};
 use crate::pane::status::{aggregate_status, status_marker, ClaudeStatus};
 use crate::pane::PaneId;
@@ -260,7 +260,9 @@ struct StatusLayout {
     cwd: String,
     model: String,
     branch: String,
-    /// 利用制限 % (`5h 42% · wk 18% · Fable 7%`)。切り詰めず、入らなければ丸ごと落とす。
+    /// 利用制限 (`5h 42% ⏳2h10m · wk 18% · Fable 7% ⏳2d9h`)。途中で切らない:
+    /// 入らなければまず % だけ (`5h 42% · wk 18% · Fable 7%`) に差し替え、
+    /// それでも入らなければ丸ごと落とす。
     usage: String,
 }
 
@@ -345,14 +347,22 @@ fn joined_width(parts: &[&str]) -> usize {
 /// 幅 `width` に収まるようセグメントを削る。
 ///
 /// **モデル名を最後まで守る**（cwd は既にタブタイトルにも出ているため）。
-/// 削る順は cwd → ブランチ → 利用制限 % → モデル。利用制限 % は途中で切ると
-/// 読み違えるので、詰めずに丸ごと落とす。
-fn layout_status(cwd: &str, model: &str, branch: &str, usage: &str, width: usize) -> StatusLayout {
+/// 削る順は cwd → ブランチ → 利用制限の残り時間 (`usage_full` → `usage_bare`)
+/// → 利用制限を丸ごと → モデル。利用制限は途中で切ると読み違えるので、
+/// 詰めずに段階ごと差し替える。
+fn layout_status(
+    cwd: &str,
+    model: &str,
+    branch: &str,
+    usage_full: &str,
+    usage_bare: &str,
+    width: usize,
+) -> StatusLayout {
     let mut l = StatusLayout {
         cwd: cwd.to_string(),
         model: model.to_string(),
         branch: branch.to_string(),
-        usage: usage.to_string(),
+        usage: usage_full.to_string(),
     };
     let fits = |l: &StatusLayout| joined_width(&[&l.cwd, &l.model, &l.branch, &l.usage]) <= width;
 
@@ -390,7 +400,16 @@ fn layout_status(cwd: &str, model: &str, branch: &str, usage: &str, width: usize
         }
     }
 
-    // 3) 利用制限 % を丸ごと落とす。
+    // 3) 利用制限の残り時間を落として % だけにする (cwd / ブランチは 1)・2) で
+    //    詰めた分のまま。戻して詰め直すより、短い方を優先して残す)。
+    if !l.usage.is_empty() && l.usage != usage_bare {
+        l.usage = usage_bare.to_string();
+        if fits(&l) {
+            return l;
+        }
+    }
+
+    // 4) 利用制限を丸ごと落とす。
     if !l.usage.is_empty() {
         l.usage = String::new();
         if fits(&l) {
@@ -398,7 +417,7 @@ fn layout_status(cwd: &str, model: &str, branch: &str, usage: &str, width: usize
         }
     }
 
-    // 4) 最後の砦。モデル名だけを幅に押し込む。
+    // 5) 最後の砦。モデル名だけを幅に押し込む。
     StatusLayout {
         model: ellipsize_right(&l.model, width),
         ..StatusLayout::default()
@@ -411,12 +430,12 @@ fn status_line<'a>(
     cwd: &str,
     model: &str,
     branch: &str,
-    usage: &str,
-    usage_level: UsageLevel,
+    usage: &UsageLabel,
     width: usize,
     theme: &theme::Theme,
 ) -> Line<'a> {
-    let layout = layout_status(cwd, model, branch, usage, width);
+    let layout = layout_status(cwd, model, branch, &usage.full, &usage.bare, width);
+    let usage_level = usage.level;
     let mut spans: Vec<Span> = Vec::new();
     for (text, kind) in layout.segments() {
         if !spans.is_empty() {
@@ -501,20 +520,12 @@ fn draw_statusbar(app: &App, frame: &mut Frame<'_>, area: Rect, theme: &theme::T
         .focused_branch()
         .map(|b| format!("⎇ {b}"))
         .unwrap_or_default();
-    // 利用制限 % はアカウント全体の値なので、どのペインにフォーカスしても同じ。
-    let (usage, usage_level) = app.usage_label().unwrap_or_default();
+    // 利用制限はアカウント全体の値なので、どのペインにフォーカスしても同じ。
+    let usage = app.usage_label().unwrap_or_default();
 
-    // 上段: cwd / status + モデル + ブランチ + 利用制限 %、下段: ショートカットヒント
+    // 上段: cwd / status + モデル + ブランチ + 利用制限、下段: ショートカットヒント
     let lines = vec![
-        status_line(
-            &cwd,
-            &model,
-            &branch,
-            &usage,
-            usage_level,
-            area.width as usize,
-            theme,
-        ),
+        status_line(&cwd, &model, &branch, &usage, area.width as usize, theme),
         Line::from(Span::styled(hint_text, theme.hint)),
     ];
     frame.render_widget(Paragraph::new(lines), area);
@@ -1107,7 +1118,7 @@ mod tests {
 
     #[test]
     fn statusbar_keeps_everything_when_wide() {
-        let l = layout_status(CWD, MODEL, BRANCH, "", 140);
+        let l = layout_status(CWD, MODEL, BRANCH, "", "", 140);
         assert_eq!(l.cwd, CWD);
         assert_eq!(l.model, MODEL);
         assert_eq!(l.branch, BRANCH);
@@ -1115,7 +1126,7 @@ mod tests {
 
     #[test]
     fn statusbar_truncates_cwd_before_model_and_branch() {
-        let l = layout_status(CWD, MODEL, BRANCH, "", 80);
+        let l = layout_status(CWD, MODEL, BRANCH, "", "", 80);
         // 追加した情報は無傷、cwd だけが削られる。
         assert_eq!(l.model, MODEL);
         assert_eq!(l.branch, BRANCH);
@@ -1127,7 +1138,7 @@ mod tests {
 
     #[test]
     fn statusbar_drops_cwd_then_truncates_branch() {
-        let l = layout_status(CWD, MODEL, BRANCH, "", 40);
+        let l = layout_status(CWD, MODEL, BRANCH, "", "", 40);
         assert_eq!(l.model, MODEL, "モデル名は最後まで守る");
         assert!(l.cwd.is_empty(), "cwd が先に落ちる: {:?}", l.cwd);
         assert!(
@@ -1140,7 +1151,7 @@ mod tests {
 
     #[test]
     fn statusbar_model_survives_at_minimum_width() {
-        let l = layout_status(CWD, MODEL, BRANCH, "", 12);
+        let l = layout_status(CWD, MODEL, BRANCH, "", "", 12);
         assert!(l.cwd.is_empty());
         assert!(l.branch.is_empty());
         assert!(!l.model.is_empty(), "モデル名が最後の砦");
@@ -1150,7 +1161,7 @@ mod tests {
     #[test]
     fn statusbar_never_exceeds_width_across_the_whole_range() {
         for w in 0..=160usize {
-            let l = layout_status(CWD, MODEL, BRANCH, "", w);
+            let l = layout_status(CWD, MODEL, BRANCH, "", "", w);
             assert!(
                 rendered_width(&l) <= w,
                 "width {w} overflowed: {l:?} -> {}",
@@ -1164,14 +1175,14 @@ mod tests {
         // 全角は 1 文字 2 桁。バイト長で測っていると必ずはみ出す。
         let cwd = "cwd: C:\\Users\\mitam\\Desktop\\work\\50_ブログ\\記事";
         for w in 0..=120usize {
-            let l = layout_status(cwd, MODEL, "⎇ main", "", w);
+            let l = layout_status(cwd, MODEL, "⎇ main", "", "", w);
             assert!(rendered_width(&l) <= w, "width {w}: {l:?}");
         }
     }
 
     #[test]
     fn statusbar_without_branch_outside_repo() {
-        let l = layout_status(CWD, MODEL, "", "", 140);
+        let l = layout_status(CWD, MODEL, "", "", "", 140);
         assert!(l.branch.is_empty());
         assert_eq!(l.cwd, CWD);
         assert_eq!(l.model, MODEL);
@@ -1182,8 +1193,7 @@ mod tests {
         cwd: &str,
         model: &str,
         branch: &str,
-        usage: &str,
-        level: UsageLevel,
+        usage: &UsageLabel,
         width: u16,
     ) -> Buffer {
         use ratatui::backend::TestBackend;
@@ -1191,11 +1201,19 @@ mod tests {
         let theme = theme::default_theme();
         let mut term = Terminal::new(TestBackend::new(width, 1)).unwrap();
         term.draw(|f| {
-            let line = status_line(cwd, model, branch, usage, level, width as usize, &theme);
+            let line = status_line(cwd, model, branch, usage, width as usize, &theme);
             f.render_widget(Paragraph::new(vec![line]), f.area());
         })
         .unwrap();
         term.backend().buffer().clone()
+    }
+
+    fn label(full: &str, bare: &str, level: UsageLevel) -> UsageLabel {
+        UsageLabel {
+            full: full.to_string(),
+            bare: bare.to_string(),
+            level,
+        }
     }
 
     fn row_text(buf: &Buffer, width: u16) -> String {
@@ -1208,18 +1226,20 @@ mod tests {
 
     /// 実際に端末バッファへ描いた 1 行目の文字列を取り出す (利用制限 % なし)。
     fn render_status_row(cwd: &str, model: &str, branch: &str, width: u16) -> String {
-        let buf = render_status_buffer(cwd, model, branch, "", UsageLevel::Normal, width);
+        let buf = render_status_buffer(cwd, model, branch, &UsageLabel::default(), width);
         row_text(&buf, width)
     }
 
-    // ---- status bar: usage % -------------------------------------------------
+    // ---- status bar: usage % + reset countdown ---------------------------------
 
+    /// 残り時間つき (full) と % だけ (bare)。
+    const USAGE_FULL: &str = "5h 42% ⏳2h10m · wk 18% · Fable 7% ⏳2d9h";
     const USAGE: &str = "5h 42% · wk 18% · Fable 7%";
 
     #[test]
     fn statusbar_appends_usage_after_branch() {
-        let l = layout_status(CWD, MODEL, BRANCH, USAGE, 160);
-        assert_eq!(l.usage, USAGE);
+        let l = layout_status(CWD, MODEL, BRANCH, USAGE_FULL, USAGE, 160);
+        assert_eq!(l.usage, USAGE_FULL);
         assert_eq!(l.cwd, CWD);
         let order: Vec<u8> = l.segments().map(|(_, k)| k).collect();
         assert_eq!(
@@ -1231,19 +1251,29 @@ mod tests {
 
     #[test]
     fn statusbar_trims_cwd_and_branch_before_usage() {
-        // cwd → ブランチの順に削り、利用制限 % は最後まで丸ごと残す。
-        let l = layout_status(CWD, MODEL, BRANCH, USAGE, 60);
-        assert_eq!(l.usage, USAGE);
+        // cwd → ブランチの順に削り、利用制限は残り時間ごと残す。
+        let l = layout_status(CWD, MODEL, BRANCH, USAGE_FULL, USAGE, 70);
+        assert_eq!(l.usage, USAGE_FULL);
         assert_eq!(l.model, MODEL);
         assert!(l.cwd.is_empty(), "{l:?}");
-        assert!(rendered_width(&l) <= 60);
+        assert!(rendered_width(&l) <= 70);
+    }
+
+    #[test]
+    fn statusbar_drops_countdown_before_usage() {
+        // 残り時間つきが入らなければ % だけに差し替える (途中で切らない)。
+        let w = width_of(MODEL) + STATUS_SEP_W + width_of(USAGE_FULL) - 1;
+        let l = layout_status(CWD, MODEL, BRANCH, USAGE_FULL, USAGE, w);
+        assert_eq!(l.usage, USAGE, "{l:?}");
+        assert_eq!(l.model, MODEL);
+        assert!(rendered_width(&l) <= w);
     }
 
     #[test]
     fn statusbar_drops_usage_whole_before_model() {
-        // 利用制限 % は途中で切らない。入らなければ丸ごと落としてモデル名を残す。
+        // % だけでも入らなければ丸ごと落としてモデル名を残す。
         let w = width_of(MODEL) + STATUS_SEP_W + width_of(USAGE) - 1;
-        let l = layout_status(CWD, MODEL, BRANCH, USAGE, w);
+        let l = layout_status(CWD, MODEL, BRANCH, USAGE_FULL, USAGE, w);
         assert!(l.usage.is_empty(), "{l:?}");
         assert_eq!(l.model, MODEL);
         assert!(rendered_width(&l) <= w);
@@ -1252,15 +1282,15 @@ mod tests {
     #[test]
     fn statusbar_with_usage_never_exceeds_width() {
         for w in 0..=160usize {
-            let l = layout_status(CWD, MODEL, BRANCH, USAGE, w);
+            let l = layout_status(CWD, MODEL, BRANCH, USAGE_FULL, USAGE, w);
             assert!(
                 rendered_width(&l) <= w,
                 "width {w} overflowed: {l:?} -> {}",
                 rendered_width(&l)
             );
             assert!(
-                l.usage.is_empty() || l.usage == USAGE,
-                "利用制限 % は詰めない: {l:?}"
+                l.usage.is_empty() || l.usage == USAGE || l.usage == USAGE_FULL,
+                "利用制限は詰めない (空 / % だけ / 残り時間つき のどれか): {l:?}"
             );
         }
     }
@@ -1268,14 +1298,22 @@ mod tests {
     #[test]
     fn statusbar_renders_usage_row_and_level_colors() {
         let theme = theme::default_theme();
-        let row_with =
-            |level| render_status_buffer("cwd: C:\\tmp", "Fable 5.1", "⎇ main", USAGE, level, 100);
+        let row_with = |level| {
+            render_status_buffer(
+                "cwd: C:\\tmp",
+                "Fable 5.1",
+                "⎇ main",
+                &label(USAGE_FULL, USAGE, level),
+                100,
+            )
+        };
         let buf = row_with(UsageLevel::Normal);
+        // ⏳ は 2 セル幅なので、バッファ上は後ろに空セルが 1 つ入る。
         assert_eq!(
             row_text(&buf, 100),
-            "cwd: C:\\tmp │ Fable 5.1 │ ⎇ main │ 5h 42% · wk 18% · Fable 7%"
+            "cwd: C:\\tmp │ Fable 5.1 │ ⎇ main │ 5h 42% ⏳ 2h10m · wk 18% · Fable 7% ⏳ 2d9h"
         );
-        // 利用制限 % の先頭セル ("5") の色が段階どおり。
+        // 利用制限の先頭セル ("5") の色が段階どおり。
         let x = width_of("cwd: C:\\tmp │ Fable 5.1 │ ⎇ main │ ") as u16;
         assert_eq!(buf[(x, 0)].symbol(), "5");
         assert_eq!(buf[(x, 0)].fg, theme.status_usage.fg.unwrap());
@@ -1283,6 +1321,20 @@ mod tests {
         assert_eq!(buf[(x, 0)].fg, theme.status_usage_warn.fg.unwrap());
         let buf = row_with(UsageLevel::Crit);
         assert_eq!(buf[(x, 0)].fg, theme.status_usage_crit.fg.unwrap());
+    }
+
+    #[test]
+    fn statusbar_renders_bare_usage_when_countdown_does_not_fit() {
+        // 幅 45: cwd とブランチを落としても残り時間つき (41 桁) は入らず、
+        // % だけ (26 桁) になる。2 行目にはみ出さない。
+        let buf = render_status_buffer(
+            "cwd: C:\\tmp",
+            "Fable 5.1",
+            "⎇ main",
+            &label(USAGE_FULL, USAGE, UsageLevel::Normal),
+            45,
+        );
+        assert_eq!(row_text(&buf, 45), "Fable 5.1 │ 5h 42% · wk 18% · Fable 7%");
     }
 
     #[test]
@@ -1635,3 +1687,8 @@ mod tests {
 //                        coloured by level (sky / yellow ≥70% / bold red ≥90%).
 //                        Trim order is cwd → branch → usage (dropped whole, never
 //                        ellipsized) → model.
+// ver0.15 - 2026-10-10 - Status-bar usage segment carries the reset countdown
+//                        (UsageLabel.full, e.g. "5h 42% ⏳2h10m · wk 18% ·
+//                        Fable 7% ⏳2d9h"). Trim order is now cwd → branch →
+//                        countdowns (swap in UsageLabel.bare) → usage whole →
+//                        model; the segment is still never ellipsized.
