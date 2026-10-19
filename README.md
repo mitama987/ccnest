@@ -49,7 +49,14 @@ From any directory:
 ```sh
 ccnest          # use the current directory as the initial pane cwd
 ccnest path\to\project
+ccnest path\to\project --resume <session-id>=<tab name> --resume <session-id>
 ```
+
+`--resume` reopens existing Claude sessions (`claude --resume <id>`), one tab
+each, for example after a reboot. The tab name after `=` is optional (the
+folder name otherwise). The first session opens right away; the rest open one
+per 2 seconds without switching the active tab, so parallel Claude starts do
+not write `~/.claude.json` at the same time.
 
 ## Default keybindings
 
@@ -197,7 +204,7 @@ The selection cursor is a solid white reversed block (`bg=white`,
 ## Claude context detection
 
 - Each pane gets a pre-generated `session_id` and is launched with
-  `claude --session-id <uuid>`.
+  `claude --session-id <uuid>` (`claude --resume <uuid>` for `--resume` tabs, same id).
 - The sidebar refreshes every 2 seconds and re-reads the JSONL.
 - Usage is computed from the *last* `usage` field in the JSONL: input +
   cache_creation_input + cache_read_input + output tokens.
@@ -239,3 +246,4 @@ ver0.1.19 - 2026-10-04 - Copying a long path or URL that Claude Code wrapped ont
 ver0.1.20 - 2026-10-06 - The status bar shows claude.ai plan usage after the branch: `5h 42% · wk 18% · Fable 7%` (session, week, and each model-specific weekly limit), colored yellow from 70% and red from 90%. A background thread polls the undocumented `/api/oauth/usage` endpoint (the one `/usage` uses) every 5 minutes with the token from `~/.claude/.credentials.json`, never refreshing it, and shares the result across windows via `%APPDATA%\ccnest\usage-cache.json`. `CCNEST_USAGE=off` disables it; `CCNEST_USAGE_POLL_SECS` changes the interval.
 ver0.1.21 - 2026-10-10 - Copying a long unbroken string (such as a token list) that Claude Code wrapped exactly at the last column no longer keeps the continuation row's indent spaces: when ConPTY continues such a row through the terminal's own auto-wrap instead of a cursor move, the next row's leading spaces are recognized as Claude Code's hanging indent (same width as the paragraph's body position) and dropped, so the copy is one unbroken line. Plain shell soft wraps, list items and rows whose indent differs keep their spaces.
 ver0.1.22 - 2026-10-10 - The status bar's plan usage shows the countdown to each limit's reset: `5h 42% ⏳2h10m · wk 18% · Fable 7% ⏳2d9h` (minutes under an hour, hours+minutes under a day, days+hours beyond; weekly limits that reset at the same time share one countdown). When the row is too narrow the countdowns go first and the %-only text stays, then the whole usage part as before.
+ver0.1.23 - 2026-10-19 - `ccnest <dir> --resume <session-id>[=<tab name>] ...` reopens saved Claude sessions one tab each (`claude --resume <id>` instead of a new `--session-id`). The first opens at startup, the rest one per 2 s tick without stealing the active tab. Unknown options now exit with an error instead of starting.

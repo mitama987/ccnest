@@ -60,9 +60,23 @@ pub fn spawn_opts_from(get: impl Fn(&str) -> Option<String>) -> SpawnOpts {
     }
 }
 
+/// ペインの Claude セッションを新規に作るか、既存セッションを再開するか。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SessionStart {
+    /// `--session-id <id>`: 事前に払い出した uuid で新規セッションを作る。
+    New,
+    /// `--resume <id>`: 既存セッションを開き直す (再起動後の復元用)。
+    /// fork しないので session id は変わらず、JSONL 追跡もそのまま使える。
+    Resume,
+}
+
 /// `claude` に渡す引数列 (バイナリ名を除く) を組み立てる純粋関数。
-pub fn build_claude_args(session_id: &str, opts: &SpawnOpts) -> Vec<String> {
-    let mut args = vec!["--session-id".to_string(), session_id.to_string()];
+pub fn build_claude_args(session_id: &str, start: SessionStart, opts: &SpawnOpts) -> Vec<String> {
+    let id_flag = match start {
+        SessionStart::New => "--session-id",
+        SessionStart::Resume => "--resume",
+    };
+    let mut args = vec![id_flag.to_string(), session_id.to_string()];
     if let Some(mode) = &opts.permission_mode {
         args.push("--permission-mode".to_string());
         args.push(mode.clone());
@@ -80,6 +94,7 @@ pub fn build_claude_args(session_id: &str, opts: &SpawnOpts) -> Vec<String> {
 pub fn spawn_claude(
     cwd: &Path,
     session_id: Uuid,
+    start: SessionStart,
     parser: Arc<Mutex<vt100::Parser>>,
     hooks: ReaderHooks,
 ) -> Result<(PtyHandle, String, bool)> {
@@ -94,7 +109,7 @@ pub fn spawn_claude(
         // 従来の bypass 直行に戻すには CCNEST_CLAUDE_PERMISSION_MODE=off。
         // 詳細は spawn_opts_from のドキュメントコメントを参照。
         let opts = spawn_opts_from(|k| std::env::var(k).ok());
-        for arg in build_claude_args(&session_id.to_string(), &opts) {
+        for arg in build_claude_args(&session_id.to_string(), start, &opts) {
             cmd.arg(arg);
         }
         cmd.cwd(cwd);
@@ -234,7 +249,7 @@ mod tests {
     // 既定の引数列: session-id が先頭、plan + allow-cycle が続く
     #[test]
     fn default_args_contain_plan_and_allow_flag() {
-        let args = build_claude_args("abc", &spawn_opts_from(env_none));
+        let args = build_claude_args("abc", SessionStart::New, &spawn_opts_from(env_none));
         assert_eq!(
             args,
             [
@@ -251,7 +266,7 @@ mod tests {
     #[test]
     fn mode_off_restores_legacy_bypass_start() {
         let get = |k: &str| (k == "CCNEST_CLAUDE_PERMISSION_MODE").then(|| "off".to_string());
-        let args = build_claude_args("abc", &spawn_opts_from(get));
+        let args = build_claude_args("abc", SessionStart::New, &spawn_opts_from(get));
         assert_eq!(
             args,
             ["--session-id", "abc", "--dangerously-skip-permissions"]
@@ -269,7 +284,7 @@ mod tests {
     #[test]
     fn no_skip_env_disables_bypass_flags_keeps_plan() {
         let get = |k: &str| (k == "CCNEST_CLAUDE_NO_SKIP_PERMISSIONS").then(|| "1".to_string());
-        let args = build_claude_args("abc", &spawn_opts_from(get));
+        let args = build_claude_args("abc", SessionStart::New, &spawn_opts_from(get));
         assert_eq!(args, ["--session-id", "abc", "--permission-mode", "plan"]);
     }
 
@@ -281,7 +296,7 @@ mod tests {
             "CCNEST_CLAUDE_PERMISSION_MODE" => Some("off".to_string()),
             _ => None,
         };
-        let args = build_claude_args("abc", &spawn_opts_from(get));
+        let args = build_claude_args("abc", SessionStart::New, &spawn_opts_from(get));
         assert_eq!(args, ["--session-id", "abc"]);
     }
 
@@ -290,7 +305,7 @@ mod tests {
     fn custom_mode_passes_through() {
         let get =
             |k: &str| (k == "CCNEST_CLAUDE_PERMISSION_MODE").then(|| "acceptEdits".to_string());
-        let args = build_claude_args("abc", &spawn_opts_from(get));
+        let args = build_claude_args("abc", SessionStart::New, &spawn_opts_from(get));
         assert_eq!(
             args,
             [
@@ -298,6 +313,22 @@ mod tests {
                 "abc",
                 "--permission-mode",
                 "acceptEdits",
+                "--allow-dangerously-skip-permissions",
+            ]
+        );
+    }
+
+    // 再開時は --session-id の代わりに --resume、permission 系は新規と同じ
+    #[test]
+    fn resume_uses_resume_flag_and_keeps_permission_flags() {
+        let args = build_claude_args("abc", SessionStart::Resume, &spawn_opts_from(env_none));
+        assert_eq!(
+            args,
+            [
+                "--resume",
+                "abc",
+                "--permission-mode",
+                "plan",
                 "--allow-dangerously-skip-permissions",
             ]
         );
@@ -328,6 +359,8 @@ mod tests {
 }
 
 // Version History
+// - ver1.4 (2026-10-19): SessionStart (New / Resume) を追加。Resume は `--session-id` の
+//   代わりに `--resume <id>` で既存セッションを開き直す (再起動後の復元用)。
 // - ver1.3 (2026-09-07): should_pass_env() で端末アイデンティティ変数 (WT_SESSION /
 //   TERM_PROGRAM / ConEmu* / TMUX 等) を子へ渡さない。ccnest をどの端末から起動したかで
 //   子 (Claude Code) の描画経路が変わり、計測の交絡になっていた。

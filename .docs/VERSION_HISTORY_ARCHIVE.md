@@ -5,6 +5,34 @@
 
 ---
 
+## 2026-10-19 — 保存済みセッションを再開して開く `--resume`（v0.1.23）
+
+ブランチ: `feature/resume-sessions`
+
+### 背景
+
+PC 再起動後の復元スクリプト（`~/.claude/scripts/claude-sessions-restore.ps1`）は 1 セッション 1 つの Windows Terminal タブで素の `claude --resume` を開いていた。ゆうさんの希望は「ccnest で、リポジトリごとに 1 つの ccnest にまとめて開く」。ccnest は常に新しい uuid の `--session-id` で起動するので、既存セッションを開く手段が無かった。
+
+### 変更点
+
+| ファイル | ver | 内容 |
+|---|---|---|
+| src/cli.rs | 0.1 | 新規。`parse_args`（位置引数 cwd＋繰り返し `--resume <uuid>[=<タブ名>]`・未知のオプションはエラー）と `ResumeSpec` |
+| src/claude/launcher.rs | 1.4 | `SessionStart { New, Resume }`。Resume は `--session-id` の代わりに `--resume <id>`（permission 系フラグは同じ） |
+| src/pane/mod.rs | 0.2 | `Pane::spawn` が `SessionStart` を受け取る |
+| src/app.rs | 0.7 | `App::with_resumes`。先頭のセッションで最初のタブ、残りは `pending_resumes` に積み `spawn_next_resume` で 1 タブずつ（アクティブタブは変えない） |
+| src/event.rs | - | 2 秒 tick で `spawn_next_resume` を 1 回呼ぶ。失敗はステータス行へ |
+| src/main.rs | 0.2 | `parse_args` → `App::with_resumes` |
+| README.md | - | Launch 節に `--resume`、Version History |
+| Cargo.toml | - | 0.1.22 → 0.1.23 |
+
+設計メモ:
+- 1 tick 1 タブにしたのは、並行起動した claude が `~/.claude.json` を同時に書いて壊すのを避けるため（旧スクリプトも 1.5 秒ずつ空けていた）。14 セッションなら約 28 秒で揃う
+- `--resume` は fork しないので session id は不変 → サイドバーの残りコンテキスト（`session_path(cwd, id)`）はそのまま効く
+- 副作用: `ccnest --help` など未知のオプションは raw mode に入る前にエラー終了する（以前は対話モードで起動していた）
+
+---
+
 ## 2026-10-10 — ステータスバーの利用制限に解除までの残り時間を出す（v0.1.22）
 
 ブランチ: `feature/usage-reset-countdown`

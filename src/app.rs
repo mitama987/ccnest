@@ -1,11 +1,13 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 use anyhow::Result;
 use uuid::Uuid;
 
+use crate::claude::launcher::SessionStart;
 use crate::claude::usage::{UsageCell, UsageLabel, UsageSnapshot};
+use crate::cli::ResumeSpec;
 use crate::pane::grid::{Direction, Layout};
 use crate::pane::status::{detect_status, sanitize_task, ClaudeStatus};
 use crate::pane::{Pane, PaneId};
@@ -84,6 +86,8 @@ pub struct App {
     /// 描画用の利用制限。`refresh_pane_state` が `usage_cell` からコピーする
     /// (描画パスではロックを取らない)。
     pub usage: Option<UsageSnapshot>,
+    /// `--resume` で渡され、まだタブを開いていないセッション。
+    pub pending_resumes: VecDeque<ResumeSpec>,
     /// イベントループを起こすチャネルの送信側。ペイン生成時に reader へ配る。
     wake_tx: WakeTx,
     /// 受信側。`run_event_loop` が起動時に `take_wake_rx` で持っていく。
@@ -180,14 +184,26 @@ pub fn folder_title(cwd: &Path) -> String {
 
 impl App {
     pub fn new(cwd: PathBuf) -> Result<Self> {
+        Self::with_resumes(cwd, Vec::new())
+    }
+
+    /// `resumes` が空なら [`App::new`] と同じ (新規 1 ペイン)。あれば先頭の
+    /// セッションで最初のタブを開き、残りは `pending_resumes` に積んで
+    /// 2 秒 tick ごとに 1 タブずつ開く ([`App::spawn_next_resume`])。
+    pub fn with_resumes(cwd: PathBuf, resumes: Vec<ResumeSpec>) -> Result<Self> {
+        let mut pending_resumes: VecDeque<ResumeSpec> = resumes.into();
+        let (session_id, start, title) = match pending_resumes.pop_front() {
+            Some(r) => (r.session_id, SessionStart::Resume, r.title),
+            None => (Uuid::new_v4(), SessionStart::New, None),
+        };
         let mut panes = HashMap::new();
         let first_id = 1 as PaneId;
         let (wake_tx, wake_rx) = std::sync::mpsc::channel();
-        let first = Pane::spawn(first_id, &cwd, Uuid::new_v4(), wake_tx.clone())?;
+        let first = Pane::spawn(first_id, &cwd, session_id, start, wake_tx.clone())?;
         panes.insert(first_id, first);
 
         let tab = Tab {
-            title: folder_title(&cwd),
+            title: title.unwrap_or_else(|| folder_title(&cwd)),
             layout: Layout::Leaf(first_id),
             focused: first_id,
         };
@@ -218,9 +234,37 @@ impl App {
             last_forwarded_move: None,
             usage_cell: UsageCell::default(),
             usage: None,
+            pending_resumes,
             wake_tx,
             wake_rx: Some(wake_rx),
         })
+    }
+
+    /// 開き待ちの再開セッションを 1 つだけ新しいタブで開く。アクティブタブは
+    /// 変えない (開いている間に操作中のタブを奪わない)。開いたら true。
+    /// 一度に全部 spawn しないのは、並行起動した claude が `~/.claude.json` を
+    /// 同時に書いて壊すのを避けるため。
+    pub fn spawn_next_resume(&mut self) -> Result<bool> {
+        let Some(spec) = self.pending_resumes.pop_front() else {
+            return Ok(false);
+        };
+        let cwd = self.cwd.clone();
+        let new_id = self.next_pane_id;
+        self.next_pane_id += 1;
+        let pane = Pane::spawn(
+            new_id,
+            &cwd,
+            spec.session_id,
+            SessionStart::Resume,
+            self.wake_tx.clone(),
+        )?;
+        self.panes.insert(new_id, pane);
+        self.tabs.push(Tab {
+            title: spec.title.unwrap_or_else(|| folder_title(&cwd)),
+            layout: Layout::Leaf(new_id),
+            focused: new_id,
+        });
+        Ok(true)
     }
 
     /// 入力ポンプスレッドなどに配る送信側。
@@ -353,7 +397,13 @@ impl App {
         let cwd = self.focused_pane_cwd();
         let new_id = self.next_pane_id;
         self.next_pane_id += 1;
-        let pane = Pane::spawn(new_id, &cwd, Uuid::new_v4(), self.wake_tx.clone())?;
+        let pane = Pane::spawn(
+            new_id,
+            &cwd,
+            Uuid::new_v4(),
+            SessionStart::New,
+            self.wake_tx.clone(),
+        )?;
         self.panes.insert(new_id, pane);
         let focused = self.current_tab().focused;
         let layout = std::mem::replace(&mut self.current_tab_mut().layout, Layout::Leaf(focused));
@@ -367,7 +417,13 @@ impl App {
         let cwd = self.focused_pane_cwd();
         let new_id = self.next_pane_id;
         self.next_pane_id += 1;
-        let pane = Pane::spawn(new_id, &cwd, Uuid::new_v4(), self.wake_tx.clone())?;
+        let pane = Pane::spawn(
+            new_id,
+            &cwd,
+            Uuid::new_v4(),
+            SessionStart::New,
+            self.wake_tx.clone(),
+        )?;
         self.panes.insert(new_id, pane);
         self.tabs.push(Tab {
             title: folder_title(&cwd),
@@ -675,3 +731,7 @@ mod tests {
 // ver0.6 - 2026-10-10 - usage_label() returns UsageLabel { full, bare, level }:
 //                       the status-bar text with the countdown to each reset
 //                       and the %-only fallback for narrow rows.
+// ver0.7 - 2026-10-19 - with_resumes(cwd, resumes): the first saved session
+//                       opens in the first tab, the rest queue in
+//                       pending_resumes and spawn_next_resume() opens one tab
+//                       per 2 s tick without stealing the active tab.

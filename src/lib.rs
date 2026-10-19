@@ -1,5 +1,6 @@
 pub mod app;
 pub mod claude;
+pub mod cli;
 pub mod event;
 pub mod keymap;
 pub mod mouse;

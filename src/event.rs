@@ -233,6 +233,11 @@ pub fn run_event_loop<B: Backend>(term: &mut Terminal<B>, mut app: App) -> Resul
                 app.sidebar.refresh();
             }
             app.refresh_pane_state();
+            // `--resume` の残りを 1 tick 1 タブずつ開く。失敗はステータス行に
+            // 出して次へ (1 件の失敗で残りを止めない)。
+            if let Err(e) = app.spawn_next_resume() {
+                app.status = Some(format!("resume failed: {e}"));
+            }
             last_refresh = Instant::now();
             dirty = true;
         }
@@ -4335,3 +4340,6 @@ mod tests {
 //                        the previous row's body position, the previous row ends
 //                        in a splittable word, and the next row is not a list item
 //                        or a new path. Measured on Claude Code v2.1.296 / 118 cols.
+// ver0.12 - 2026-10-19 - The 2 s tick also calls app.spawn_next_resume() so the
+//                        `--resume` sessions open one tab per tick (errors go to
+//                        the status line).

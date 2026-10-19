@@ -9,7 +9,7 @@ use std::time::Instant;
 use anyhow::Result;
 use uuid::Uuid;
 
-use crate::claude::launcher::{spawn_claude, spawn_shell};
+use crate::claude::launcher::{spawn_claude, spawn_shell, SessionStart};
 use crate::claude::session::{session_path, SessionTailer};
 use crate::pane::pty::ReaderHooks;
 use crate::pane::status::ClaudeStatus;
@@ -66,7 +66,13 @@ pub fn next_size(last: Option<(u16, u16)>, rows: u16, cols: u16) -> Option<(u16,
 }
 
 impl Pane {
-    pub fn spawn(id: PaneId, cwd: &Path, session_id: Uuid, wake: WakeTx) -> Result<Self> {
+    pub fn spawn(
+        id: PaneId,
+        cwd: &Path,
+        session_id: Uuid,
+        start: SessionStart,
+        wake: WakeTx,
+    ) -> Result<Self> {
         let parser = Arc::new(Mutex::new(vt100::Parser::new(24, 80, 2000)));
         let waker = OutputWaker::new(wake, id);
         let hooks = ReaderHooks {
@@ -74,7 +80,7 @@ impl Pane {
             waker: Some(waker.clone()),
         };
         let (pty, command, claude_running) =
-            spawn_claude(cwd, session_id, Arc::clone(&parser), hooks.clone())?;
+            spawn_claude(cwd, session_id, start, Arc::clone(&parser), hooks.clone())?;
         // claude が起動できなかった (shell フォールバック) ペインは追跡しない。
         let session = if claude_running {
             SessionTailer::new(session_path(cwd, &session_id.to_string()))
@@ -206,6 +212,8 @@ mod tests {
 }
 
 // Version History
+// ver0.2 - 2026-10-19 - Pane::spawn takes a SessionStart so a pane can resume an
+//                       existing Claude session (`--resume <id>`).
 // ver0.1 - 2026-09-06 - Pane owns an OutputWaker (reader → event loop
 //                       notification) and caches last_size so
 //                       resize_if_changed() only touches the PTY / parser when
