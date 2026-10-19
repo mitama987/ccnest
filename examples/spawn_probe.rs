@@ -8,7 +8,7 @@ use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
 
-use ccnest::claude::launcher::spawn_claude;
+use ccnest::claude::launcher::{spawn_claude, SessionStart};
 use ccnest::pane::pty::ReaderHooks;
 use uuid::Uuid;
 
@@ -20,6 +20,7 @@ fn main() {
     let (pty, cmd_label, claude_running) = spawn_claude(
         &cwd,
         session_id,
+        SessionStart::New,
         Arc::clone(&parser),
         ReaderHooks::default(),
     )

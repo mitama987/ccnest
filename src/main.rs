@@ -15,12 +15,14 @@ use ratatui::backend::CrosstermBackend;
 use ratatui::Terminal;
 
 use ccnest::app::App;
+use ccnest::cli::parse_args;
 use ccnest::event::run_event_loop;
 
 fn main() -> Result<()> {
-    let cwd = std::env::args()
-        .nth(1)
-        .map(PathBuf::from)
+    // raw mode に入る前に解析する (不正な引数はエラー表示で即終了)。
+    let cli = parse_args(std::env::args().skip(1))?;
+    let cwd = cli
+        .cwd
         .unwrap_or_else(|| std::env::current_dir().expect("current_dir"));
 
     install_panic_hook();
@@ -39,7 +41,7 @@ fn main() -> Result<()> {
     let backend = CrosstermBackend::new(BufWriter::with_capacity(1 << 20, stdout));
     let mut terminal = Terminal::new(backend)?;
 
-    let app = App::new(cwd)?;
+    let app = App::with_resumes(cwd, cli.resumes)?;
     let result = run_event_loop(&mut terminal, app);
 
     restore_terminal();
@@ -108,3 +110,6 @@ fn write_crash_log(info: &std::panic::PanicHookInfo<'_>) -> Option<PathBuf> {
 // Version History
 // ver0.1 - 2026-09-06 - Wrap stdout in a 1 MB BufWriter so a large frame diff is
 //                       not flushed to the console in 1 KB LineWriter chunks.
+// ver0.2 - 2026-10-19 - Parse args with cli::parse_args (cwd + repeated
+//                       `--resume <uuid>[=<title>]`) and start via
+//                       App::with_resumes.
