@@ -25,6 +25,10 @@ struct PtyInner {
     master: Box<dyn MasterPty + Send>,
     writer: Box<dyn Write + Send>,
     child: Box<dyn portable_pty::Child + Send + Sync>,
+    /// 子プロセスとその子孫をまとめた Job Object (Windows)。`kill` で木ごと
+    /// 終了させ、ccnest 自体が落ちてもハンドルが閉じれば OS が全部終わらせる。
+    /// 割り当てに失敗した (None) ときは `kill` が子孫を列挙して個別に止める。
+    tree: Option<tree::ProcessTree>,
 }
 
 impl PtyHandle {
@@ -45,6 +49,9 @@ impl PtyHandle {
 
         let child = slave.spawn_command(cmd).context("spawn_command")?;
         drop(slave);
+        // CreateProcessW が返った直後 = 子はまだローダ初期化中で孫を作れていないので、
+        // ここで Job に入れれば以後に生まれる孫 (シム → claude.exe) も全部 Job に属する。
+        let tree = child.process_id().and_then(tree::ProcessTree::adopt);
         let writer = master.take_writer().context("take_writer")?;
         let mut reader = master.try_clone_reader().context("try_clone_reader")?;
 
@@ -52,6 +59,7 @@ impl PtyHandle {
             master,
             writer,
             child,
+            tree,
         }));
 
         let inner_r = Arc::clone(&inner);
@@ -106,10 +114,188 @@ impl PtyHandle {
         }
     }
 
+    /// 子プロセスを子孫ごと終了させる。portable-pty の `Child::kill` は直下の子
+    /// (CCNEST_CLAUDE_BIN のシム) を TerminateProcess するだけで、孫の claude.exe
+    /// は ConPTY を失ったまま生き残っていた (2026-10-21: 閉じたタブ 19 本分・約
+    /// 5.5GB が孤児として残存)。Job があれば TerminateJobObject で木ごと、無ければ
+    /// 子孫を列挙して葉から順に止めてから子を kill する。
     pub fn kill(&self) {
         if let Ok(mut guard) = self.inner.lock() {
+            match &guard.tree {
+                Some(t) => t.kill(),
+                None => {
+                    if let Some(pid) = guard.child.process_id() {
+                        tree::kill_descendants(pid);
+                    }
+                }
+            }
             let _ = guard.child.kill();
         }
+    }
+
+    /// 直下の子プロセスの PID (テスト・診断用)。
+    #[cfg(test)]
+    pub fn child_pid(&self) -> Option<u32> {
+        self.inner.lock().ok().and_then(|g| g.child.process_id())
+    }
+}
+
+/// ペインの子プロセス木の管理 (Windows は Job Object、他 OS は何もしない)。
+pub mod tree {
+    #[cfg(windows)]
+    mod imp {
+        use std::mem::{size_of, zeroed};
+
+        use windows_sys::Win32::Foundation::{CloseHandle, HANDLE, INVALID_HANDLE_VALUE};
+        use windows_sys::Win32::System::Diagnostics::ToolHelp::{
+            CreateToolhelp32Snapshot, Process32FirstW, Process32NextW, PROCESSENTRY32W,
+            TH32CS_SNAPPROCESS,
+        };
+        use windows_sys::Win32::System::JobObjects::{
+            AssignProcessToJobObject, CreateJobObjectW, JobObjectExtendedLimitInformation,
+            SetInformationJobObject, TerminateJobObject, JOBOBJECT_EXTENDED_LIMIT_INFORMATION,
+            JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
+        };
+        use windows_sys::Win32::System::Threading::{
+            OpenProcess, TerminateProcess, PROCESS_SET_QUOTA, PROCESS_TERMINATE,
+        };
+
+        /// `JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE` 付きの Job Object。最後のハンドルが
+        /// 閉じた時点 (= この値の Drop、または ccnest プロセスの終了) で所属プロセスが
+        /// 全部終了する。Windows 8 以降は入れ子の Job が許されるので、ccnest 自身が
+        /// 別の Job (Windows Terminal 等) に属していても割り当てられる。
+        pub struct ProcessTree {
+            job: HANDLE,
+        }
+
+        // HANDLE は生ポインタ型だが Job ハンドルはスレッドをまたいで使える。
+        unsafe impl Send for ProcessTree {}
+
+        impl ProcessTree {
+            /// `pid` を新しい Job に入れる。失敗 (権限・Job 作成不可) は None。
+            pub fn adopt(pid: u32) -> Option<Self> {
+                unsafe {
+                    let job = CreateJobObjectW(std::ptr::null(), std::ptr::null());
+                    if job == 0 {
+                        return None;
+                    }
+                    let mut info: JOBOBJECT_EXTENDED_LIMIT_INFORMATION = zeroed();
+                    info.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
+                    let ok = SetInformationJobObject(
+                        job,
+                        JobObjectExtendedLimitInformation,
+                        &info as *const _ as *const std::ffi::c_void,
+                        size_of::<JOBOBJECT_EXTENDED_LIMIT_INFORMATION>() as u32,
+                    );
+                    if ok == 0 {
+                        CloseHandle(job);
+                        return None;
+                    }
+                    let proc = OpenProcess(PROCESS_SET_QUOTA | PROCESS_TERMINATE, 0, pid);
+                    if proc == 0 {
+                        CloseHandle(job);
+                        return None;
+                    }
+                    let assigned = AssignProcessToJobObject(job, proc);
+                    CloseHandle(proc);
+                    if assigned == 0 {
+                        CloseHandle(job);
+                        return None;
+                    }
+                    Some(Self { job })
+                }
+            }
+
+            /// Job に属する全プロセスを即時終了させる。
+            pub fn kill(&self) {
+                unsafe {
+                    TerminateJobObject(self.job, 1);
+                }
+            }
+        }
+
+        impl Drop for ProcessTree {
+            fn drop(&mut self) {
+                unsafe {
+                    CloseHandle(self.job);
+                }
+            }
+        }
+
+        /// 現在の全プロセスの (pid, 親 pid) 一覧。
+        pub fn process_table() -> Vec<(u32, u32)> {
+            let mut out = Vec::new();
+            unsafe {
+                let snap = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
+                if snap == INVALID_HANDLE_VALUE {
+                    return out;
+                }
+                let mut e: PROCESSENTRY32W = zeroed();
+                e.dwSize = size_of::<PROCESSENTRY32W>() as u32;
+                if Process32FirstW(snap, &mut e) != 0 {
+                    loop {
+                        out.push((e.th32ProcessID, e.th32ParentProcessID));
+                        if Process32NextW(snap, &mut e) == 0 {
+                            break;
+                        }
+                    }
+                }
+                CloseHandle(snap);
+            }
+            out
+        }
+
+        /// `root` の子孫 PID を深さ優先 (親より先に子) の順で返す。
+        pub fn descendants(root: u32) -> Vec<u32> {
+            super::descendants_in(&process_table(), root)
+        }
+
+        /// Job に入れられなかったときの代替: 子孫を列挙して個別に TerminateProcess。
+        pub fn kill_descendants(root: u32) {
+            for pid in descendants(root) {
+                unsafe {
+                    let h = OpenProcess(PROCESS_TERMINATE, 0, pid);
+                    if h != 0 {
+                        TerminateProcess(h, 1);
+                        CloseHandle(h);
+                    }
+                }
+            }
+        }
+    }
+
+    #[cfg(not(windows))]
+    mod imp {
+        /// 非 Windows では未対応 (常に None)。portable-pty の kill に任せる。
+        pub struct ProcessTree;
+        impl ProcessTree {
+            pub fn adopt(_pid: u32) -> Option<Self> {
+                None
+            }
+            pub fn kill(&self) {}
+        }
+        pub fn descendants(_root: u32) -> Vec<u32> {
+            Vec::new()
+        }
+        pub fn kill_descendants(_root: u32) {}
+    }
+
+    pub use imp::*;
+
+    /// 純粋関数: (pid, 親 pid) の表から `root` の子孫 PID を返す (親より先に子が
+    /// 来る順)。PID 0 (System Idle) は自分が自分の親なので `pid != p` で除く。
+    pub fn descendants_in(table: &[(u32, u32)], root: u32) -> Vec<u32> {
+        let mut out = Vec::new();
+        let mut stack = vec![root];
+        while let Some(p) = stack.pop() {
+            for &(pid, ppid) in table {
+                if ppid == p && pid != p && !out.contains(&pid) {
+                    out.push(pid);
+                    stack.push(pid);
+                }
+            }
+        }
+        out
     }
 }
 
@@ -268,9 +454,102 @@ mod tests {
         // next chunk so a DSR split across reads still gets answered.
         assert_eq!(carry, b"\x1b[");
     }
+
+    #[test]
+    fn descendants_in_walks_children_before_parents_and_skips_self_parent() {
+        // 10 -> 20 -> 30, 10 -> 21; 0 は自分が自分の親 (System Idle)。99 は無関係。
+        let table = [(0, 0), (10, 1), (20, 10), (21, 10), (30, 20), (99, 5)];
+        let d = tree::descendants_in(&table, 10);
+        assert_eq!(d.len(), 3);
+        assert!(d.contains(&20) && d.contains(&21) && d.contains(&30));
+        assert!(d.iter().position(|&p| p == 30) > d.iter().position(|&p| p == 20));
+        assert!(tree::descendants_in(&table, 0).is_empty());
+        assert!(tree::descendants_in(&table, 30).is_empty());
+    }
+
+    /// `pids` のどれも生きていなくなるまで最大 `secs` 秒待つ。残った PID を返す。
+    #[cfg(windows)]
+    fn wait_gone(pids: &[u32], secs: u64) -> Vec<u32> {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(secs);
+        loop {
+            let live: Vec<u32> = tree::process_table().iter().map(|&(p, _)| p).collect();
+            let left: Vec<u32> = pids.iter().copied().filter(|p| live.contains(p)).collect();
+            if left.is_empty() || std::time::Instant::now() > deadline {
+                return left;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(100));
+        }
+    }
+
+    /// 子孫が `want` 個以上になるまで最大 `secs` 秒待つ。
+    #[cfg(windows)]
+    fn wait_descendants(root: u32, want: usize, secs: u64) -> Vec<u32> {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(secs);
+        loop {
+            let d = tree::descendants(root);
+            if d.len() >= want || std::time::Instant::now() > deadline {
+                return d;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(100));
+        }
+    }
+
+    /// タブを閉じる経路の再現: ConPTY で cmd → cmd → ping の 3 段を起こし、
+    /// `PtyHandle::kill` で孫 (ping) まで消えることを確かめる。修正前は直下の
+    /// cmd だけ死んで孫が残った (= 閉じたタブの claude.exe が孤児になる症状)。
+    #[cfg(windows)]
+    #[test]
+    fn kill_terminates_grandchildren_through_conpty() {
+        let parser = Arc::new(Mutex::new(vt100::Parser::new(24, 80, 1000)));
+        let mut cmd = CommandBuilder::new("cmd.exe");
+        cmd.args(["/c", "cmd.exe /c ping -n 60 127.0.0.1"]);
+        let h = PtyHandle::spawn(cmd, parser, ReaderHooks::default()).expect("spawn");
+        let root = h.child_pid().expect("child pid");
+        let kids = wait_descendants(root, 2, 5);
+        assert!(
+            kids.len() >= 2,
+            "expected cmd -> ping under the pane child, got {kids:?}"
+        );
+        h.kill();
+        let mut all = kids.clone();
+        all.push(root);
+        let left = wait_gone(&all, 3);
+        assert!(left.is_empty(), "still alive after kill: {left:?}");
+    }
+
+    /// Job に入れられなかったときの代替経路 (`kill_descendants`) 単体。
+    #[cfg(windows)]
+    #[test]
+    fn kill_descendants_fallback_terminates_tree() {
+        use std::process::{Command, Stdio};
+        let mut child = Command::new("cmd.exe")
+            .args(["/c", "cmd.exe /c ping -n 60 127.0.0.1"])
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .expect("spawn");
+        let root = child.id();
+        let kids = wait_descendants(root, 2, 5);
+        assert!(kids.len() >= 2, "expected cmd -> ping, got {kids:?}");
+        tree::kill_descendants(root);
+        let left = wait_gone(&kids, 3);
+        let _ = child.kill();
+        let _ = child.wait();
+        assert!(left.is_empty(), "descendants still alive: {left:?}");
+    }
 }
 
 // Version History
+// ver0.2 - 2026-10-21 - Child processes are placed in a Job Object
+//                       (KILL_ON_JOB_CLOSE) right after spawn, so kill()
+//                       (close tab / Ctrl+W / respawn as shell) and ccnest's
+//                       own exit terminate the whole tree, including the
+//                       claude.exe grandchild behind the CCNEST_CLAUDE_BIN
+//                       shim. Fallback when the Job cannot be created: walk
+//                       the Toolhelp process table and TerminateProcess every
+//                       descendant. Before this, closed tabs left claude.exe
+//                       orphans (19 of them, ~5.5 GB, found on 2026-10-21).
 // ver0.1 - 2026-09-06 - ReaderHooks (OutputStamp + optional OutputWaker): the
 //                       reader thread marks the output time and wakes the
 //                       event loop right after parser.process(), outside the
