@@ -1,6 +1,6 @@
 [package]
 name = "ccnest"
-version = "0.1.23"
+version = "0.1.24"
 edition = "2021"
 description = "Claude Code-aware terminal multiplexer (Windows first)"
 license = "MIT"
@@ -30,6 +30,18 @@ arboard = { version = "3", default-features = false, features = ["windows-sys"] 
 unicode-width = "0.2"
 # 利用制限 % (/api/oauth/usage) の取得用。TLS は rustls (OpenSSL 不要。git2 と同じ方針)。
 ureq = { version = "2", default-features = false, features = ["tls"] }
+
+# ペインの子プロセスを Job Object に入れ、タブを閉じたとき (と ccnest 自体の終了時) に
+# 孫の claude.exe まで確実に終了させる。portable-pty の kill は直下の子 (CCNEST_CLAUDE_BIN
+# のシム) を TerminateProcess するだけで、孫は孤児として生き残っていた。0.52 は既に依存木に
+# ある版 (新規ダウンロード無し)。
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.52", features = [
+    "Win32_Foundation",
+    "Win32_System_JobObjects",
+    "Win32_System_Threading",
+    "Win32_System_Diagnostics_ToolHelp",
+] }
 
 [dependencies.git2]
 version = "0.20"

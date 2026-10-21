@@ -5,6 +5,35 @@
 
 ---
 
+## 2026-10-21 — タブを閉じたら子プロセス木ごと終了させる（v0.1.24）
+
+ブランチ: `fix/kill-process-tree-on-close`
+
+### 背景
+
+再起動前の保存スクリプト（`~/.claude/scripts/claude-sessions-snapshot.ps1`）を見直したところ、生きている claude.exe が 28 本あるのに本物の ccnest タブは 9 本だった。残り 19 本（約 5.5GB）は 10/19 の復元後にタブを閉じた分で、親のシム（`ccnest-claude-launcher.exe`）だけが終了し、孫の claude.exe が ConPTY を失ったまま生き残っていた。
+
+原因は `Pane::terminate` → `PtyHandle::kill` → portable-pty `Child::kill` が直下の子を `TerminateProcess` するだけで、子孫には何もしないこと（`portable-pty-0.9.0/src/win/mod.rs`）。ConPTY のハンドルを閉じても node（claude）は終了しない。
+
+### 変更点
+
+| ファイル | ver | 内容 |
+|---|---|---|
+| Cargo.toml | 0.1.24 | `windows-sys 0.52`（既に依存木にある版）を `cfg(windows)` 依存に追加（JobObjects / Threading / ToolHelp） |
+| src/pane/pty.rs | 0.2 | `tree::ProcessTree`: spawn 直後に子を `JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE` の Job に入れる。`kill` は `TerminateJobObject` で木ごと終了、Job 化に失敗していれば Toolhelp で子孫を列挙して個別に `TerminateProcess`（`kill_descendants`）。ccnest 自体が終了・落ちてもハンドルが閉じて OS が木を片付ける。非 Windows は従来どおり |
+
+### 検証
+
+- `cargo test`: 新規 3 本（`descendants_in` の純粋関数、ConPTY で cmd→cmd→ping を起こして `kill` で孫まで消える、Job 無しのフォールバック `kill_descendants`）を含め全件 pass
+- 旧 kill に一時的に戻して同じテストを回すと `still alive after kill: [16320, 16472]` で FAIL（= 修正前の症状を再現し、修正で直ることを確認）
+- `cargo fmt` / `cargo clippy --all-targets -D warnings` クリーン
+
+### 挙動の変化
+
+- これまで Ctrl+Q やウィンドウを閉じたときに（事故的に）生き残っていた claude.exe も、今後は ccnest と一緒に終了する。セッションの会話ログは残るので `--resume` で戻せる。
+
+---
+
 ## 2026-10-19 — 保存済みセッションを再開して開く `--resume`（v0.1.23）
 
 ブランチ: `feature/resume-sessions`
