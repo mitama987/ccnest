@@ -5,6 +5,30 @@
 
 ---
 
+## 2026-10-25 — ウィンドウタイトルを起動フォルダ名にする（v0.1.26）
+
+ブランチ: `feature/window-title-folder`
+
+### 背景
+
+タスクバーに並ぶ ccnest の窓がすべて起動元 cmd の既定タイトル「C:\Windows\System32\cmd.exe」で、どれがどのリポジトリか分からなかった。ccnest は端末タイトルを一度も設定しておらず、子の Claude Code が出す OSC タイトルは ccnest 内の vt100 がタブ名に使うだけで外の窓には届かない。
+
+### 変更点
+
+| ファイル | ver | 内容 |
+|---|---|---|
+| src/main.rs | 0.3 | 起動時に `SetTitle(folder_title(&cwd))`（OSC 0）を出す。フォルダ名はタブ名と同じ `app::folder_title`。起動フォルダで固定（タブ切替では変えない） |
+| src/app.rs | — | `folder_title` の単体テスト（末尾 `\` 付き・ルート）を追加 |
+| README.md / Cargo.toml | 0.1.26 | 履歴 |
+
+### 検証
+
+- `cargo test`: 329 件 pass／`cargo fmt`・`cargo clippy --all-targets -D warnings` クリーン
+- 実機: 使い捨て ccnest を `conhost.exe` で `26_XTP3_titletest` フォルダ指定・cwd=`C:\Windows\System32` で起動 → `Get-Process` の `MainWindowTitle=[26_XTP3_titletest]`、窓のスクショのタイトルバーも同じ。ユーザーの ccnest（3 プロセス）は前後で 3 のまま
+- Windows Terminal の settings.json に `suppressApplicationTitle` は無い（アプリ側のタイトルが効く）
+
+---
+
 ## 2026-10-24 — タブ名を日本語の短い名前にする（v0.1.25）
 
 ブランチ: `feature/jp-tab-title`
