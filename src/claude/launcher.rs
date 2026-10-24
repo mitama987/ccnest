@@ -202,7 +202,12 @@ fn resolve_claude_bin() -> Option<PathBuf> {
             return Some(p);
         }
     }
+    claude_on_path()
+}
 
+/// `PATH` 上の本物の `claude` (CCNEST_CLAUDE_BIN のシムは見ない)。
+/// `claude -p` を直接呼びたい所 (`claude::jp_title`) でも使う。
+pub fn claude_on_path() -> Option<PathBuf> {
     let exts: &[&str] = if cfg!(windows) {
         &["exe", "cmd", "bat", "ps1", ""]
     } else {
@@ -371,3 +376,5 @@ mod tests {
 //   (プランモード開始・承認後 Shift+Tab で bypass 可) に変更。
 //   CCNEST_CLAUDE_PERMISSION_MODE=off で従来の bypass 直行に戻せる。
 // - ver1.0: 初版 (--session-id + --dangerously-skip-permissions 直書き)
+// - 2026-10-24: PATH 探索を claude_on_path() に切り出し (jp_title が
+//   CCNEST_CLAUDE_BIN のシムを通さず本物の claude -p を呼ぶため)

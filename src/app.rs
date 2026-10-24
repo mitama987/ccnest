@@ -5,6 +5,7 @@ use std::time::{Duration, Instant};
 use anyhow::Result;
 use uuid::Uuid;
 
+use crate::claude::jp_title::{pick_task, JpTitler};
 use crate::claude::launcher::SessionStart;
 use crate::claude::usage::{UsageCell, UsageLabel, UsageSnapshot};
 use crate::cli::ResumeSpec;
@@ -86,6 +87,8 @@ pub struct App {
     /// 描画用の利用制限。`refresh_pane_state` が `usage_cell` からコピーする
     /// (描画パスではロックを取らない)。
     pub usage: Option<UsageSnapshot>,
+    /// 英語の ai-title を日本語の短いタブ名にする係 (`claude::jp_title`)。
+    pub jp_titler: JpTitler,
     /// `--resume` で渡され、まだタブを開いていないセッション。
     pub pending_resumes: VecDeque<ResumeSpec>,
     /// イベントループを起こすチャネルの送信側。ペイン生成時に reader へ配る。
@@ -101,6 +104,10 @@ pub type BranchCache = HashMap<PathBuf, (Option<String>, Instant)>;
 /// イベントループ tick には重いため、TTL を切って引き直す。外部での `git switch`
 /// が表示に反映されるまで最大 TTL+tick 遅れるが、ステータスバー表示専用なので許容。
 const BRANCH_TTL: Duration = Duration::from_secs(10);
+
+/// ペインの claude を起動してから日本語タブ名の生成を頼むまでの猶予。
+/// 起動直後の claude と `claude -p` が同時に `~/.claude.json` を書かないように。
+const JP_TITLE_REQUEST_AFTER: Duration = Duration::from_secs(10);
 
 /// 左 Down 押下の保留 (press/drag 判定待ち)。座標はペインローカル (0 始まり)。
 #[derive(Debug, Clone, Copy)]
@@ -234,6 +241,7 @@ impl App {
             last_forwarded_move: None,
             usage_cell: UsageCell::default(),
             usage: None,
+            jp_titler: JpTitler::from_env(),
             pending_resumes,
             wake_tx,
             wake_rx: Some(wake_rx),
@@ -294,6 +302,9 @@ impl App {
             .get(self.active_tab)
             .map(|t| t.layout.leaves())
             .unwrap_or_default();
+        // 日本語タブ名の生成 (claude -p) は、再開待ちのタブを開き終えてから。
+        // claude を並行起動して ~/.claude.json を同時に書かないため。
+        let resumes_done = self.pending_resumes.is_empty();
         for pane in self.panes.values_mut() {
             pane.session.refresh();
             if !pane.claude_running {
@@ -322,9 +333,24 @@ impl App {
             }
             let title_task = sanitize_task(screen.title());
             drop(p);
-            // OSC タイトルが取れればそれを優先、無ければセッション JSONL の
-            // 最後のユーザー発話にフォールバック。
-            pane.task = title_task.or_else(|| pane.session.info().task.clone());
+            // 人が付けた名前 > 日本語の名前 > OSC タイトル (英語) > 最後の
+            // ユーザー発話 (claude::jp_title::pick_task)。
+            let info = pane.session.info();
+            let allow_request = resumes_done && pane.created_at.elapsed() >= JP_TITLE_REQUEST_AFTER;
+            let jp = info.ai_title.as_deref().and_then(|ai| {
+                self.jp_titler.lookup(
+                    &pane.session_id.to_string(),
+                    ai,
+                    info.task.as_deref(),
+                    allow_request,
+                )
+            });
+            pane.task = pick_task(
+                info.custom_title.as_deref(),
+                jp,
+                title_task,
+                info.task.as_deref(),
+            );
         }
         // ブランチは TTL キャッシュ。現存ペインの cwd だけで作り直す = 閉じた
         // ペインの分は自然に落ちる。TTL 内のエントリは引き継ぎ、切れた分だけ
@@ -735,3 +761,7 @@ mod tests {
 //                       opens in the first tab, the rest queue in
 //                       pending_resumes and spawn_next_resume() opens one tab
 //                       per 2 s tick without stealing the active tab.
+// ver0.8 - 2026-10-24 - refresh_pane_state: pane.task = pick_task(custom-title,
+//                       日本語タブ名 (jp_titler), OSC タイトル, 最後の発話)。
+//                       生成の依頼は --resume のタブを開き終え、claude 起動から
+//                       10 秒 (JP_TITLE_REQUEST_AFTER) 経ってから。
