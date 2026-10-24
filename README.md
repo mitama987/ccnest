@@ -114,10 +114,26 @@ click) a tab to close it together with every pane it holds — browser
 style, with no confirmation, the same way `Ctrl+W` closes a single pane.
 Closing the last tab quits ccnest.
 
-When the focused pane's Claude session has a current task (from the OSC
-window title, falling back to the last user message in the session
-JSONL), the tab label becomes `N:<task>` (truncated to 20 cells) so you
-can tell at a glance what each tab is working on.
+When the focused pane's Claude session has a current task, the tab label
+becomes `N:<task>` (truncated to 20 cells) so you can tell at a glance
+what each tab is working on. The task is, in order of preference:
+
+1. the name you gave the session (`/rename` or `claude --name`),
+2. a short Japanese name for Claude Code's session title (see below),
+3. the OSC window title Claude Code sets,
+4. the last user message in the session JSONL.
+
+Claude Code titles sessions in English kebab-case (`fix-user-name-issues`)
+and offers no setting to change that, so ccnest asks
+`claude -p --model haiku` once per title to rephrase it as a short
+Japanese noun phrase (`ログイン転送の修正`). Titles already in Japanese are
+used as is. The call loads no settings, CLAUDE.md, MCP servers or tools
+(about 800 input tokens, 2–3 s), keeps no session, runs one at a time on a
+background thread, and waits until `--resume` tabs have opened and the
+pane's claude has been up for 10 s. Results are cached in
+`%APPDATA%\ccnest\jp-titles.json`, keyed by session and title, so a title
+is only rephrased again when Claude Code changes it.
+`CCNEST_JP_TITLE=off` turns this off.
 
 Tabs containing a Claude pane get a status marker emoji at the head of
 the label (the label text is also tinted, but the emoji is the primary
@@ -248,3 +264,4 @@ ver0.1.21 - 2026-10-10 - Copying a long unbroken string (such as a token list) t
 ver0.1.22 - 2026-10-10 - The status bar's plan usage shows the countdown to each limit's reset: `5h 42% ⏳2h10m · wk 18% · Fable 7% ⏳2d9h` (minutes under an hour, hours+minutes under a day, days+hours beyond; weekly limits that reset at the same time share one countdown). When the row is too narrow the countdowns go first and the %-only text stays, then the whole usage part as before.
 ver0.1.23 - 2026-10-19 - `ccnest <dir> --resume <session-id>[=<tab name>] ...` reopens saved Claude sessions one tab each (`claude --resume <id>` instead of a new `--session-id`). The first opens at startup, the rest one per 2 s tick without stealing the active tab. Unknown options now exit with an error instead of starting.
 ver0.1.24 - 2026-10-21 - Closing a tab (Ctrl+W, middle-click), restarting a pane as a shell, or quitting ccnest now terminates the whole child process tree: each pane's child is placed in a Windows Job Object with kill-on-close, so the claude.exe behind the `CCNEST_CLAUDE_BIN` shim no longer survives as an orphan (closed tabs had left 19 of them, about 5.5 GB). If the Job cannot be created, the descendants are enumerated and terminated one by one.
+ver0.1.25 - 2026-10-24 - Tab labels are short Japanese names: Claude Code's English kebab-case session title (`ai-title`) is rephrased once by `claude -p --model haiku` on a background thread and cached in `%APPDATA%\ccnest\jp-titles.json`. A name given with `/rename` wins; the English OSC title is shown until the Japanese one is ready. `CCNEST_JP_TITLE=off` disables it.

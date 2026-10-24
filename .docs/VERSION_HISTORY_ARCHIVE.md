@@ -5,6 +5,33 @@
 
 ---
 
+## 2026-10-24 — タブ名を日本語の短い名前にする（v0.1.25）
+
+ブランチ: `feature/jp-tab-title`
+
+### 背景
+
+タブ名（`N:<task>`）は Claude Code の端末タイトル（OSC）を優先していたが、これは英語。Claude Code のセッション名は本体埋め込みの英語プロンプト（「Generate a short kebab-case name (2-4 words)…」）で作られ、会話ログの `ai-title` も直近 15 件中 13 件が `fix-user-name-issues` のような英語の kebab-case。設定では変えられないので ccnest 側で日本語にする。
+
+### 変更点
+
+| ファイル | ver | 内容 |
+|---|---|---|
+| src/claude/jp_title.rs | 0.1（新規） | `JpTitler`: 英語の ai-title を `claude -p --model haiku --effort low --no-session-persistence --strict-mcp-config --tools "" --disable-slash-commands --setting-sources ""` で日本語の短い名詞句に言い換える。専用スレッド 1 本で 1 件ずつ・30 秒で打ち切り・コンソール無し（CREATE_NO_WINDOW）・親セッションの `CLAUDE*`／`AI_AGENT` env は渡さない。結果は `%APPDATA%\ccnest\jp-titles.json`（キー＝sessionId＋ai-title）。日本語の ai-title はそのまま。`CCNEST_JP_TITLE=off` で無効。`pick_task`（優先順位）・`clean_title`（引用符・句読点を落とす・40 字超は捨てる・16 字で切る） |
+| src/claude/session.rs | 0.8 | `SessionInfo.ai_title`／`custom_title`（`ai-title`・`custom-title` 行、最後が勝つ）。Claude Code は数ターンごとに書き直すので末尾 64KB の窓で拾える（実測: 175MB のログでも最後の ai-title は末尾 19KB 以内） |
+| src/app.rs | 0.8 | タブ名の優先順位 = `/rename` の名前 > 日本語の名前 > OSC タイトル（英語・つなぎ） > 最後の発話。生成の依頼は `--resume` のタブを開き終え、claude 起動から 10 秒後（`~/.claude.json` の同時書き込みを避ける） |
+| src/claude/launcher.rs | — | PATH 探索を `claude_on_path()` に切り出し（シムを通さず本物の claude を呼ぶ） |
+| README.md / Cargo.toml | 0.1.25 | 説明と履歴 |
+
+### 検証
+
+- `cargo test`: 328 件 pass（新規: jp_title 10 本・session 1 本）／`cargo fmt --check`・`cargo clippy --all-targets -D warnings` クリーン
+- Haiku 単体: 入力 768 トークン・1 回 約 $0.0002・2〜3 秒。`~/.claude/projects` にセッションが増えないことを確認。例を入れたプロンプトで `update-x-account-limits` → 「X上限更新」、`landscape-app-preview-banner` → 「アプリ横長バナー化」
+- 実機（使い捨て ccnest を conhost で起動 → そのセッション ID の会話ログに `ai-title: fix-login-redirect-loop` の偽ログを置く → 30 秒後にコンソール画面の 1 行目を ReadConsoleOutputCharacter で読む）: タブ行 `1:ログイン転送ルー…`、キャッシュ `ログイン転送ループの修正`。ユーザーの ccnest（3 プロセス）には触れず、偽ログのフォルダは削除
+- 罠: 前面化（SetForegroundWindow）はユーザー操作中だと効かずスクショに別の窓が写る → 画面の文字はコンソールバッファから読む（`scripts/e2e/read-console-row.ps1`）
+
+---
+
 ## 2026-10-21 — タブを閉じたら子プロセス木ごと終了させる（v0.1.24）
 
 ブランチ: `fix/kill-process-tree-on-close`

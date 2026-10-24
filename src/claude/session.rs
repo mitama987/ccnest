@@ -64,6 +64,10 @@ pub struct SessionInfo {
     /// 最後の実ユーザー発話 (または summary 行) の先頭行。OSC タイトルが
     /// 取れないときのフォールバック表示に使う。
     pub task: Option<String>,
+    /// 最後の `ai-title` 行。日本語のタブ名を作る元 (`claude::jp_title`)。
+    pub ai_title: Option<String>,
+    /// 最後の `custom-title` 行 (人が付けた名前)。タブ名で最優先。
+    pub custom_title: Option<String>,
     /// これまでに観測した最大の使用量。窓の推定に使う。単調増加なので、
     /// compact でコンテキストが縮んでも窓が 1M から 200k に戻ってしまう
     /// ことはない (`SessionTailer` が SessionInfo を持ち越すため)。
@@ -94,6 +98,12 @@ struct Entry {
     /// Claude Code が内部生成した user 行 (コマンド出力等) のマーカー。
     #[serde(default, rename = "isMeta")]
     is_meta: Option<bool>,
+    /// `type:"ai-title"` 行。Claude Code が自動で付けるセッション名 (多くは英語の kebab-case)。
+    #[serde(default, rename = "aiTitle")]
+    ai_title: Option<String>,
+    /// `type:"custom-title"` 行。`/rename` や `--name` で人が付けた名前。
+    #[serde(default, rename = "customTitle")]
+    custom_title: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -227,6 +237,8 @@ fn user_task_text(entry: &Entry) -> Option<String> {
 /// 1 行を取り込む。いずれの項目も「最後が勝つ」:
 /// - assistant 行 (synthetic 除く) → model / usage
 /// - user 行 (実ユーザー発話のみ) / summary 行 → task
+/// - ai-title 行 → ai_title、custom-title 行 → custom_title
+///   (どちらも Claude Code が数ターンごとに書き直すので末尾の窓で拾える)
 fn apply_line(line: &str, info: &mut SessionInfo) {
     let line = line.trim();
     if line.is_empty() {
@@ -270,8 +282,23 @@ fn apply_line(line: &str, info: &mut SessionInfo) {
                 }
             }
         }
+        Some("ai-title") => {
+            if let Some(t) = non_empty(entry.ai_title) {
+                info.ai_title = Some(t);
+            }
+        }
+        Some("custom-title") => {
+            if let Some(t) = non_empty(entry.custom_title) {
+                info.custom_title = Some(t);
+            }
+        }
         _ => {}
     }
+}
+
+fn non_empty(s: Option<String>) -> Option<String> {
+    s.map(|t| t.trim().chars().take(TASK_MAX_CHARS).collect::<String>())
+        .filter(|t| !t.is_empty())
 }
 
 pub fn session_info_from_str(content: &str) -> SessionInfo {
@@ -943,6 +970,21 @@ mod tests {
         assert_eq!(task.chars().count(), 200);
     }
 
+    // ai-title / custom-title は最後の行が勝つ (空の行は無視)
+    #[test]
+    fn ai_and_custom_titles_take_last_line() {
+        let jsonl = r#"
+{"type":"ai-title","aiTitle":"fix-login-bug","sessionId":"s"}
+{"type":"custom-title","customTitle":"手動の名前","sessionId":"s"}
+{"type":"ai-title","aiTitle":"japanese-tab-names","sessionId":"s"}
+{"type":"ai-title","aiTitle":"  ","sessionId":"s"}
+"#;
+        let info = session_info_from_str(jsonl);
+        assert_eq!(info.ai_title.as_deref(), Some("japanese-tab-names"));
+        assert_eq!(info.custom_title.as_deref(), Some("手動の名前"));
+        assert_eq!(info.task, None);
+    }
+
     // 追記読み (インクリメンタル) でも task は更新される
     #[test]
     fn tailer_updates_task_incrementally() {
@@ -1016,3 +1058,5 @@ mod tests {
 //                       summary 行からタスク表示用文字列を抽出。tool_result のみ /
 //                       isMeta / コマンドラッパ / 中断通知は除外。OSC タイトルが
 //                       取れないペインのフォールバック表示に使う。
+// ver0.8 - 2026-10-24 - SessionInfo.ai_title / custom_title: ai-title 行と
+//                       custom-title 行 (/rename) を拾う。日本語タブ名の元。
