@@ -644,6 +644,17 @@ mod tests {
 
     const TTL: Duration = Duration::from_secs(10);
 
+    /// タブ名とウィンドウタイトル (タスクバー) はフォルダ名。ドライブ直下はパスのまま。
+    #[test]
+    fn folder_title_is_last_component() {
+        assert_eq!(
+            folder_title(Path::new(r"C:\work\ClaudeCompany")),
+            "ClaudeCompany"
+        );
+        assert_eq!(folder_title(Path::new(r"C:\work\26_XTP3\")), "26_XTP3");
+        assert_eq!(folder_title(Path::new("/")), "/");
+    }
+
     fn cache_with(cwd: &str, branch: Option<&str>, at: Instant) -> BranchCache {
         let mut c = BranchCache::new();
         c.insert(PathBuf::from(cwd), (branch.map(str::to_string), at));

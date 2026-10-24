@@ -9,12 +9,12 @@ use crossterm::event::{
 };
 use crossterm::execute;
 use crossterm::terminal::{
-    disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen,
+    disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen, SetTitle,
 };
 use ratatui::backend::CrosstermBackend;
 use ratatui::Terminal;
 
-use ccnest::app::App;
+use ccnest::app::{folder_title, App};
 use ccnest::cli::parse_args;
 use ccnest::event::run_event_loop;
 
@@ -29,8 +29,11 @@ fn main() -> Result<()> {
 
     enable_raw_mode().context("enable_raw_mode")?;
     let mut stdout = io::stdout();
+    // ウィンドウタイトル (= タスクバーの名前) を起動フォルダ名にする。
+    // 未設定だと起動元 cmd の「C:\Windows\System32\cmd.exe」のままで窓を区別できない。
     execute!(
         stdout,
+        SetTitle(folder_title(&cwd)),
         EnterAlternateScreen,
         EnableMouseCapture,
         EnableBracketedPaste
@@ -113,3 +116,6 @@ fn write_crash_log(info: &std::panic::PanicHookInfo<'_>) -> Option<PathBuf> {
 // ver0.2 - 2026-10-19 - Parse args with cli::parse_args (cwd + repeated
 //                       `--resume <uuid>[=<title>]`) and start via
 //                       App::with_resumes.
+// ver0.3 - 2026-10-25 - Set the window title (taskbar name) to the start
+//                       folder name (folder_title) so ccnest windows can be
+//                       told apart instead of all reading "C:\Windows\...".
