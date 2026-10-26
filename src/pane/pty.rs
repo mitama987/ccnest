@@ -299,37 +299,82 @@ pub mod tree {
     }
 }
 
+/// `CCNEST_PTY_DUMP` の値から決まる、reader の生バイト記録のしかた (開発用)。
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum PtyDumpMode {
+    /// 未設定。何もしない。
+    Off,
+    /// `CCNEST_PTY_DUMP=1` (空・`true`・`on` も同じ)。`%APPDATA%\ccnest\pty-dump.log`
+    /// に、時刻・種別・長さ付きで制御文字を `<ESC>` などに置き換えて 1 行ずつ追記する。
+    EscapedLog,
+    /// `CCNEST_PTY_DUMP=<path>`。全ペインの ConPTY 出力の生バイトをそのまま
+    /// `<path>` に追記する (テストの fixture に起こしやすい)。DSR 等への返信は
+    /// 子への入力なので書かない。
+    RawFile(std::path::PathBuf),
+}
+
+impl PtyDumpMode {
+    fn from_env_value(value: Option<&str>) -> Self {
+        match value {
+            None => Self::Off,
+            Some(v) if matches!(v.trim(), "" | "1" | "true" | "on") => Self::EscapedLog,
+            Some(v) => Self::RawFile(std::path::PathBuf::from(v)),
+        }
+    }
+
+    fn write(&self, kind: &str, bytes: &[u8]) {
+        match self {
+            Self::Off => {}
+            Self::RawFile(path) => {
+                if kind != "out" {
+                    return;
+                }
+                if let Ok(mut f) = std::fs::OpenOptions::new()
+                    .create(true)
+                    .append(true)
+                    .open(path)
+                {
+                    let _ = f.write_all(bytes);
+                }
+            }
+            Self::EscapedLog => {
+                let Some(base) = dirs::data_dir() else {
+                    return;
+                };
+                let path = base.join("ccnest").join("pty-dump.log");
+                if let Ok(mut f) = std::fs::OpenOptions::new()
+                    .create(true)
+                    .append(true)
+                    .open(&path)
+                {
+                    let ts = chrono::Local::now().format("%H:%M:%S%.3f");
+                    let esc: String = bytes
+                        .iter()
+                        .map(|b| match *b {
+                            0x1b => String::from("<ESC>"),
+                            0x0a => String::from("<LF>"),
+                            0x0d => String::from("<CR>"),
+                            0x20..=0x7e => (*b as char).to_string(),
+                            other => format!("<{other:02x}>"),
+                        })
+                        .collect();
+                    let _ = writeln!(f, "{ts} {kind} len={} {}", bytes.len(), esc);
+                }
+            }
+        }
+    }
+}
+
 /// `CCNEST_PTY_DUMP` が設定されているときだけ、reader が受け取った生バイト
-/// (と DSR 等への返信) を `%APPDATA%\ccnest\pty-dump.log` に追記する診断用。
-/// 未設定なら OnceLock 判定のみでゼロコスト。
+/// (と DSR 等への返信) を記録する診断用 (`PtyDumpMode`)。未設定なら OnceLock
+/// 判定のみでゼロコスト。
 fn dump_pty_bytes(kind: &str, bytes: &[u8]) {
     use std::sync::OnceLock;
-    static ENABLED: OnceLock<bool> = OnceLock::new();
-    if !*ENABLED.get_or_init(|| std::env::var("CCNEST_PTY_DUMP").is_ok()) {
-        return;
-    }
-    let Some(base) = dirs::data_dir() else {
-        return;
-    };
-    let path = base.join("ccnest").join("pty-dump.log");
-    if let Ok(mut f) = std::fs::OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(&path)
-    {
-        let ts = chrono::Local::now().format("%H:%M:%S%.3f");
-        let esc: String = bytes
-            .iter()
-            .map(|b| match *b {
-                0x1b => String::from("<ESC>"),
-                0x0a => String::from("<LF>"),
-                0x0d => String::from("<CR>"),
-                0x20..=0x7e => (*b as char).to_string(),
-                other => format!("<{other:02x}>"),
-            })
-            .collect();
-        let _ = writeln!(f, "{ts} {kind} len={} {}", bytes.len(), esc);
-    }
+    static MODE: OnceLock<PtyDumpMode> = OnceLock::new();
+    MODE.get_or_init(|| {
+        PtyDumpMode::from_env_value(std::env::var("CCNEST_PTY_DUMP").ok().as_deref())
+    })
+    .write(kind, bytes);
 }
 
 /// Look for terminal queries in recently-received bytes and return the bytes
@@ -398,6 +443,47 @@ fn scan_replies(carry: &mut Vec<u8>, parser: &Arc<Mutex<vt100::Parser>>) -> Vec<
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn pty_dump_mode_is_off_when_unset() {
+        assert_eq!(PtyDumpMode::from_env_value(None), PtyDumpMode::Off);
+    }
+
+    #[test]
+    fn pty_dump_mode_keeps_escaped_log_for_flag_values() {
+        for v in ["", "1", "true", "on"] {
+            assert_eq!(
+                PtyDumpMode::from_env_value(Some(v)),
+                PtyDumpMode::EscapedLog,
+                "value: {v:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn pty_dump_mode_treats_other_values_as_raw_file_path() {
+        assert_eq!(
+            PtyDumpMode::from_env_value(Some("C:\\tmp\\pane.bin")),
+            PtyDumpMode::RawFile(std::path::PathBuf::from("C:\\tmp\\pane.bin"))
+        );
+    }
+
+    #[test]
+    fn pty_dump_raw_file_appends_bytes_verbatim() {
+        let dir = std::env::temp_dir().join(format!("ccnest-dump-{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&dir);
+        let path = dir.join("raw.bin");
+        let _ = std::fs::remove_file(&path);
+        let mode = PtyDumpMode::RawFile(path.clone());
+        mode.write("out", b"\x1b[11;1H\xe2\x97\x8f ");
+        mode.write("out", "日本語\r\n".as_bytes());
+        mode.write("reply", b"\x1b[1;1R");
+        let got = std::fs::read(&path).expect("dump file");
+        let mut want = b"\x1b[11;1H\xe2\x97\x8f ".to_vec();
+        want.extend_from_slice("日本語\r\n".as_bytes());
+        assert_eq!(got, want, "raw dump holds only the output bytes, unescaped");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 
     #[test]
     fn responds_to_dsr_6n() {
@@ -541,6 +627,11 @@ mod tests {
 }
 
 // Version History
+// ver0.3 - 2026-10-27 - CCNEST_PTY_DUMP=<path> appends each pane's raw ConPTY
+//                       output bytes, unescaped, to <path> (for test
+//                       fixtures). `1` / empty / `true` / `on` keep the escaped
+//                       %APPDATA%\ccnest\pty-dump.log. Unset stays a OnceLock
+//                       check only (PtyDumpMode).
 // ver0.2 - 2026-10-21 - Child processes are placed in a Job Object
 //                       (KILL_ON_JOB_CLOSE) right after spawn, so kill()
 //                       (close tab / Ctrl+W / respawn as shell) and ccnest's

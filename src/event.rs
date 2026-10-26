@@ -2215,7 +2215,7 @@ fn extract_selected_text_from_parser(
 
     // ソフトラップ行は改行・末尾trim無しで結合。アプリ折り返し行は末尾の余白と
     // 次行の字下げを落として改行無しで結合。それ以外は trim_end + '\n'。
-    let mut out = String::new();
+    let mut lines: Vec<String> = vec![String::new()];
     let mut strip_indent = false;
     for (i, row) in rows.iter().enumerate() {
         let line = if strip_indent {
@@ -2225,6 +2225,7 @@ fn extract_selected_text_from_parser(
         };
         strip_indent = false;
         let next = rows.get(i + 1);
+        let out = lines.last_mut().expect("lines starts non-empty");
         if row.soft_wrapped {
             // 折り返し行: 末尾の URL/英数字が削れないよう trim せず連結し、改行も挟まない。
             out.push_str(line);
@@ -2237,11 +2238,53 @@ fn extract_selected_text_from_parser(
         } else {
             out.push_str(line.trim_end());
             if next.is_some() {
-                out.push('\n');
+                lines.push(String::new());
             }
         }
     }
-    out
+    dedent_copied_lines(&mut lines, start.0 > 0);
+    lines.join("\n")
+}
+
+/// Claude Code の応答の 1 行目に付く記号 (`● ` = 記号 1 桁 + 空白 1 桁)。
+const REPLY_MARKER: &str = "● ";
+
+/// コピーした行に共通する字下げ (行頭の空白の最小幅) を落とす。Claude Code は
+/// 応答本文を 2 桁の余白付きで描くため、そのまま貼ると全行の頭に空白が付く。
+///
+/// - 空行は最小幅の計算に入れず、そのまま残す (段落の区切り)。
+/// - `first_partial` (選択が行の途中から始まった) なら 1 行目は計算にも削除にも
+///   含めない (行頭の字下げを選んでいない)。
+/// - 行頭から選んだ 1 行目が `● ` で始まるなら、その 2 桁を字下げとみなす。
+///   最小幅が 2 以上なら記号ごと落とし、それ未満なら 1 行目はそのまま残す。
+/// - 落とすのは共通の幅だけなので、入れ子の箇条書きの相対的な字下げは残る。
+fn dedent_copied_lines(lines: &mut [String], first_partial: bool) {
+    let lead_spaces = |s: &str| s.bytes().take_while(|&b| b == b' ').count();
+    let marker = !first_partial && lines.first().is_some_and(|l| l.starts_with(REPLY_MARKER));
+    let skip_first = |i: usize| i == 0 && first_partial;
+    let min = lines
+        .iter()
+        .enumerate()
+        .filter(|(i, l)| !skip_first(*i) && !l.trim().is_empty())
+        .map(|(i, l)| if i == 0 && marker { 2 } else { lead_spaces(l) })
+        .min()
+        .unwrap_or(0);
+    if min == 0 {
+        return;
+    }
+    for (i, l) in lines.iter_mut().enumerate() {
+        if skip_first(i) || l.trim().is_empty() {
+            continue;
+        }
+        if i == 0 && marker {
+            if min >= 2 {
+                l.drain(..REPLY_MARKER.len());
+            }
+            continue;
+        }
+        // 行頭の空白は 1 バイト文字なので、バイト位置で落としてよい。
+        l.drain(..min);
+    }
 }
 
 /// アプリ折り返しの判定で「右端に届いた」とみなす許容幅 (列数)。
@@ -2281,17 +2324,34 @@ struct AppWrapTraits {
     /// 前の行の続きとして連結してはいけない行頭 (空行・箇条書き記号・
     /// 新しいパス/URL の始まり)。
     head_blocks_join: bool,
+    /// 最後の非空白セルが全角 (CJK 等の幅 2) の文字。
+    tail_wide: bool,
+    /// 最初の非空白セルが全角 (CJK 等の幅 2) の文字。
+    head_wide: bool,
 }
 
 /// 行 a の末尾と行 b の先頭が、アプリ (Claude Code 等) が長い語を右端で
 /// 割っただけの「見た目の改行」かどうか。
 fn app_wrapped(a: &RowShape, b: &RowShape) -> bool {
+    let long_word = a.traits.tail_splittable && b.traits.lead_ws >= a.traits.lead_ws;
     !a.soft_wrapped
         && a.at_row_end
         && a.traits.reaches_edge
-        && a.traits.tail_splittable
         && !b.traits.head_blocks_join
-        && b.traits.lead_ws >= a.traits.lead_ws
+        && (long_word || continues_wide_prose(a, b))
+}
+
+/// 行 b が、行 a の日本語 (全角混じり) の文の、右端で割られた続きらしい。
+///
+/// Claude Code は日本語の文を空白の位置に関係なく右端で割り、続きを本文の列
+/// (`body_indent`) に字下げして置く。境目のどちらかが全角文字で、b がちょうど
+/// a の本文の列から始まるなら、空白も改行も挟まずにつなぐ。英文 (境目が両方
+/// 半角) は単語の区切りで割られているので対象外。字下げの無い行 (シェル出力)
+/// も対象外にして、たまたま右端に届いた行を誤ってつながないようにする。
+fn continues_wide_prose(a: &RowShape, b: &RowShape) -> bool {
+    (a.traits.tail_wide || b.traits.head_wide)
+        && a.traits.body_indent >= 1
+        && b.traits.lead_ws == a.traits.body_indent
 }
 
 /// 行 a が端末のソフトラップで行 b へ続いているが、実体はアプリ (Claude Code
@@ -2305,10 +2365,11 @@ fn app_wrapped(a: &RowShape, b: &RowShape) -> bool {
 /// 幅が違う空白は本文の一部とみなし、落とさない。
 fn app_wrapped_after_autowrap(a: &RowShape, b: &RowShape) -> bool {
     a.soft_wrapped
-        && a.traits.tail_splittable
         && !b.traits.head_blocks_join
-        && a.traits.body_indent >= 1
-        && b.traits.lead_ws == a.traits.body_indent
+        && ((a.traits.tail_splittable
+            && a.traits.body_indent >= 1
+            && b.traits.lead_ws == a.traits.body_indent)
+            || continues_wide_prose(a, b))
 }
 
 /// 行 y のアプリ折り返し判定用の特徴を画面セルから求める。
@@ -2328,6 +2389,8 @@ fn app_wrap_traits(screen: &vt100::Screen, y: u16) -> AppWrapTraits {
         lead_ws: cols,
         body_indent: cols,
         head_blocks_join: true,
+        tail_wide: false,
+        head_wide: false,
     };
     let Some(first) = cells.iter().position(Option::is_some) else {
         return blank;
@@ -2349,13 +2412,65 @@ fn app_wrap_traits(screen: &vt100::Screen, y: u16) -> AppWrapTraits {
     let tail_splittable = tail.iter().any(|c| c.is_alphanumeric())
         && (tail_start == body_start || tail.iter().any(|&c| c == '\\' || c == '/'));
 
+    // 全角文字の 2 セル目は Some('\0')。1 セル目は vt100 の is_wide で判る。
+    let is_wide_at =
+        |x: usize| cells[x] == Some('\0') || screen.cell(y, x as u16).is_some_and(|c| c.is_wide());
+
     AppWrapTraits {
         reaches_edge: last as u16 + 1 + APP_WRAP_EDGE_SLACK >= cols,
         tail_splittable,
         lead_ws: first as u16,
         body_indent: body_start as u16,
-        head_blocks_join: body_start != first || starts_new_path(&cells[first..]),
+        head_blocks_join: body_start != first
+            || starts_new_path(&cells[first..])
+            || starts_list_item_without_space(&cells[first..]),
+        tail_wide: is_wide_at(last),
+        head_wide: is_wide_at(first),
     }
+}
+
+/// 後ろに空白を置かずに本文が続く、日本語の文でよく使う箇条書きの行頭
+/// (`・項目` `※注記` `①項目` `1）項目` `１．項目` など)。`skip_list_markers` は
+/// 「記号 + 空白」の形だけを見るので、こちらで別に拾う。行頭を前の行の続きと
+/// みなさないための目印にだけ使い、本文の列 (`body_indent`) は変えない。
+fn starts_list_item_without_space(cells: &[Option<char>]) -> bool {
+    let head: Vec<char> = cells
+        .iter()
+        .take(8)
+        .map_while(|c| *c)
+        .filter(|&c| c != '\0')
+        .collect();
+    let Some(&c0) = head.first() else {
+        return false;
+    };
+    let bullet = matches!(
+        c0,
+        '・' | '•'
+            | '●'
+            | '○'
+            | '◦'
+            | '■'
+            | '□'
+            | '◆'
+            | '◇'
+            | '▪'
+            | '▶'
+            | '※'
+            | '★'
+            | '☆'
+    ) || ('①'..='⑳').contains(&c0);
+    let digits = head
+        .iter()
+        .take_while(|c| c.is_ascii_digit() || ('０'..='９').contains(*c))
+        .count();
+    // 半角の `)` `.` は直後が全角のときだけ (`1.5` や `1.txt` を番号とみなさない)。
+    let numbered = (1..=3).contains(&digits)
+        && match head.get(digits) {
+            Some('）' | '．' | '、') => true,
+            Some(')' | '.') => head.get(digits + 1).is_some_and(|c| !c.is_ascii()),
+            _ => false,
+        };
+    bullet || numbered
 }
 
 /// 行頭の箇条書き記号 (`●` `-` `*` `⎿` `│` などの 1 文字記号、または `1.` `12)`
@@ -3416,7 +3531,7 @@ mod tests {
             "前提: アプリの改行は row_wrapped にならない"
         );
         let text = extract_selected_text_from_parser(&mut parser, sel_range((0, 0), (47, 1)));
-        assert_eq!(text, format!("  {LONG_PATH}"));
+        assert_eq!(text, LONG_PATH);
     }
 
     /// 応答本文の 1 行目 (`● ` 付き) から割れたパス。ConPTY の実バイト列
@@ -3427,7 +3542,7 @@ mod tests {
         let (head, tail) = LONG_PATH.split_at(46);
         parser.process(format!("● {head}{CLAUDE_NEXT_ROW}{tail}").as_bytes());
         let text = extract_selected_text_from_parser(&mut parser, sel_range((0, 0), (47, 1)));
-        assert_eq!(text, format!("● {LONG_PATH}"));
+        assert_eq!(text, LONG_PATH);
     }
 
     /// 「保存先: C:\...」のようにラベルの後ろから始まり右端で割れたパス
@@ -3439,7 +3554,7 @@ mod tests {
         let (head, tail) = LONG_PATH.split_at(38);
         parser.process(format!("  保存先: {head}\r\n  {tail}").as_bytes());
         let text = extract_selected_text_from_parser(&mut parser, sel_range((0, 0), (47, 1)));
-        assert_eq!(text, format!("  保存先: {LONG_PATH}"));
+        assert_eq!(text, format!("保存先: {LONG_PATH}"));
     }
 
     /// 箇条書きの中で割れたパス。続きの行は箇条書きの本文位置 (4 桁) に揃う。
@@ -3450,7 +3565,7 @@ mod tests {
         let (head, tail) = LONG_PATH.split_at(41);
         parser.process(format!("  - item {head}{CLAUDE_NEXT_ROW}  {tail}").as_bytes());
         let text = extract_selected_text_from_parser(&mut parser, sel_range((0, 0), (49, 1)));
-        assert_eq!(text, format!("  - item {LONG_PATH}"));
+        assert_eq!(text, format!("- item {LONG_PATH}"));
     }
 
     /// 3 行以上に割れたパスも順につながる。
@@ -3461,7 +3576,7 @@ mod tests {
         let (b, c) = rest.split_at(28);
         parser.process(format!("  {a}\r\n  {b}\r\n  {c}").as_bytes());
         let text = extract_selected_text_from_parser(&mut parser, sel_range((0, 0), (29, 2)));
-        assert_eq!(text, format!("  {LONG_PATH}"));
+        assert_eq!(text, LONG_PATH);
     }
 
     /// 入力エコーは右に 1 桁余白を残して割られる (実測)。右端から 1 桁内側で
@@ -3472,7 +3587,7 @@ mod tests {
         let (head, tail) = LONG_PATH.split_at(45);
         parser.process(format!("  {head}\r\n  {tail}").as_bytes());
         let text = extract_selected_text_from_parser(&mut parser, sel_range((0, 0), (47, 1)));
-        assert_eq!(text, format!("  {LONG_PATH}"));
+        assert_eq!(text, LONG_PATH);
     }
 
     /// scrollback の読み取り窓の境目 (A が窓の最終行、B が次の窓の先頭) を
@@ -3495,7 +3610,8 @@ mod tests {
         let first = format!("  - {}", &LONG_PATH[..36]);
         parser.process(format!("{first}\r\n  - next item").as_bytes());
         let text = extract_selected_text_from_parser(&mut parser, sel_range((0, 0), (39, 1)));
-        assert_eq!(text, format!("{first}\n  - next item"));
+        // 共通の字下げ 2 桁は落ちる (dedent_copied_lines)。
+        assert_eq!(text, format!("{}\n- next item", &first[2..]));
     }
 
     /// 回帰: 長いパスを 1 行ずつ並べた一覧は、次行が新しいパスの始まり
@@ -3508,7 +3624,7 @@ mod tests {
         assert_eq!(p1.len(), 40, "前提: 1 行目は右端まで埋まる");
         parser.process(format!("{p1}\r\n{p2}").as_bytes());
         let text = extract_selected_text_from_parser(&mut parser, sel_range((0, 0), (39, 1)));
-        assert_eq!(text, format!("{p1}\n{p2}"));
+        assert_eq!(text, format!("{}\n{}", &p1[2..], &p2[2..]));
     }
 
     /// 回帰: 右端に届かない行 (普通の改行) はつながない。
@@ -3517,7 +3633,7 @@ mod tests {
         let mut parser = vt100::Parser::new(6, 40, 100);
         parser.process(b"  see C:\\work\\a.txt\r\n  b.txt is next");
         let text = extract_selected_text_from_parser(&mut parser, sel_range((0, 0), (39, 1)));
-        assert_eq!(text, "  see C:\\work\\a.txt\n  b.txt is next");
+        assert_eq!(text, "see C:\\work\\a.txt\nb.txt is next");
     }
 
     /// 回帰: 罫線だけの行 (英数字なし) は右端まで届いてもつながない。
@@ -3537,7 +3653,7 @@ mod tests {
         let (head, _) = LONG_PATH.split_at(36);
         parser.process(format!("    {head}\r\n  next block").as_bytes());
         let text = extract_selected_text_from_parser(&mut parser, sel_range((0, 0), (39, 1)));
-        assert_eq!(text, format!("    {head}\n  next block"));
+        assert_eq!(text, format!("  {head}\nnext block"));
     }
 
     /// 回帰: 英文の単語折り返し (行末の単語がパスでも行頭からの 1 語でもない)
@@ -3550,7 +3666,8 @@ mod tests {
         assert_eq!(line.len(), 40);
         parser.process(format!("{line}\r\n  dog and keeps running").as_bytes());
         let text = extract_selected_text_from_parser(&mut parser, sel_range((0, 0), (39, 1)));
-        assert_eq!(text, format!("{line}\n  dog and keeps running"));
+        // 改行は残る。共通の字下げ 2 桁だけ落ちる。
+        assert_eq!(text, format!("{}\ndog and keeps running", &line[2..]));
     }
 
     /// ユーザー報告 (2026-10-10) の形をダミーで再現した、空白を含まない長い
@@ -3573,7 +3690,7 @@ mod tests {
             "前提: 最終列まで埋めた直後の書き込みは自動折り返しになる"
         );
         let text = extract_selected_text_from_parser(&mut parser, sel_range((0, 0), (47, 1)));
-        assert_eq!(text, format!("  {token}"));
+        assert_eq!(text, token);
     }
 
     /// 3 行版 (満杯・満杯・途中まで)。報告の 5 本つなぎと同じ形。
@@ -3586,7 +3703,7 @@ mod tests {
         parser.process(format!("  {a}  {b}  {c}").as_bytes());
         assert!(parser.screen().row_wrapped(0) && parser.screen().row_wrapped(1));
         let text = extract_selected_text_from_parser(&mut parser, sel_range((0, 0), (47, 2)));
-        assert_eq!(text, format!("  {token}"));
+        assert_eq!(text, token);
     }
 
     /// `● ` 始まりの応答 1 行目 (本文位置 2 桁) が最終列まで埋まり、次行が
@@ -3599,7 +3716,7 @@ mod tests {
         parser.process(format!("● {head}  {tail}").as_bytes());
         assert!(parser.screen().row_wrapped(0));
         let text = extract_selected_text_from_parser(&mut parser, sel_range((0, 0), (47, 1)));
-        assert_eq!(text, format!("● {token}"));
+        assert_eq!(text, token);
     }
 
     /// 箇条書き `  - ` (本文位置 4 桁) の直後から始まる長い文字列が最終列まで
@@ -3613,7 +3730,7 @@ mod tests {
         parser.process(format!("  - {head}    {tail}").as_bytes());
         assert!(parser.screen().row_wrapped(0));
         let text = extract_selected_text_from_parser(&mut parser, sel_range((0, 0), (49, 1)));
-        assert_eq!(text, format!("  - {token}"));
+        assert_eq!(text, format!("- {token}"));
     }
 
     /// 実測 (Claude Code v2.1.296・ConPTY・ペイン幅 118 桁・2026-10-10) の形。
@@ -3637,7 +3754,7 @@ mod tests {
             "前提: 直接続けると wrapped になる"
         );
         let text = extract_selected_text_from_parser(&mut parser, sel_range((0, 0), (47, 2)));
-        assert_eq!(text, format!("● {token}"));
+        assert_eq!(text, token);
     }
 
     /// 回帰: 字下げの無い行 (シェル出力など) の素のソフトラップでは、次行頭の
@@ -3658,7 +3775,7 @@ mod tests {
         parser.process(b"  abcdefghijklmnopqr  - item");
         assert!(parser.screen().row_wrapped(0));
         let text = extract_selected_text_from_parser(&mut parser, sel_range((0, 0), (19, 1)));
-        assert_eq!(text, "  abcdefghijklmnopqr  - item");
+        assert_eq!(text, "abcdefghijklmnopqr  - item");
     }
 
     /// 回帰: 次行の字下げが本文位置と違う (2 に対して 4) なら落とさない。
@@ -3668,7 +3785,7 @@ mod tests {
         parser.process(b"  abcdefghijklmnopqr    deeper");
         assert!(parser.screen().row_wrapped(0));
         let text = extract_selected_text_from_parser(&mut parser, sel_range((0, 0), (19, 1)));
-        assert_eq!(text, "  abcdefghijklmnopqr    deeper");
+        assert_eq!(text, "abcdefghijklmnopqr    deeper");
     }
 
     /// 実機で採取した ConPTY の生バイト列 (Claude Code v2.1.296・ペイン幅 118 桁・
@@ -3691,8 +3808,166 @@ mod tests {
             "前提: 2 つ目の折り返しは自動折り返し"
         );
         let text = extract_selected_text_from_parser(&mut parser, sel_range((0, 10), (117, 12)));
-        assert_eq!(text, format!("● {CAPTURED_TOKEN}"));
+        assert_eq!(text, CAPTURED_TOKEN);
         assert!(!text.contains('\n') && !text.contains("  "));
+    }
+
+    /// 表示幅 (全角 = 2 桁)。日本語の折り返しテストの行幅の前提確認に使う。
+    fn disp_w(s: &str) -> usize {
+        unicode_width::UnicodeWidthStr::width(s)
+    }
+
+    /// ユーザー報告 (2026-10-27): Claude Code の日本語の応答本文を 3 行に
+    /// わたって選択してコピーすると、右端で折り返した位置の改行と字下げ 2 桁が
+    /// 入っていた。1 本の文になり、`● ` も字下げも入らない。
+    #[test]
+    fn extract_selected_text_joins_japanese_paragraph_over_three_rows() {
+        let r1 = "お問い合わせありがとうございます。ご指";
+        let r2 = "摘いただいた保存ボタンの不具合は、設定";
+        let r3 = "画面で直りました。";
+        assert_eq!((disp_w(r1), disp_w(r2)), (38, 38), "前提: 本文幅 38 桁");
+        let mut parser = vt100::Parser::new(6, 40, 100);
+        parser.process(format!("● {r1}{CLAUDE_NEXT_ROW}{r2}{CLAUDE_NEXT_ROW}{r3}").as_bytes());
+        let text = extract_selected_text_from_parser(&mut parser, sel_range((0, 0), (39, 2)));
+        assert_eq!(text, format!("{r1}{r2}{r3}"));
+    }
+
+    /// 半角の空白を含む日本語の行 (`（@sx09s のポスト 20 件を確認）`) が右端で
+    /// 割れても、境目の片側が全角ならつながる。行末の語が「行頭からの 1 語」
+    /// ではないので、従来の長い語の判定 (tail_splittable) では拾えなかった形。
+    #[test]
+    fn extract_selected_text_joins_japanese_line_with_ascii_words() {
+        let r1 = "ご依頼の件を確認しました（@sx09s のポ";
+        let r2 = "スト 20 件を確認）。その結果、いいねの";
+        let r3 = "数が少ない投稿は深夜に偏っていました。";
+        // r1 は 37 桁 (残り 1 桁に全角の「ス」が入らず次行へ送られた形)。
+        assert_eq!((disp_w(r1), disp_w(r2)), (37, 38));
+        let mut parser = vt100::Parser::new(6, 40, 100);
+        parser.process(format!("● {r1}{CLAUDE_NEXT_ROW}{r2}{CLAUDE_NEXT_ROW}{r3}").as_bytes());
+        let text = extract_selected_text_from_parser(&mut parser, sel_range((0, 0), (39, 2)));
+        assert_eq!(
+            text,
+            "ご依頼の件を確認しました（@sx09s のポスト 20 件を確認）。その結果、いいねの数が少ない投稿は深夜に偏っていました。"
+        );
+    }
+
+    /// 最終列まで埋まった日本語の行が端末の自動折り返しで次行へ続き、
+    /// ConPTY が字下げの空白 2 つをそのまま書いた形でもつながる。
+    #[test]
+    fn extract_selected_text_joins_japanese_line_after_terminal_autowrap() {
+        let r1 = "スト 20 件を確認）。その結果、いいねの";
+        let r2 = "数が少ない投稿は深夜に偏っていました。";
+        assert_eq!(disp_w(r1), 38);
+        let mut parser = vt100::Parser::new(6, 40, 100);
+        parser.process(format!("● {r1}  {r2}").as_bytes());
+        assert!(parser.screen().row_wrapped(0), "前提: 自動折り返し");
+        let text = extract_selected_text_from_parser(&mut parser, sel_range((0, 0), (39, 1)));
+        assert_eq!(text, format!("{r1}{r2}"));
+    }
+
+    /// 段落の間の空行は残り、どちらの段落も字下げが落ちる。
+    #[test]
+    fn extract_selected_text_keeps_blank_line_between_japanese_paragraphs() {
+        let p1a = "設定は 3 か所です。まず画面の右上の歯";
+        let p1b = "車を押してください。";
+        let p2a = "返信は 1 日 2 回まとめて送ると反応が良";
+        let p2b = "くなります。";
+        assert_eq!((disp_w(p1a), disp_w(p2a)), (37, 38));
+        let mut parser = vt100::Parser::new(8, 40, 100);
+        parser.process(
+            format!("● {p1a}{CLAUDE_NEXT_ROW}{p1b}\r\n\r\n  {p2a}{CLAUDE_NEXT_ROW}{p2b}")
+                .as_bytes(),
+        );
+        let text = extract_selected_text_from_parser(&mut parser, sel_range((0, 0), (39, 4)));
+        assert_eq!(text, format!("{p1a}{p1b}\n\n{p2a}{p2b}"));
+    }
+
+    /// 回帰: 右端まで届いた日本語の行でも、次行が箇条書き (`・` `1）` `- `)
+    /// で始まるなら改行を残す。
+    #[test]
+    fn extract_selected_text_keeps_newline_before_japanese_list_item() {
+        let lead = "以下の 3 点を確認しました。どれも問題";
+        assert_eq!(disp_w(lead), 37);
+        for item in ["・設定画面を開く", "1）設定画面を開く", "- 設定画面を開く"]
+        {
+            let mut parser = vt100::Parser::new(6, 40, 100);
+            parser.process(format!("  {lead}{CLAUDE_NEXT_ROW}{item}").as_bytes());
+            let text = extract_selected_text_from_parser(&mut parser, sel_range((0, 0), (39, 1)));
+            assert_eq!(text, format!("{lead}\n{item}"), "item: {item}");
+        }
+    }
+
+    /// 入れ子の箇条書きは、共通の字下げだけ落として相対的な字下げを残す。
+    #[test]
+    fn extract_selected_text_dedent_keeps_nested_list_indent() {
+        let mut parser = vt100::Parser::new(6, 40, 100);
+        parser.process("  - 親の項目です\r\n    - 子の項目です\r\n  - 次の親です".as_bytes());
+        let text = extract_selected_text_from_parser(&mut parser, sel_range((0, 0), (39, 2)));
+        assert_eq!(text, "- 親の項目です\n  - 子の項目です\n- 次の親です");
+    }
+
+    /// 回帰: たまたま右端まで届いた行でも、次行の字下げが本文位置と違えば
+    /// つながない (別のブロック)。
+    #[test]
+    fn extract_selected_text_keeps_newline_when_japanese_indent_differs() {
+        let lead = "以下の 3 点を確認しました。どれも問題";
+        let mut parser = vt100::Parser::new(6, 40, 100);
+        parser.process(format!("  {lead}\r\n      深い字下げの行です").as_bytes());
+        let text = extract_selected_text_from_parser(&mut parser, sel_range((0, 0), (39, 1)));
+        assert_eq!(text, format!("{lead}\n    深い字下げの行です"));
+    }
+
+    /// 応答 1 行目の `● ` は、行頭から選択したときは字下げの一部として落とす。
+    #[test]
+    fn extract_selected_text_drops_reply_marker_when_selected_from_col_0() {
+        let mut parser = vt100::Parser::new(6, 40, 100);
+        parser.process("● 承知しました。すぐに対応します。".as_bytes());
+        let text = extract_selected_text_from_parser(&mut parser, sel_range((0, 0), (39, 0)));
+        assert_eq!(text, "承知しました。すぐに対応します。");
+    }
+
+    /// 行の途中から選択したときは 1 行目に手を付けず、2 行目以降だけ字下げを落とす。
+    #[test]
+    fn extract_selected_text_keeps_first_line_when_selection_starts_mid_row() {
+        let mut parser = vt100::Parser::new(6, 40, 100);
+        parser.process("● 承知しました。\r\n  次の行です。".as_bytes());
+        // x=4 は「知」(「承」が 2..=3 桁)。
+        let text = extract_selected_text_from_parser(&mut parser, sel_range((4, 0), (39, 1)));
+        assert_eq!(text, "知しました。\n次の行です。");
+    }
+
+    /// Claude Code の日本語の応答を、ConPTY の出し方 (CAPTURED_REPLY と同じ
+    /// 絶対カーソル移動 `CSI r;3H` と、最終列まで埋まった直後の自動折り返し) で
+    /// 再現したもの。段落・空行・見出し・字下げ 4 桁で続く箇条書きが混ざっても、
+    /// 段落は 1 行に、箇条書きは項目ごとに 1 行になり、共通の字下げは落ちる。
+    /// 文面はダミー (実データではない)。
+    #[test]
+    fn extract_selected_text_replays_emulated_japanese_claude_reply() {
+        let a1 = "ご連絡ありがとうございます。v4.12 で「保存」を押しても設定";
+        let a2 = "が残らない件、こちらでも再現しました。原因は設定ファイルの";
+        let a3 = "書き込み失敗です。次の版で直します。";
+        let b0 = "確認した内容：";
+        let b1 = "ログイン状態は正常で、予約投稿 12 件もすべて送信済みにな";
+        let b1c = "っていました。";
+        let b2 = "自動いいねは止まっていません。";
+        assert_eq!((disp_w(a1), disp_w(a2), disp_w(b1)), (58, 58, 56));
+        let reply = format!(
+            "\x1b[?25l\x1b[38;2;255;255;255m\x1b[11;1H●\x1b[m\x1b[1C{a1}\x1b[12;3H{a2}  {a3}\x1b[15;3H{b0}\x1b[16;3H- {b1}\x1b[17;5H{b1c}\x1b[18;3H- {b2}"
+        );
+        let mut parser = vt100::Parser::new(30, 60, 100);
+        parser.process(reply.as_bytes());
+        let screen = parser.screen();
+        assert!(!screen.row_wrapped(10), "前提: 1 つ目の折り返しは絶対移動");
+        assert!(
+            screen.row_wrapped(11),
+            "前提: 2 つ目の折り返しは自動折り返し"
+        );
+        let text = extract_selected_text_from_parser(&mut parser, sel_range((0, 10), (59, 17)));
+        assert_eq!(
+            text,
+            format!("{a1}{a2}{a3}\n\n{b0}\n- {b1}{b1c}\n- {b2}"),
+            "got: {text:#?}"
+        );
     }
 
     fn mi(enabled: bool) -> crate::app::MenuItem {
@@ -4343,3 +4618,16 @@ mod tests {
 // ver0.12 - 2026-10-19 - The 2 s tick also calls app.spawn_next_resume() so the
 //                        `--resume` sessions open one tab per tick (errors go to
 //                        the status line).
+// ver0.13 - 2026-10-27 - Copy of Claude Code's Japanese replies: a row that
+//                        reaches the right edge joins the next row with no
+//                        newline and no space when the boundary is a wide
+//                        (CJK / full-width) character on either side and the
+//                        next row starts exactly at the row's body column
+//                        (continues_wide_prose; also after a terminal
+//                        auto-wrap). Rows starting with Japanese list heads
+//                        (`・` `※` `①` `1）` ...) are never joined. After the
+//                        rows are decided, dedent_copied_lines removes the
+//                        indent shared by all non-empty lines (the first line
+//                        is left alone when the selection starts mid-row; a
+//                        leading `● ` selected from column 0 counts as
+//                        indent), keeping blank lines and relative indents.
