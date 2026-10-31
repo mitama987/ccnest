@@ -5,6 +5,34 @@
 
 ---
 
+## 2026-10-31 — 折り返した URL を Ctrl+クリックすると途中までのリンクが開くのを直す（v0.1.28）
+
+ブランチ: `fix/url-click-app-wrap`
+
+### 背景
+
+Claude Code の応答の中の Google ドキュメントの URL が右端で割られ、次行に字下げ 2 桁で続いていた。Ctrl+クリックすると 1 行目の `…kZVKeb8l` までしか開かなかった。コピーは v0.1.19 / v0.1.21 でアプリ折り返しをつなぐようにしていたが、Ctrl+クリックの `url_at_cell_in_screen` は端末のソフトラップ（`row_wrapped`）しか見ていなかった。最終列まで埋まった自動折り返しの形でも、続き行の字下げの空白で URL が切れていた。
+
+### 変更点
+
+| ファイル | ver | 内容 |
+|---|---|---|
+| src/event.rs | 0.14 | `row_join`（`RowJoin::{Soft, SoftDropIndent, App}`）: 行のつながりをコピーと同じ `app_wrapped` / `app_wrapped_after_autowrap` で判定する。`url_at_cell_in_screen` はこれで上下に広げ、アプリ折り返しの境目では前の行の末尾の余白と次の行の字下げを落とす。全角の 2 セル目は飛ばす。URL の終わりは `is_url_char`（RFC 3986 の ASCII 文字）以外の文字（日本語・空白）。`open_url` は `CCNEST_OPEN_URL_LOG=<path>` があればブラウザを開かず URL を追記する（E2E 用） |
+| scripts/e2e/url-click-wrap.ps1 | 新規 | 使い捨て conhost の ccnest に WriteConsoleInputW で Ctrl+クリックを入れ、開いた URL を確認する |
+| README.md / Cargo.toml / Cargo.lock | 0.1.28 | 履歴・版 |
+
+### 検証
+
+- 追加テスト 5 件（アプリ折り返し・自動折り返し＋字下げ・日本語の手前で終わる・URL の一覧をつながない・短い行をつながない）
+- 実機 E2E: `scripts/e2e/url-click-wrap.ps1`
+
+### 既知の限界
+
+- Windows Terminal 自身のホバー表示（吹き出し）は 1 行目までのまま（WT が画面を自分で読んでいるため。直すには OSC 8 を出す必要がある）
+- 日本語を含む URL（IRI）は日本語の手前で切れる
+
+---
+
 ## 2026-10-27 — 日本語の応答をコピーしたときの改行と字下げを消す（v0.1.27）
 
 ブランチ: `feature/copy-jp-prose-dedent`
