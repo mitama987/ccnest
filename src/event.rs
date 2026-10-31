@@ -887,6 +887,12 @@ fn handle_key(app: &mut App, key: KeyEvent, pane_rects: &HashMap<PaneId, Rect>) 
         Action::NewTab => {
             app.new_tab()?;
         }
+        Action::ReopenClosedTab => {
+            if !app.reopen_closed_tab()? {
+                app.status = Some("開き直せる閉じたタブはありません".to_string());
+            }
+            app.selection = None;
+        }
         Action::ClosePane => {
             app.close_focused_pane();
         }
@@ -4783,3 +4789,5 @@ mod tests {
 //                        ends the URL at the first non-URL character (is_url_char).
 //                        CCNEST_OPEN_URL_LOG=<path> logs the URL instead of opening
 //                        a browser (E2E).
+// ver0.15 - 2026-10-31 - Action::ReopenClosedTab -> app.reopen_closed_tab(); a
+//                        status message when there is nothing to reopen.

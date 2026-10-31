@@ -76,6 +76,20 @@ impl Layout {
         }
     }
 
+    /// 分割の向きと比率を保ったまま、葉の ID を `f` で付け替えた複製を返す
+    /// (閉じたタブを新しいペイン ID で開き直すときに使う)。
+    pub fn remap(&self, f: &dyn Fn(PaneId) -> PaneId) -> Layout {
+        match self {
+            Layout::Leaf(id) => Layout::Leaf(f(*id)),
+            Layout::Split { dir, ratio, a, b } => Layout::Split {
+                dir: *dir,
+                ratio: *ratio,
+                a: Box::new(a.remap(f)),
+                b: Box::new(b.remap(f)),
+            },
+        }
+    }
+
     pub fn first_leaf(&self) -> Option<PaneId> {
         match self {
             Layout::Leaf(id) => Some(*id),
@@ -127,6 +141,51 @@ impl Layout {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// remap は分割の向き・比率・葉の並びを保ったまま ID だけ付け替える。
+    #[test]
+    fn remap_keeps_shape_and_ratio() {
+        let mut l = Layout::Leaf(1)
+            .split(1, Direction::Right, 2)
+            .split(2, Direction::Down, 3);
+        l.adjust_ratio_for(1, 0.2);
+        let m = l.remap(&|id| id + 10);
+        assert_eq!(m.leaves(), vec![11, 12, 13]);
+        match (&l, &m) {
+            (
+                Layout::Split {
+                    dir: d1,
+                    ratio: r1,
+                    b: b1,
+                    ..
+                },
+                Layout::Split {
+                    dir: d2,
+                    ratio: r2,
+                    b: b2,
+                    ..
+                },
+            ) => {
+                assert_eq!(d1, d2);
+                assert_eq!(r1, r2);
+                assert!(matches!(
+                    **b1,
+                    Layout::Split {
+                        dir: SplitDir::Horizontal,
+                        ..
+                    }
+                ));
+                assert!(matches!(
+                    **b2,
+                    Layout::Split {
+                        dir: SplitDir::Horizontal,
+                        ..
+                    }
+                ));
+            }
+            _ => panic!("expected split"),
+        }
+    }
 
     #[test]
     fn split_replaces_leaf() {
@@ -213,3 +272,8 @@ mod tests {
         }
     }
 }
+
+// Version History
+// ver0.1 - 2026-10-31 - Layout::remap: copy of the layout with leaf ids mapped
+//                       (keeps split direction and ratio), used to reopen a
+//                       closed tab with new pane ids.

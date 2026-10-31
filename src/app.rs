@@ -21,6 +21,28 @@ pub struct Tab {
     pub focused: PaneId,
 }
 
+/// 閉じたタブの控え (Ctrl+Shift+T で開き直す用)。
+pub struct ClosedTab {
+    pub title: String,
+    /// 閉じる前のタブの位置。
+    pub index: usize,
+    /// 閉じる前のペイン ID のままの分割の形。
+    pub layout: Layout,
+    pub focused: PaneId,
+    pub panes: Vec<ClosedPane>,
+}
+
+pub struct ClosedPane {
+    pub old_id: PaneId,
+    pub cwd: PathBuf,
+    pub session_id: Uuid,
+    /// Claude の会話ログ (`~/.claude/projects/<enc>/<id>.jsonl`) がある = `--resume` できる。
+    pub resumable: bool,
+}
+
+/// 覚えておく閉じたタブの数。
+const CLOSED_TABS_MAX: usize = 20;
+
 pub struct App {
     pub cwd: PathBuf,
     pub tabs: Vec<Tab>,
@@ -91,6 +113,8 @@ pub struct App {
     pub jp_titler: JpTitler,
     /// `--resume` で渡され、まだタブを開いていないセッション。
     pub pending_resumes: VecDeque<ResumeSpec>,
+    /// 閉じたタブ (新しいものが末尾)。Ctrl+Shift+T で末尾から開き直す。
+    pub closed_tabs: Vec<ClosedTab>,
     /// イベントループを起こすチャネルの送信側。ペイン生成時に reader へ配る。
     wake_tx: WakeTx,
     /// 受信側。`run_event_loop` が起動時に `take_wake_rx` で持っていく。
@@ -243,6 +267,7 @@ impl App {
             usage: None,
             jp_titler: JpTitler::from_env(),
             pending_resumes,
+            closed_tabs: Vec::new(),
             wake_tx,
             wake_rx: Some(wake_rx),
         })
@@ -462,6 +487,9 @@ impl App {
 
     pub fn close_focused_pane(&mut self) {
         let focused = self.current_tab().focused;
+        // タブ最後のペインならタブごと消えるので、閉じる前に控えを取る。
+        let snapshot = (self.current_tab().layout.leaves() == [focused])
+            .then(|| self.snapshot_tab(self.active_tab));
         if let Some(p) = self.panes.remove(&focused) {
             p.terminate();
         }
@@ -474,7 +502,11 @@ impl App {
                 self.current_tab_mut().layout = new_layout;
             }
             None => {
-                // Tab is empty — remove it.
+                // Tab is empty — remove it. ペインはもう panes から抜いてあるので、
+                // 控えは抜く前に取った `snapshot` を使う。
+                if let Some(s) = snapshot {
+                    push_closed(&mut self.closed_tabs, s);
+                }
                 self.remove_tab(self.active_tab);
             }
         }
@@ -488,12 +520,95 @@ impl App {
         if idx >= self.tabs.len() {
             return;
         }
+        let snapshot = self.snapshot_tab(idx);
+        push_closed(&mut self.closed_tabs, snapshot);
         for pid in self.tabs[idx].layout.leaves() {
             if let Some(p) = self.panes.remove(&pid) {
                 p.terminate();
             }
         }
         self.remove_tab(idx);
+    }
+
+    /// タブ `idx` の控え (タブ名・分割の形・各ペインのセッション) を取る。
+    fn snapshot_tab(&self, idx: usize) -> ClosedTab {
+        let tab = &self.tabs[idx];
+        let panes = tab
+            .layout
+            .leaves()
+            .into_iter()
+            .filter_map(|pid| self.panes.get(&pid))
+            .map(|p| ClosedPane {
+                old_id: p.id,
+                cwd: p.cwd.clone(),
+                session_id: p.session_id,
+                resumable: crate::claude::session::session_path(&p.cwd, &p.session_id.to_string())
+                    .is_some_and(|path| path.is_file()),
+            })
+            .collect();
+        ClosedTab {
+            title: tab.title.clone(),
+            index: idx,
+            layout: tab.layout.clone(),
+            focused: tab.focused,
+            panes,
+        }
+    }
+
+    /// 直前に閉じたタブを元の位置に開き直して前面に出す。会話ログのある
+    /// ペインは `--resume`、無いペインは新しい claude。開き直すタブが無ければ
+    /// false。途中で起動に失敗したら、作ったペインを閉じて控えを戻す。
+    pub fn reopen_closed_tab(&mut self) -> Result<bool> {
+        let Some(closed) = self.closed_tabs.pop() else {
+            return Ok(false);
+        };
+        let mut spawned: Vec<(PaneId, PaneId, Pane)> = Vec::new();
+        for cp in &closed.panes {
+            let new_id = self.next_pane_id;
+            match Pane::spawn(
+                new_id,
+                &cp.cwd,
+                cp.session_id,
+                start_for(cp.resumable),
+                self.wake_tx.clone(),
+            ) {
+                Ok(p) => {
+                    self.next_pane_id += 1;
+                    spawned.push((cp.old_id, new_id, p));
+                }
+                Err(e) => {
+                    for (_, _, p) in spawned {
+                        p.terminate();
+                    }
+                    self.closed_tabs.push(closed);
+                    return Err(e);
+                }
+            }
+        }
+        let Some(fallback) = spawned.first().map(|(_, n, _)| *n) else {
+            return Ok(false);
+        };
+        let map: HashMap<PaneId, PaneId> = spawned.iter().map(|(o, n, _)| (*o, *n)).collect();
+        // 控えに無い葉 (起こらないはず) は最初のペインへ寄せる。
+        let layout = closed
+            .layout
+            .remap(&|id| map.get(&id).copied().unwrap_or(fallback));
+        let focused = map.get(&closed.focused).copied().unwrap_or(fallback);
+        for (_, new_id, p) in spawned {
+            self.panes.insert(new_id, p);
+        }
+        let at = reopen_index(closed.index, self.tabs.len());
+        self.tabs.insert(
+            at,
+            Tab {
+                title: closed.title,
+                layout,
+                focused,
+            },
+        );
+        self.active_tab = at;
+        self.mark_active_tab_seen();
+        Ok(true)
     }
 
     /// `tabs[idx]` を取り除き、`active_tab` / `quit` を更新する。
@@ -627,6 +742,29 @@ fn plan_branch_refresh(
     (next, stale)
 }
 
+/// 純粋: 閉じたタブを積む。上限を超えたら古いもの (先頭) から捨てる。
+fn push_closed(stack: &mut Vec<ClosedTab>, tab: ClosedTab) {
+    stack.push(tab);
+    if stack.len() > CLOSED_TABS_MAX {
+        let extra = stack.len() - CLOSED_TABS_MAX;
+        stack.drain(..extra);
+    }
+}
+
+/// 純粋: 開き直すタブの位置。元の位置、今のタブ数を超えるなら末尾。
+fn reopen_index(index: usize, len: usize) -> usize {
+    index.min(len)
+}
+
+/// 純粋: 会話ログがあれば `--resume`、無ければ新しいセッション。
+fn start_for(resumable: bool) -> SessionStart {
+    if resumable {
+        SessionStart::Resume
+    } else {
+        SessionStart::New
+    }
+}
+
 /// 純粋: タブ `closed` を取り除いた後 (残り `remaining` 枚) のアクティブ index。
 /// `closed < active` なら 1 つ左へ、`closed == active` なら同 index (右隣が滑り込む)、
 /// 末尾を超えたら末尾へクランプ。`remaining == 0` なら None (= quit)。
@@ -641,6 +779,47 @@ fn active_after_close(active: usize, closed: usize, remaining: usize) -> Option<
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn closed(title: &str) -> ClosedTab {
+        ClosedTab {
+            title: title.to_string(),
+            index: 0,
+            layout: Layout::Leaf(1),
+            focused: 1,
+            panes: Vec::new(),
+        }
+    }
+
+    /// 閉じたタブは新しい順に取り出せ、上限を超えたら古いものから捨てる。
+    #[test]
+    fn push_closed_caps_and_pops_newest_first() {
+        let mut stack = Vec::new();
+        for i in 0..(CLOSED_TABS_MAX + 3) {
+            push_closed(&mut stack, closed(&format!("t{i}")));
+        }
+        assert_eq!(stack.len(), CLOSED_TABS_MAX);
+        assert_eq!(stack.first().unwrap().title, "t3");
+        assert_eq!(
+            stack.pop().unwrap().title,
+            format!("t{}", CLOSED_TABS_MAX + 2)
+        );
+    }
+
+    /// 開き直す位置は元の位置。今のタブ数を超えるなら末尾。
+    #[test]
+    fn reopen_index_clamps_to_end() {
+        assert_eq!(reopen_index(1, 3), 1);
+        assert_eq!(reopen_index(3, 3), 3);
+        assert_eq!(reopen_index(5, 2), 2);
+        assert_eq!(reopen_index(0, 0), 0);
+    }
+
+    /// 会話ログがあれば --resume、無ければ新しいセッション。
+    #[test]
+    fn start_for_resumable() {
+        assert_eq!(start_for(true), SessionStart::Resume);
+        assert_eq!(start_for(false), SessionStart::New);
+    }
 
     const TTL: Duration = Duration::from_secs(10);
 
@@ -776,3 +955,10 @@ mod tests {
 //                       日本語タブ名 (jp_titler), OSC タイトル, 最後の発話)。
 //                       生成の依頼は --resume のタブを開き終え、claude 起動から
 //                       10 秒 (JP_TITLE_REQUEST_AFTER) 経ってから。
+// ver0.9 - 2026-10-31 - Ctrl+Shift+T reopens closed tabs: close_tab and
+//                       close_focused_pane (when the tab becomes empty) push a
+//                       ClosedTab (title, index, layout, focused, panes with
+//                       session id / cwd / resumable = the session log exists)
+//                       onto closed_tabs (max 20). reopen_closed_tab respawns
+//                       each pane (--resume when resumable), remaps the layout
+//                       to the new pane ids and inserts the tab at its old index.
