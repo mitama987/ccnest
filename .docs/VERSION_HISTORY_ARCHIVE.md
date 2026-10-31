@@ -5,6 +5,38 @@
 
 ---
 
+## 2026-10-31 — Ctrl+Shift+T で直前に閉じたタブを開き直す（v0.1.29）
+
+ブランチ: `feature/reopen-closed-tab`
+
+### 背景
+
+ゆうさんの要望「Ctrl+Shift+T で直前に消したタブを開けるようにしたい」（ブラウザと同じ）。`--resume` で Claude のセッションを開き直す仕組みは v0.1.23 からある。Windows Terminal は既定で Ctrl+Shift+T を自分の「新しいタブ」に使っているので、WT 側の割り当てを外す（ゆうさん決定）。
+
+### 変更点
+
+| ファイル | 内容 |
+|---|---|
+| src/keymap.rs | `Action::ReopenClosedTab`。Ctrl+Shift+`t`/`T` を Ctrl+T（新しいタブ）より先に判定 |
+| src/pane/grid.rs | `Layout::remap`: 分割の向き・比率を保ったまま葉の ID を付け替える |
+| src/app.rs | `ClosedTab` / `ClosedPane` と `closed_tabs`（上限 20）。`close_tab` と、`close_focused_pane` でタブが空になるときに控えを取る（`snapshot_tab`。会話ログがあれば `resumable`）。`reopen_closed_tab`: 元の位置に同じ分割で開き直して前面へ。ログがあるペインは `--resume`、無ければ新しいセッション。途中で起動に失敗したら作ったペインを閉じて控えを戻す |
+| src/event.rs | `ReopenClosedTab` の処理。閉じたタブが無ければステータス欄に「開き直せる閉じたタブはありません」 |
+| scripts/e2e/reopen-tab.ps1 | 使い捨て conhost に WriteConsoleInputW で Ctrl+T → Ctrl+W → Ctrl+Shift+T を入れて確認 |
+| README.md / Cargo.toml / Cargo.lock | 0.1.29 |
+
+### 検証
+
+- 追加テスト 5 件（キー割り当て・remap・控えの上限・開き直す位置・Resume/New の選択）。`cargo test --all` 通過
+- 実機 E2E `scripts/e2e/reopen-tab.ps1`: タブ 2 を閉じると claude が終わり、Ctrl+Shift+T で `--resume <タブ 2 のセッション>` の claude が起動、もう 1 回押すと「ありません」→ PASS
+
+### 既知の限界
+
+- 分割中のペインを 1 つだけ Ctrl+W で閉じたものは戻せない（タブ単位）
+- 最後のタブを閉じると ccnest 自体が終わるので戻せない
+- 覚えておくのは ccnest を起動している間だけ（終了したら消える）
+
+---
+
 ## 2026-10-31 — 折り返した URL を Ctrl+クリックすると途中までのリンクが開くのを直す（v0.1.28）
 
 ブランチ: `fix/url-click-app-wrap`

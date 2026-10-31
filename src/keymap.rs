@@ -6,6 +6,8 @@ pub enum Action {
     SplitHorizontal,
     SplitVertical,
     NewTab,
+    /// 直前に閉じたタブを開き直す (Ctrl+Shift+T)。
+    ReopenClosedTab,
     ClosePane,
     FocusLeft,
     FocusRight,
@@ -42,6 +44,10 @@ pub fn resolve(ev: &KeyEvent, sidebar_focused: bool) -> Action {
 
     // Global multiplexer hotkeys (prefix-less) — claimed before pass-through.
     if ctrl {
+        // Ctrl+Shift+T は Ctrl+T (新しいタブ) より先に見る。
+        if shift && matches!(ev.code, KeyCode::Char('t') | KeyCode::Char('T')) {
+            return Action::ReopenClosedTab;
+        }
         match ev.code {
             // Split: D = vertical (right), E = horizontal (down).
             KeyCode::Char('d') | KeyCode::Char('D') => return Action::SplitVertical,
@@ -108,6 +114,33 @@ pub fn resolve(ev: &KeyEvent, sidebar_focused: bool) -> Action {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Ctrl+Shift+T は直前に閉じたタブを開き直す。Windows の crossterm は
+    /// 小文字 't' + CONTROL|SHIFT で渡すことがあるので大小どちらも。
+    #[test]
+    fn ctrl_shift_t_reopens_closed_tab() {
+        let cs = KeyModifiers::CONTROL | KeyModifiers::SHIFT;
+        assert_eq!(
+            resolve(&KeyEvent::new(KeyCode::Char('T'), cs), false),
+            Action::ReopenClosedTab
+        );
+        assert_eq!(
+            resolve(&KeyEvent::new(KeyCode::Char('t'), cs), false),
+            Action::ReopenClosedTab
+        );
+        // Ctrl+T は新しいタブのまま、Ctrl+Shift+Tab は前のタブのまま。
+        assert_eq!(
+            resolve(
+                &KeyEvent::new(KeyCode::Char('t'), KeyModifiers::CONTROL),
+                false
+            ),
+            Action::NewTab
+        );
+        assert_eq!(
+            resolve(&KeyEvent::new(KeyCode::Tab, cs), false),
+            Action::PrevTab
+        );
+    }
 
     fn key(code: KeyCode, mods: KeyModifiers) -> KeyEvent {
         KeyEvent::new(code, mods)
@@ -237,3 +270,7 @@ mod tests {
         );
     }
 }
+
+// Version History
+// ver0.1 - 2026-10-31 - Ctrl+Shift+T (t or T) resolves to Action::ReopenClosedTab,
+//                       checked before Ctrl+T (NewTab).
