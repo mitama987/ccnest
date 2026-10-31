@@ -1936,31 +1936,56 @@ fn url_at_cell_in_screen(screen: &vt100::Screen, col: u16, row: u16) -> Option<S
         return None;
     }
 
-    // クリック行を含むソフトラップ連鎖を [chain_start, chain_end] で求める。
-    // chain_start = row から後退して row_wrapped(prev) が true の間まで遡る。
-    // chain_end   = row から前進して row_wrapped(cur)  が true の間まで進む。
+    // クリック行を含む連鎖 [chain_start, chain_end] を求める。端末のソフトラップ
+    // だけでなく、アプリ (Claude Code) が長い URL を右端で自分で割った行もつなぐ
+    // (コピーと同じ判定 `row_join`)。
     let mut chain_start = row;
-    while chain_start > 0 && screen.row_wrapped(chain_start - 1) {
+    while chain_start > 0 && row_join(screen, chain_start - 1).is_some() {
         chain_start -= 1;
     }
     let mut chain_end = row;
-    while chain_end + 1 < rows && screen.row_wrapped(chain_end) {
+    while chain_end + 1 < rows && row_join(screen, chain_end).is_some() {
         chain_end += 1;
     }
 
-    // 連鎖行の文字列を (char, 表示列, 行) として展開。空セルは半角スペース扱い。
-    // ワイド文字や合成は同じセルに複数 char が乗るため triple で持つ。
+    // 連鎖行の文字列を (char, 表示列, 行) として展開。空セルは半角スペース扱い、
+    // 全角の 2 セル目は飛ばす。アプリ折り返しの境目では前の行の末尾の余白と
+    // 次の行の字下げを落とす。
     let mut chars: Vec<(char, u16, u16)> = Vec::new();
+    let mut drop_indent = false;
     for r in chain_start..=chain_end {
+        let mut at_head = true;
         for x in 0..cols {
-            let contents = screen.cell(r, x).map(|c| c.contents()).unwrap_or_default();
-            if contents.is_empty() {
-                chars.push((' ', x, r));
-            } else {
-                for ch in contents.chars() {
-                    chars.push((ch, x, r));
-                }
+            let Some(cell) = screen.cell(r, x) else {
+                continue;
+            };
+            if cell.is_wide_continuation() {
+                continue;
             }
+            let contents = cell.contents();
+            if contents.is_empty() || contents.chars().all(char::is_whitespace) {
+                if !(drop_indent && at_head) {
+                    chars.push((' ', x, r));
+                }
+                continue;
+            }
+            at_head = false;
+            for ch in contents.chars() {
+                chars.push((ch, x, r));
+            }
+        }
+        if r == chain_end {
+            break;
+        }
+        match row_join(screen, r) {
+            Some(RowJoin::App) => {
+                while chars.last().is_some_and(|(c, _, _)| *c == ' ') {
+                    chars.pop();
+                }
+                drop_indent = true;
+            }
+            Some(RowJoin::SoftDropIndent) => drop_indent = true,
+            _ => drop_indent = false,
         }
     }
 
@@ -1997,11 +2022,7 @@ fn url_at_cell_in_screen(screen: &vt100::Screen, col: u16, row: u16) -> Option<S
         };
 
         let mut end = scheme_end;
-        while end < n {
-            let c = chars[end].0;
-            if c.is_whitespace() || c.is_control() {
-                break;
-            }
+        while end < n && is_url_char(chars[end].0) {
             end += 1;
         }
         // 末尾の句読点を URL 外として削る (URL の直後の `.` `,` `)` 等)。
@@ -2036,8 +2057,68 @@ fn url_at_cell_in_screen(screen: &vt100::Screen, col: u16, row: u16) -> Option<S
     None
 }
 
-#[cfg(target_os = "windows")]
+/// URL に使える文字 (RFC 3986 の ASCII 文字)。空白・日本語・`<>"` などで URL を終える。
+fn is_url_char(c: char) -> bool {
+    c.is_ascii_alphanumeric() || "-._~:/?#[]@!$&'()*+,;=%".contains(c)
+}
+
+/// 行 r と次の行のつながり方。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RowJoin {
+    /// 端末のソフトラップ。そのままつなぐ。
+    Soft,
+    /// 端末のソフトラップだが、次の行の頭の空白はアプリの字下げ。
+    SoftDropIndent,
+    /// アプリが右端で自分で割った行。前の行の末尾の余白と次の行の字下げを落とす。
+    App,
+}
+
+/// 行 r が次の行へ続いているか。判定はコピー (`extract_selected_text_from_parser`)
+/// と同じ `app_wrapped` / `app_wrapped_after_autowrap` を使う。
+fn row_join(screen: &vt100::Screen, r: u16) -> Option<RowJoin> {
+    let (rows, _) = screen.size();
+    if r + 1 >= rows {
+        return None;
+    }
+    let shape = |y: u16, soft: bool| RowShape {
+        text: String::new(),
+        soft_wrapped: soft,
+        at_row_end: true,
+        traits: app_wrap_traits(screen, y),
+    };
+    let a = shape(r, screen.row_wrapped(r));
+    let b = shape(r + 1, screen.row_wrapped(r + 1));
+    if a.soft_wrapped {
+        if app_wrapped_after_autowrap(&a, &b) {
+            Some(RowJoin::SoftDropIndent)
+        } else {
+            Some(RowJoin::Soft)
+        }
+    } else if app_wrapped(&a, &b) {
+        Some(RowJoin::App)
+    } else {
+        None
+    }
+}
+
+/// E2E 用: `CCNEST_OPEN_URL_LOG` があればブラウザを開かず、URL をそのファイルに追記する。
 fn open_url(url: &str) {
+    if let Some(path) = std::env::var_os("CCNEST_OPEN_URL_LOG") {
+        use std::io::Write as _;
+        if let Ok(mut f) = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(path)
+        {
+            let _ = writeln!(f, "{url}");
+        }
+        return;
+    }
+    open_url_in_browser(url);
+}
+
+#[cfg(target_os = "windows")]
+fn open_url_in_browser(url: &str) {
     // `cmd /C start "" <url>` は ShellExecute 経由で既定ブラウザを起動する。
     // 第 2 引数の空文字列は start のタイトル引数で、URL に空白がある場合に
     // タイトルとして食われるのを防ぐためのプレースホルダ。
@@ -2047,12 +2128,12 @@ fn open_url(url: &str) {
 }
 
 #[cfg(target_os = "macos")]
-fn open_url(url: &str) {
+fn open_url_in_browser(url: &str) {
     let _ = std::process::Command::new("open").arg(url).spawn();
 }
 
 #[cfg(all(not(target_os = "windows"), not(target_os = "macos")))]
-fn open_url(url: &str) {
+fn open_url_in_browser(url: &str) {
     let _ = std::process::Command::new("xdg-open").arg(url).spawn();
 }
 
@@ -4190,6 +4271,70 @@ mod tests {
         assert!(got.as_deref().unwrap().starts_with("https://example.com"));
     }
 
+    const DOC_URL: &str =
+        "https://docs.google.com/document/d/1QZlfxaJs8FVooN-kZVKeb8lnJBc86sHAPZk9dFEMe_A/edit";
+
+    /// ユーザー報告 (2026-10-31): Claude Code が URL を右端で自分で割り
+    /// (CR + CSI C + CSI B)、続きを字下げ 2 桁で置く。row_wrapped は立たないが、
+    /// どちらの行を Ctrl+クリックしても URL 全体を開く。直後の `)・リンク` は含めない。
+    #[test]
+    fn url_at_cell_joins_claude_app_wrapped_url() {
+        let mut parser = vt100::Parser::new(6, 48, 100);
+        // "  原本 (" = 8 桁。URL の先頭 39 文字で 47 桁目まで埋める。
+        let (head, tail) = DOC_URL.split_at(39);
+        parser
+            .process(format!("  原本 ({head}{CLAUDE_NEXT_ROW}{tail})・リンクは開ける").as_bytes());
+        assert!(!parser.screen().row_wrapped(0), "前提: アプリの改行");
+        let got = url_at_cell_in_screen(parser.screen(), 20, 0);
+        assert_eq!(got.as_deref(), Some(DOC_URL));
+        let got = url_at_cell_in_screen(parser.screen(), 5, 1);
+        assert_eq!(got.as_deref(), Some(DOC_URL));
+    }
+
+    /// 最終列まで埋めて割ると ConPTY は自動折り返しで次行へ進み、字下げを空白で
+    /// 書く。その空白は URL に入れない。
+    #[test]
+    fn url_at_cell_drops_indent_after_autowrap() {
+        let mut parser = vt100::Parser::new(6, 48, 100);
+        let (head, tail) = DOC_URL.split_at(46);
+        parser.process(format!("  {head}  {tail} です").as_bytes());
+        assert!(parser.screen().row_wrapped(0), "前提: 自動折り返し");
+        let got = url_at_cell_in_screen(parser.screen(), 10, 0);
+        assert_eq!(got.as_deref(), Some(DOC_URL));
+        let got = url_at_cell_in_screen(parser.screen(), 4, 1);
+        assert_eq!(got.as_deref(), Some(DOC_URL));
+    }
+
+    /// URL の直後に空白なしで日本語が続いても、URL は日本語の手前で終わる。
+    #[test]
+    fn url_at_cell_stops_before_japanese() {
+        let mut parser = vt100::Parser::new(4, 48, 100);
+        parser.process("  原本 (https://x.com/a)・リンク".as_bytes());
+        let got = url_at_cell_in_screen(parser.screen(), 12, 0);
+        assert_eq!(got.as_deref(), Some("https://x.com/a"));
+    }
+
+    /// URL を 1 行ずつ並べた一覧は、右端まで届いていてもつながない。
+    #[test]
+    fn url_at_cell_does_not_join_url_list() {
+        let mut parser = vt100::Parser::new(4, 48, 100);
+        let first = format!("https://example.com/{}", "a".repeat(27)); // 47 桁
+        parser.process(format!("{first}\r\nhttps://example.com/b").as_bytes());
+        let got = url_at_cell_in_screen(parser.screen(), 5, 0);
+        assert_eq!(got.as_deref(), Some(first.as_str()));
+        let got = url_at_cell_in_screen(parser.screen(), 5, 1);
+        assert_eq!(got.as_deref(), Some("https://example.com/b"));
+    }
+
+    /// 右端に届かない短い URL の行は、次の行とつながない。
+    #[test]
+    fn url_at_cell_does_not_join_short_row() {
+        let mut parser = vt100::Parser::new(4, 48, 100);
+        parser.process(b"  https://x.com/a\r\n  next");
+        let got = url_at_cell_in_screen(parser.screen(), 5, 0);
+        assert_eq!(got.as_deref(), Some("https://x.com/a"));
+    }
+
     // --- 決定論的ファントム矢印コアレス (classify_arrow) --------------------
     //
     // Windows ConPTY が alt 画面中のホイール 1 回転を Mouse(ScrollUp/Down) と
@@ -4631,3 +4776,10 @@ mod tests {
 //                        is left alone when the selection starts mid-row; a
 //                        leading `● ` selected from column 0 counts as
 //                        indent), keeping blank lines and relative indents.
+// ver0.14 - 2026-10-31 - Ctrl+click URL detection joins rows with the same rule
+//                        as copy (row_join: terminal soft wrap, soft wrap with an
+//                        app indent, or Claude Code's own right-edge break), drops
+//                        the trailing blanks / hanging indent at an app break, and
+//                        ends the URL at the first non-URL character (is_url_char).
+//                        CCNEST_OPEN_URL_LOG=<path> logs the URL instead of opening
+//                        a browser (E2E).
