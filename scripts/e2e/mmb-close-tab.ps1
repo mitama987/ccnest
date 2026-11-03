@@ -17,8 +17,8 @@
   (and, for WT, its title carrying our unique token). Abort otherwise.
 #>
 param(
-  [string]$Exe = 'C:\Users\mitam\Desktop\work\90_other\ccnest\target\release\ccnest.exe',
-  [string]$Cwd = 'C:\Users\mitam\Desktop\work\90_other\ccnest',
+  [string]$Exe = 'C:\Users\mitam\Desktop\work\80_ccnest\target\release\ccnest.exe',
+  [string]$Cwd = 'C:\Users\mitam\Desktop\work\80_ccnest',
   [int]$StartupWaitSec = 4,
   [switch]$SkipConhost,
   [switch]$SkipWt

@@ -5,6 +5,12 @@
 
 ---
 
+## 2026-11-03 — work フォルダ番号振り直しに伴うパス参照の更新（テスト期待値含む）
+
+- `src/ui/mod.rs` のテスト: cwd の例を `90_other\ccnest`→`80_ccnest`・`30_XTP3`→`20_XTP3` に。期待値のフォルダ名 3 箇所（`[1] 30_XTP3`）も `20_XTP3` に合わせた（機械置換はパスだけだったので落ちていた）
+- `examples/model_probe.rs`・`scripts/capture-statusbar.ps1`・`scripts/e2e/mmb-close-tab.ps1`・`scripts/latency/measure-typing-latency.ps1`・この文書: 絶対パスを新名に。対応表は `work\README.md`
+- 検証: cargo fmt / clippy / test（356 passed）
+
 ## 2026-10-31 — Ctrl+Shift+T で直前に閉じたタブを開き直す（v0.1.29）
 
 ブランチ: `feature/reopen-closed-tab`
@@ -305,7 +311,7 @@ v0.1.19 は Claude Code の自前改行（`CR` + `CSI n C` + `CSI 1 B`）を `ap
 - CI（windows-latest）: `cargo fmt --check` / `cargo clippy --all-targets -- -D warnings` は警告なし、`cargo test --all` 288 件緑。新規テストは usage.rs 18 件（解析・切り捨て・リセット済み 0%・色の段階・30 分で隠す・トークン期限・`CLAUDE_CONFIG_DIR`・間隔の env・失敗ごとの待ち・キャッシュの読み書き）と ui/mod.rs 5 件（並び順・削る順・丸ごと落とす・0〜160 桁ではみ出さない・色）
 - release.yml をブランチで試し実行（`dry_run_tag=v0.1.20-rc1`）し、4 プラットフォームともビルド成功。Windows の exe は 3.7 MB → 5.7 MB（rustls と ring のぶん）
 - 実機 E2E（Windows Terminal の新しいウィンドウ・shell ペイン・キー入力なし）
-  - 起動 9 秒後のステータスバーが `cwd: C:\work\90_other\ccnest │ shell │ ⎇ feature/usage-in-statusbar │ 5h 2% · wk 0% · Fable 0%`。`usage-cache.json` の値（5h 2.0 / 週 0.0 / Fable 0.0）と一致
+  - 起動 9 秒後のステータスバーが `cwd: C:\work\80_ccnest │ shell │ ⎇ feature/usage-in-statusbar │ 5h 2% · wk 0% · Fable 0%`。`usage-cache.json` の値（5h 2.0 / 週 0.0 / Fable 0.0）と一致
   - `CCNEST_USAGE=off` では利用制限 % が出ない
   - 2 つ目の窓は共有キャッシュの値をそのまま出し、`fetched_at` は変わらなかった（問い合わせは増えない）
   - 3 回とも、自分で起動した ccnest だけを止め、WT はそのウィンドウだけ閉じた（残骸 0）
@@ -372,7 +378,7 @@ v0.1.17（細線枠・空き行 1 行）を実機で見た本人から「微妙�
 - `cargo test --all` 252 件緑（`main_layout_puts_panes_right_below_tabbar` / `main_layout_rows_are_contiguous_at_various_heights`
   を空き行なしに、`pane_block_draws_plain_box_lines` で上辺 `┌ [1] 30_XTP3 ─────────┐`・側面・下辺と色を検証）、
   `cargo clippy --all-targets -- -D warnings` 警告なし。v0.1.15（`7d75099`）との差分はコメント・関数の切り出し・テストのみ
-- 実機: Windows Terminal の新規ウィンドウで `ccnest C:\Users\mitam\Desktop\work\30_XTP3` を起動しスクリーンショットで確認
+- 実機: Windows Terminal の新規ウィンドウで `ccnest C:\Users\mitam\Desktop\work\20_XTP3` を起動しスクリーンショットで確認
 
 ## 2026-09-27 — ペイン枠を細線（McGugan 式）にして上辺を半行上げる（v0.1.17）
 
@@ -405,7 +411,7 @@ v0.1.16 の空き行 1 行に対して「空き行を 1 行の半分にできる
 - `cargo test --all` 252 件緑（新規 `pane_block_draws_one_eighth_tall_lines`: 24×4 の TestBackend で
   上辺 `▕ [1] 30_XTP3 ▔▔▔▔▔▔▔▔▔▏`・側面・下辺 `▕▁…▁▏` と色を 1 文字単位で検証。既存の
   `pane_frame_renders_folder_title_in_top_border` も `pane_block` 経由に変更）、`cargo clippy --all-targets -- -D warnings` 警告なし
-- 実機: Windows Terminal の新規ウィンドウで `ccnest C:\Users\mitam\Desktop\work\30_XTP3` を起動しスクリーンショットで確認
+- 実機: Windows Terminal の新規ウィンドウで `ccnest C:\Users\mitam\Desktop\work\20_XTP3` を起動しスクリーンショットで確認
 
 ## 2026-09-27 — タブバーとペイン枠の間に空き行を 1 行（v0.1.16）
 
@@ -434,7 +440,7 @@ v0.1.15 でペイン枠のタイトルをフォルダ名にした直後、「わ
 
 - `cargo test --all` 251 件緑（新規 `main_layout_leaves_one_blank_row_below_tabbar` /
   `main_layout_rows_are_contiguous_at_various_heights`）、`cargo clippy --all-targets -- -D warnings` 警告なし
-- 実機: conhost 独立窓で `ccnest C:\Users\mitam\Desktop\work\30_XTP3` を起動しスクリーンショットで確認
+- 実機: conhost 独立窓で `ccnest C:\Users\mitam\Desktop\work\20_XTP3` を起動しスクリーンショットで確認
   （1 行目タブ、2 行目空き、3 行目にオレンジの上枠と「[1] 30_XTP3」）
 
 ## 2026-09-27 — ペイン枠のタイトルを exe 名からフォルダ名へ（v0.1.15）
@@ -468,7 +474,7 @@ Claude ペインの枠タイトルが「[1] ccnest-claude-launcher.exe」にな�
 - `cargo test --all` 249 件緑（新規 `pane_title_shows_folder_name_not_exe` /
   `pane_title_falls_back_to_full_path_at_drive_root` / `pane_frame_renders_folder_title_in_top_border`）、
   `cargo clippy --all-targets -- -D warnings` 警告なし
-- 実機: conhost 独立窓で `ccnest C:\Users\mitam\Desktop\work\30_XTP3` を起動しスクリーンショットで確認
+- 実機: conhost 独立窓で `ccnest C:\Users\mitam\Desktop\work\20_XTP3` を起動しスクリーンショットで確認
   （上枠が「[1] 30_XTP3」）
 
 ## 2026-09-26 — シェルペインの枠線とタイトル行を描かない（v0.1.14）
@@ -752,8 +758,8 @@ Claude Code ペインでの文字入力が、素の Windows Terminal + claude �
 **`session.rs::encode_project_dir` の変換規則が実データと一致していなかった。**
 
 ```
-cwd     : C:\Users\mitam\Desktop\work\90_other\ClaudeCompany
-実在dir : C--Users-mitam-Desktop-work-90-other-ClaudeCompany
+cwd     : C:\Users\mitam\Desktop\work\10_ClaudeCompany
+実在dir : C--Users-mitam-Desktop-work-10-ClaudeCompany
 旧ccnest: C-Users-mitam-Desktop-work-90_other-ClaudeCompany   ← 不一致
 ```
 

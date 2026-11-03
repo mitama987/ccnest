@@ -18,7 +18,7 @@ public static class W {
 "@
 [void][W]::SetProcessDPIAware()
 $exe = "C:\Users\mitam\scoop\persist\rustup\.cargo\bin\ccnest.exe"
-$p = Start-Process -FilePath "conhost.exe" -ArgumentList "`"$exe`"" -WorkingDirectory "C:\Users\mitam\Desktop\work\90_other\ccnest" -PassThru
+$p = Start-Process -FilePath "conhost.exe" -ArgumentList "`"$exe`"" -WorkingDirectory "C:\Users\mitam\Desktop\work\80_ccnest" -PassThru
 Start-Sleep -Seconds $WaitSec
 $c = Get-CimInstance Win32_Process | Where-Object { $_.ParentProcessId -eq $p.Id -and $_.Name -eq 'ccnest.exe' } | Select-Object -First 1
 if (-not $c) { throw "no ccnest child (pid $($p.Id))" }

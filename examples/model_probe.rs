@@ -8,7 +8,7 @@ use std::path::Path;
 use ccnest::claude::session::{pretty_model, session_path, SessionTailer};
 
 fn main() {
-    let cwd = Path::new(r"C:\Users\mitam\Desktop\work\90_other\ClaudeCompany");
+    let cwd = Path::new(r"C:\Users\mitam\Desktop\work\10_ClaudeCompany");
     let ids = [
         "a6f8ef02-9aad-4be8-a649-214e9cebd566",
         "805bd658-bf1a-40df-9b6d-63dca6761e2d",
