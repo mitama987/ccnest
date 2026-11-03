@@ -954,6 +954,14 @@ fn handle_key(app: &mut App, key: KeyEvent, pane_rects: &HashMap<PaneId, Rect>) 
                 .unwrap_or(24);
             scroll_focused(app, -h.max(1));
         }
+        Action::PasteClipboard => {
+            if app.sidebar_focused {
+                return Ok(());
+            }
+            let focused_id = app.current_tab().focused;
+            paste_clipboard_to_pane(app, focused_id);
+            app.selection = None;
+        }
         Action::PassThrough => {
             if app.sidebar_focused {
                 // Ignore character input while sidebar has focus.
@@ -1815,13 +1823,8 @@ fn execute_menu_action(app: &mut App, action: crate::app::MenuAction, pid: PaneI
             }
         }
         crate::app::MenuAction::Paste => {
-            // OS クリップボードを読み、bracketed-paste でペインへ流す。
-            let text = arboard::Clipboard::new()
-                .ok()
-                .and_then(|mut cb| cb.get_text().ok());
-            if let Some(t) = text.filter(|t| !t.is_empty()) {
-                paste_to_pane(app, pid, &t);
-            }
+            // Ctrl+V と同じ判定 (画像なら Claude に ESC v、文字列なら bracketed-paste)。
+            paste_clipboard_to_pane(app, pid);
             // 入力と同じ扱いで選択は解除する。
             app.selection = None;
         }
@@ -2710,6 +2713,76 @@ fn copy_to_clipboard(text: &str) {
     }
 }
 
+/// OS クリップボードの中身から、Ctrl+V / 右クリック「貼り付け」が何をするかの
+/// 純粋判定。
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum PasteKind {
+    /// 文字列を bracketed-paste で流す。
+    Text(String),
+    /// 画像: Claude Code に Alt+V 相当 (`ESC v`) を送り、Claude 自身に
+    /// クリップボードの画像を読ませる (Windows の Claude Code は Alt+V だけが
+    /// 画像ペースト。ccnest は画像の中身には触らない)。
+    ImageKey,
+    /// どちらも無い (空・Explorer のファイルコピー = CF_HDROP など)。何もしない。
+    Nothing,
+}
+
+/// 画像があれば画像を優先する。ブラウザの右クリック「画像をコピー」は HTML や
+/// 代替文字列を一緒に載せることがあり、文字列優先だとチップにならないため。
+/// Claude Code 自身の Alt+V も画像しか見ないので同じ挙動になる。
+fn paste_kind(text: Option<String>, has_image: bool) -> PasteKind {
+    if has_image {
+        return PasteKind::ImageKey;
+    }
+    match text {
+        Some(t) if !t.is_empty() => PasteKind::Text(t),
+        _ => PasteKind::Nothing,
+    }
+}
+
+/// Alt+V と同じバイト列 (`key_to_bytes` の ESC prefix + 'v')。
+const IMAGE_PASTE_KEY: &[u8] = b"\x1bv";
+
+/// OS クリップボードにビットマップ画像 (CF_DIB / CF_BITMAP) があるか。
+/// `IsClipboardFormatAvailable` はクリップボードを開かずに呼べる。
+/// CF_DIB はスクショ (Win+Shift+S)・ブラウザの「画像をコピー」・ペイント等が
+/// 載せる形式。ファイルコピー (CF_HDROP) は対象外。
+#[cfg(windows)]
+fn clipboard_has_image() -> bool {
+    use windows_sys::Win32::System::DataExchange::IsClipboardFormatAvailable;
+    use windows_sys::Win32::System::Ole::{CF_BITMAP, CF_DIB};
+    // SAFETY: 引数はフォーマット定数のみ。グローバル状態の読み取りで、
+    // クリップボードの所有権や内容には触れない。
+    unsafe {
+        IsClipboardFormatAvailable(CF_DIB as u32) != 0
+            || IsClipboardFormatAvailable(CF_BITMAP as u32) != 0
+    }
+}
+
+#[cfg(not(windows))]
+fn clipboard_has_image() -> bool {
+    false
+}
+
+/// OS クリップボードを読んで `pid` のペインへ貼り付ける (Ctrl+V と右クリック
+/// 「貼り付け」の共通経路)。画像なら `ESC v` を送って Claude Code に読ませ、
+/// 文字列なら bracketed-paste。
+fn paste_clipboard_to_pane(app: &App, pid: PaneId) {
+    let text = arboard::Clipboard::new()
+        .ok()
+        .and_then(|mut cb| cb.get_text().ok());
+    match paste_kind(text, clipboard_has_image()) {
+        PasteKind::Text(t) => paste_to_pane(app, pid, &t),
+        PasteKind::ImageKey => {
+            if let Some(pane) = app.panes.get(&pid) {
+                pane.scroll_to_bottom();
+                pane.write(IMAGE_PASTE_KEY);
+            }
+        }
+        PasteKind::Nothing => {}
+    }
+}
+
 /// ターミナル側から届いたペーストをフォーカス中ペインへ流す
 /// (サイドバーにフォーカスがあるときは無視)。
 fn handle_paste(app: &mut App, text: &str) {
@@ -2966,6 +3039,31 @@ fn key_to_bytes(key: &KeyEvent, app_cursor: bool) -> Vec<u8> {
 mod tests {
     use super::*;
     use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseEventKind};
+
+    /// Ctrl+V の判定: 画像があれば画像 (Claude に ESC v)、無ければ文字列、
+    /// どちらも無ければ何もしない。文字列と画像が両方あるときは画像を優先
+    /// (ブラウザの「画像をコピー」が代替文字列を載せても画像チップになる)。
+    #[test]
+    fn paste_kind_prefers_image_then_text_then_nothing() {
+        assert_eq!(
+            paste_kind(Some("hello".to_string()), false),
+            PasteKind::Text("hello".to_string())
+        );
+        assert_eq!(paste_kind(None, true), PasteKind::ImageKey);
+        assert_eq!(
+            paste_kind(Some("alt text".to_string()), true),
+            PasteKind::ImageKey
+        );
+        assert_eq!(paste_kind(None, false), PasteKind::Nothing);
+        assert_eq!(paste_kind(Some(String::new()), false), PasteKind::Nothing);
+    }
+
+    /// 画像のときに送るバイト列は Alt+V を key_to_bytes に通したものと同じ。
+    #[test]
+    fn image_paste_key_matches_alt_v() {
+        let alt_v = KeyEvent::new(KeyCode::Char('v'), KeyModifiers::ALT);
+        assert_eq!(key_to_bytes(&alt_v, false), IMAGE_PASTE_KEY.to_vec());
+    }
 
     fn press(code: KeyCode) -> Event {
         Event::Key(KeyEvent::new_with_kind(
@@ -4791,3 +4889,9 @@ mod tests {
 //                        a browser (E2E).
 // ver0.15 - 2026-10-31 - Action::ReopenClosedTab -> app.reopen_closed_tab(); a
 //                        status message when there is nothing to reopen.
+// ver0.16 - 2026-11-03 - Action::PasteClipboard (Ctrl+V) and the right-click
+//                        Paste share paste_clipboard_to_pane(): an image on
+//                        the clipboard (CF_DIB/CF_BITMAP, checked without
+//                        opening it) sends `ESC v` (Alt+V) so Claude Code
+//                        reads the image itself; text is bracketed-pasted;
+//                        image wins when both are present.

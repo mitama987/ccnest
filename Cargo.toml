@@ -1,6 +1,6 @@
 [package]
 name = "ccnest"
-version = "0.1.29"
+version = "0.1.30"
 edition = "2021"
 description = "Claude Code-aware terminal multiplexer (Windows first)"
 license = "MIT"
@@ -41,6 +41,9 @@ windows-sys = { version = "0.52", features = [
     "Win32_System_JobObjects",
     "Win32_System_Threading",
     "Win32_System_Diagnostics_ToolHelp",
+    # Ctrl+V: クリップボードに画像 (CF_DIB/CF_BITMAP) があるかを IsClipboardFormatAvailable で見る。
+    "Win32_System_DataExchange",
+    "Win32_System_Ole",
 ] }
 
 [dependencies.git2]
