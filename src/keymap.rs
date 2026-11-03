@@ -8,6 +8,11 @@ pub enum Action {
     NewTab,
     /// 直前に閉じたタブを開き直す (Ctrl+Shift+T)。
     ReopenClosedTab,
+    /// OS クリップボードを貼り付ける (Ctrl+V)。画像なら Claude Code に Alt+V
+    /// 相当 (`ESC v`) を送り、文字列なら bracketed-paste で流す。Windows
+    /// Terminal が ctrl+v を自分のペーストに束縛していると ccnest まで届かない
+    /// ので、WT 側で `{ "id": null, "keys": "ctrl+v" }` と外しておく前提。
+    PasteClipboard,
     ClosePane,
     FocusLeft,
     FocusRight,
@@ -57,6 +62,9 @@ pub fn resolve(ev: &KeyEvent, sidebar_focused: bool) -> Action {
             KeyCode::Char('b') | KeyCode::Char('B') => return Action::ToggleSidebar,
             KeyCode::Char('f') | KeyCode::Char('F') => return Action::ToggleFileTree,
             KeyCode::Char('q') | KeyCode::Char('Q') => return Action::Quit,
+            // Ctrl+V = 貼り付け。Ctrl+Shift+V は WT の文字ペースト (逃げ道) に
+            // 残すため ccnest は取らない。
+            KeyCode::Char('v') | KeyCode::Char('V') if !shift => return Action::PasteClipboard,
             KeyCode::Char('1') => return Action::SidebarSection(0),
             KeyCode::Char('2') => return Action::SidebarSection(1),
             KeyCode::Char('3') => return Action::SidebarSection(2),
@@ -114,6 +122,39 @@ pub fn resolve(ev: &KeyEvent, sidebar_focused: bool) -> Action {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Ctrl+V は ccnest の貼り付け (画像なら Claude に Alt+V 相当)。
+    /// Ctrl+Shift+V は Windows Terminal の文字ペーストに残すので取らない。
+    #[test]
+    fn ctrl_v_is_paste_clipboard_but_ctrl_shift_v_passes_through() {
+        for c in ['v', 'V'] {
+            assert_eq!(
+                resolve(
+                    &KeyEvent::new(KeyCode::Char(c), KeyModifiers::CONTROL),
+                    false
+                ),
+                Action::PasteClipboard
+            );
+        }
+        let cs = KeyModifiers::CONTROL | KeyModifiers::SHIFT;
+        assert_eq!(
+            resolve(&KeyEvent::new(KeyCode::Char('V'), cs), false),
+            Action::PassThrough
+        );
+        // サイドバーにフォーカス中でもキーの意味は同じ (無視は handle_key 側)。
+        assert_eq!(
+            resolve(
+                &KeyEvent::new(KeyCode::Char('v'), KeyModifiers::CONTROL),
+                true
+            ),
+            Action::PasteClipboard
+        );
+        // Alt+V はそのまま子へ通す (Claude Code の画像ペースト)。
+        assert_eq!(
+            resolve(&KeyEvent::new(KeyCode::Char('v'), KeyModifiers::ALT), false),
+            Action::PassThrough
+        );
+    }
 
     /// Ctrl+Shift+T は直前に閉じたタブを開き直す。Windows の crossterm は
     /// 小文字 't' + CONTROL|SHIFT で渡すことがあるので大小どちらも。
