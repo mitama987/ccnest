@@ -1319,8 +1319,6 @@ fn handle_mouse(
     ) {
         TabMouseAction::Switch(i) if i < app.tabs.len() => {
             app.active_tab = i;
-            // 未閲覧完了 (マゼンタ) はクリックで開いた瞬間に消す。
-            app.mark_active_tab_seen();
             app.selection = None;
             return;
         }
@@ -4895,3 +4893,5 @@ mod tests {
 //                        opening it) sends `ESC v` (Alt+V) so Claude Code
 //                        reads the image itself; text is bracketed-pasted;
 //                        image wins when both are present.
+// ver0.17 - 2026-11-08 - Tab click no longer calls mark_active_tab_seen (removed
+//                        with the DoneUnseen state in the two-marker status UI).

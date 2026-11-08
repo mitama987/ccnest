@@ -42,12 +42,6 @@ pub struct Theme {
     pub menu_highlight: Style,
     /// コンテキストメニューの無効項目 (グレーアウト)。
     pub menu_disabled: Style,
-    /// Claude 実行中 (タブ/サイドバーの状態色)。
-    pub status_busy: Style,
-    /// 許可/質問プロンプト待ち (要対応)。
-    pub status_attention: Style,
-    /// バックグラウンドで完了・未閲覧。
-    pub status_done: Style,
 }
 
 pub fn default_theme() -> Theme {
@@ -102,9 +96,6 @@ pub fn default_theme() -> Theme {
             .bg(Color::White)
             .add_modifier(Modifier::BOLD),
         menu_disabled: Style::default().fg(Color::DarkGray),
-        status_busy: Style::default().fg(Color::Green),
-        status_attention: Style::default().fg(Color::Yellow),
-        status_done: Style::default().fg(Color::Magenta),
     }
 }
 
@@ -117,3 +108,6 @@ pub fn default_theme() -> Theme {
 // ver0.5 - 2026-10-06 - Added plan-usage styles for the status bar
 //                       (status_usage sky / status_usage_warn yellow /
 //                       status_usage_crit bold red).
+// ver0.6 - 2026-11-08 - Removed the Claude pane status colours
+//                       (status_busy / status_attention / status_done): the
+//                       state is shown by the tab marker emoji only.
