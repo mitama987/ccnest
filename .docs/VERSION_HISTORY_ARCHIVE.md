@@ -5,6 +5,42 @@
 
 ---
 
+## 2026-11-08 — Shift+Enter で Claude の入力欄に改行（v0.1.32）
+
+ブランチ: `feature/shift-enter-newline`
+
+### 背景
+
+ゆうさん「Claude Code のフォーム入力欄で Shift+Enter で改行できるようにできますか？」。ccnest は `Shift+Enter`／`Ctrl+Enter` の KEY_EVENT を `ESC CR`（Claude Code が改行として受ける列）に変換する実装を持っていた（README にも記載）。一方 Windows Terminal の settings.json には `shift+enter → sendInput "\u001b\r"`（Claude Code の `/terminal-setup` 相当・素の WT タブで効かせるための設定）が入っており、WT が先に Shift+Enter を横取りして文字列 `ESC CR` を ConPTY に流していた。
+
+**実測**（`scripts/e2e/conpty-input-probe.py`・pywinpty の ConPTY に `CCNEST_INPUT_TRACE=1` の使い捨て ccnest を起こし、入力パイプに文字列を書く）:
+
+| 入力パイプに書いた文字列 | ccnest（crossterm）が受けたイベント |
+|---|---|
+| `"\x1b\r"` を 1 回の write（WT の sendInput と同じ） | `Key(Enter, Press, ALT)` |
+| `"\x1b"` と `"\r"` を別 write | `Key(Esc)` → `Key(Enter)` |
+| `"\r"` | `Key(Enter)` |
+
+つまり実運用の経路では ccnest に **Alt+Enter** として届き、`key_to_bytes` が Alt を見ていなかったため素の `\r`（送信）になっていた。
+
+### 変更点
+
+| ファイル | 内容 |
+|---|---|
+| src/event.rs | `key_to_bytes`: `KeyCode::Enter` で `shift || ctrl` → `shift || ctrl || alt` のとき `ESC CR`。テスト `key_to_bytes_enter_modifiers_insert_newline` |
+| scripts/e2e/conpty-input-probe.py | 新規。ConPTY 入力の届き方を実測（`uv run --with pywinpty`） |
+| scripts/e2e/shift-enter-newline.ps1 | 新規。使い捨て conhost ＋ 本物の claude に Shift／Alt／Ctrl 付き Enter を注入し、入力欄が 2 行になり送信されないことを確認 |
+| README.md / Cargo.toml | キー表に Alt+Enter と WT の注記・ver0.1.32 |
+
+Esc→Enter の 2 キーを束ねる案（計画の手順 2）は、実測で Alt+Enter として届くと分かったので実装していない。WT の `User.SendNewline` は残す（ccnest を使わない WT タブでも Claude Code の Shift+Enter が効く）。
+
+### 検証
+
+- `cargo fmt --all` → `cargo clippy --all-targets -- -D warnings` → `cargo test`
+- `cargo test`: 352 passed（新規 `key_to_bytes_enter_modifiers_insert_newline` を含む）・clippy 警告 0
+- E2E `scripts/e2e/shift-enter-newline.ps1`: **PASS**。Shift+Enter／Alt+Enter（WT の経路）／Ctrl+Enter のそれぞれで、`abc636` と `def405` のように前後に打った文字が入力欄の別の行に入り、2 秒待ってもスピナー行が出ない（送信されない）。ccnest プロセス before=1 after=1
+- 残る未確認: WT の keybinding → ConPTY → ccnest の実運用経路は WT への実キー入力でしか発火しないため、ゆうさんに新しい ccnest 窓で Shift+Enter を 1 回押してもらう
+
 ## 2026-11-08 — タブの状態表示を 2 色に（v0.1.31）
 
 ブランチ: `feature/two-color-status`
