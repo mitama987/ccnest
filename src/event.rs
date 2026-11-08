@@ -2980,8 +2980,11 @@ fn key_to_bytes(key: &KeyEvent, app_cursor: bool) -> Vec<u8> {
             }
         }
         KeyCode::Enter => {
-            if shift || ctrl {
+            if shift || ctrl || alt {
                 // ESC+CR: Claude/Copilot CLI が改行（送信せずに次行）として解釈する標準シーケンス。
+                // Alt も含めるのは、Windows Terminal の `shift+enter → sendInput "\u001b\r"`
+                // (Claude Code の /terminal-setup 相当) が ConPTY で Alt+Enter の KEY_EVENT に
+                // 合成されて届くため。ここで `\r` に落とすと Shift+Enter が送信になってしまう。
                 buf.extend_from_slice(b"\x1b\r");
             } else {
                 buf.push(b'\r');
@@ -4738,6 +4741,22 @@ mod tests {
         assert_eq!(key_to_bytes(&plain(KeyCode::End), true), b"\x1bOF");
     }
 
+    // Shift / Ctrl / Alt 付きの Enter は改行 (ESC CR)、素の Enter だけ送信 (CR)。
+    // Alt は WT の sendInput "ESC CR" が ConPTY で Alt+Enter に合成されて届く経路。
+    #[test]
+    fn key_to_bytes_enter_modifiers_insert_newline() {
+        for mods in [
+            KeyModifiers::SHIFT,
+            KeyModifiers::CONTROL,
+            KeyModifiers::ALT,
+        ] {
+            let k = KeyEvent::new(KeyCode::Enter, mods);
+            assert_eq!(key_to_bytes(&k, false), b"\x1b\r", "{mods:?}");
+            assert_eq!(key_to_bytes(&k, true), b"\x1b\r", "{mods:?}");
+        }
+        assert_eq!(key_to_bytes(&plain(KeyCode::Enter), false), b"\r");
+    }
+
     #[test]
     fn key_to_bytes_non_cursor_keys_unaffected_by_app_cursor() {
         // 文字・Enter・PageUp などは DECCKM の影響を受けない。
@@ -4895,3 +4914,9 @@ mod tests {
 //                        image wins when both are present.
 // ver0.17 - 2026-11-08 - Tab click no longer calls mark_active_tab_seen (removed
 //                        with the DoneUnseen state in the two-marker status UI).
+// ver0.18 - 2026-11-08 - key_to_bytes: Alt+Enter also sends ESC CR (newline).
+//                        Windows Terminal's `shift+enter → sendInput "\u001b\r"`
+//                        (the /terminal-setup recipe) reaches ccnest through
+//                        ConPTY as an Alt+Enter KEY_EVENT (measured with
+//                        scripts/e2e/conpty-input-probe.py), which used to be
+//                        forwarded as a bare CR and submitted the prompt.
