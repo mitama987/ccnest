@@ -320,13 +320,6 @@ impl App {
     /// をまとめて更新する。イベントループの定期 tick からのみ呼ぶ。描画パスでは
     /// 呼ばない (描画側はここで作ったキャッシュを読むだけ)。
     pub fn refresh_pane_state(&mut self) {
-        // 「アクティブタブに属するペインか」の判定用。DoneUnseen (未閲覧完了)
-        // はアクティブタブでは発生させない。
-        let active_leaves: Vec<PaneId> = self
-            .tabs
-            .get(self.active_tab)
-            .map(|t| t.layout.leaves())
-            .unwrap_or_default();
         // 日本語タブ名の生成 (claude -p) は、再開待ちのタブを開き終えてから。
         // claude を並行起動して ~/.claude.json を同時に書かないため。
         let resumes_done = self.pending_resumes.is_empty();
@@ -339,7 +332,6 @@ impl App {
                 pane.task = None;
                 continue;
             }
-            let tab_active = active_leaves.contains(&pane.id);
             // PTY reader スレッドはストリーミング中、チャンク処理のたびに parser
             // ロックを保持する。ここはイベントループスレッドなので lock() で
             // 待つと 1 周が PAIR_WINDOW (70ms) を超えて停滞し、ファントム矢印
@@ -354,7 +346,7 @@ impl App {
             // 判定しない (前回の状態を据え置き、最下部へ戻った次の tick で
             // 回復する)。
             if screen.scrollback() == 0 {
-                pane.status = detect_status(&screen.contents(), pane.status, tab_active);
+                pane.status = detect_status(&screen.contents());
             }
             let title_task = sanitize_task(screen.title());
             drop(p);
@@ -607,7 +599,6 @@ impl App {
             },
         );
         self.active_tab = at;
-        self.mark_active_tab_seen();
         Ok(true)
     }
 
@@ -616,11 +607,7 @@ impl App {
     fn remove_tab(&mut self, idx: usize) {
         self.tabs.remove(idx);
         match active_after_close(self.active_tab, idx, self.tabs.len()) {
-            Some(active) => {
-                self.active_tab = active;
-                // 新しく前面に出たタブの未閲覧完了 (マゼンタ) は次 tick を待たず消す。
-                self.mark_active_tab_seen();
-            }
+            Some(active) => self.active_tab = active,
             None => self.quit = true,
         }
     }
@@ -630,7 +617,6 @@ impl App {
             return;
         }
         self.active_tab = (self.active_tab + 1) % self.tabs.len();
-        self.mark_active_tab_seen();
     }
 
     pub fn prev_tab(&mut self) {
@@ -641,23 +627,6 @@ impl App {
             self.active_tab = self.tabs.len() - 1;
         } else {
             self.active_tab -= 1;
-        }
-        self.mark_active_tab_seen();
-    }
-
-    /// アクティブタブ配下の DoneUnseen (未閲覧完了) を即座に Idle へ戻す。
-    /// タブ切替直後にマゼンタを 2 秒 tick を待たず消すための補助で、
-    /// 呼び忘れても次 tick の detect_status が同じ結果に収束する。
-    pub fn mark_active_tab_seen(&mut self) {
-        let Some(tab) = self.tabs.get(self.active_tab) else {
-            return;
-        };
-        for pid in tab.layout.leaves() {
-            if let Some(p) = self.panes.get_mut(&pid) {
-                if p.status == ClaudeStatus::DoneUnseen {
-                    p.status = ClaudeStatus::Idle;
-                }
-            }
         }
     }
 
@@ -962,3 +931,7 @@ mod tests {
 //                       onto closed_tabs (max 20). reopen_closed_tab respawns
 //                       each pane (--resume when resumable), remaps the layout
 //                       to the new pane ids and inserts the tab at its old index.
+// ver0.10 - 2026-11-08 - Two-state status: refresh_pane_state calls
+//                        detect_status(screen) only (no prev / tab_active);
+//                        mark_active_tab_seen and the DoneUnseen bookkeeping
+//                        are gone (idle and finished both mean "your turn").

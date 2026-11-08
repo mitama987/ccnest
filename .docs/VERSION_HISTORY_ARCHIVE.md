@@ -5,6 +5,38 @@
 
 ---
 
+## 2026-11-08 — タブの状態表示を 2 色に（v0.1.31）
+
+ブランチ: `feature/two-color-status`
+
+### 背景
+
+ゆうさんの指摘「色が多すぎて把握できない。実行中＝緑、私の対応が必要＝オレンジの 2 種類でいい。実行してるのにオレンジが多い」。それまでは 4 状態（Busy／Idle／NeedsAttention／DoneUnseen）× 2 表示（タブ先頭の四角 🟩🟨🟪 ＋ タブ名の文字色 緑／黄／マゼンタ）に、フォーカス枠のオレンジが重なっていた。
+
+**「実行中なのにオレンジ」の根本原因（E2E で判明）**: Claude Code 2.1.319 のスピナー行は `✶ Boondoggling…(6s · ↓302 tokens · thought for 1s)` で、v2.1.227 当時の `(esc to interrupt)` が消えている（本体に残る 6 箇所は再試行待ち・remote 送信の通知だけ）。ccnest はこの文言だけで Busy を判定していたので、実行中が一度も 🟩 にならず常に 🟨（黄の四角＝オレンジに見える）だった。質問判定（`Would you like` が本文に残るだけで黄の文字色）も重なっていた。
+
+決定: 「対応が必要」＝ (1) 質問に答える (2) 作業が終了して次の指示か終了を判断する、の両方。実行中でなければ全部オレンジ。枠線とステータスバーのオレンジは据え置き。状態は四角（丸）だけで出し、文字色は変えない。緑は丸（🟢）、オレンジは四角（🟧）。
+
+### 変更点
+
+| ファイル | 内容 |
+|---|---|
+| src/pane/status.rs | `ClaudeStatus` を Idle／Busy／NeedsAttention の 3 値に（`DoneUnseen` 削除）。**`has_spinner_timer`**: `…(` の直後に `<数字>s` が続くスピナー行を実行中とみなす（完了行 `Worked for 9s · done` やタイマー無しの `Brewing…` は不一致）。`BUSY_MARKERS = ["esc to interrupt", "enter to interrupt"]` は旧 CLI 向けに残す。`ATTENTION_MARKERS` 削除。`status_marker`: 🟢／🟧。テスト書き換え（実機から取ったスピナー行 5 本・否定例 5 本・幅 2 の確認） |
+| src/app.rs | `refresh_pane_state` の `active_leaves`／`tab_active` を削除。`mark_active_tab_seen` と呼び出し 4 箇所を削除 |
+| src/event.rs | タブクリック時の `mark_active_tab_seen` 呼び出しを削除 |
+| src/ui/mod.rs | `tab_label_style` とテスト 2 件を削除。タブ名は `base` のまま。Panes 行は `Span::raw`。幅テストのマーカーを 🟧 に |
+| src/sidebar/panelist.rs | `PaneRow::display()` が Claude ペインの行頭に 🟢／🟧 を付ける。テスト 2 件追加 |
+| src/ui/theme.rs | `status_busy`／`status_attention`／`status_done` を削除 |
+| README.md / Cargo.toml | マーカー表を 2 行に・Panes の説明・ver0.1.31 |
+| scripts/e2e/status-marker.ps1 | 新規。使い捨て conhost に本物の claude を起こし、WriteConsoleInputW で指示を入れて、入力待ち→実行中（スピナー行 `…(Ns`）→完了 の 3 段階でタブ行のマーカーを確認 |
+
+### 検証
+
+- `cargo fmt --all` → `cargo clippy --all-targets -- -D warnings`（警告 0）→ `cargo test`（351 passed）
+- 実機 `scripts/e2e/status-marker.ps1`: PASS（入力待ち・実行中 `✶ Zesting…(2s · thinking)`・完了 の 3 段階でタブ行先頭に幅 2 のマーカーが 1 つ＝セル属性 LEADING 0x100／TRAILING 0x200、はみ出し無し。ccnest プロセス before=1 after=1）
+- **制約**: conhost の `ReadConsoleOutputW`／`ReadConsoleOutputCharacterW` は非 BMP 文字（🟢 U+1F7E2・🟧 U+1F7E7）を U+FFFD に潰して返すので、どちらの絵文字かはこの経路では読めない。🟢／🟧 と状態の対応は `status.rs` の単体テストで固定（旧 🟩🟨🟪 も同じ制約だった）
+- このPCの `ccnest` コマンドを差し替え（ハッシュ一致・次回起動から）。タグ push はしていない
+
 ## 2026-11-03 — work フォルダ番号振り直しに伴うパス参照の更新（テスト期待値含む）
 
 - `src/ui/mod.rs` のテスト: cwd の例を `90_other\ccnest`→`80_ccnest`・`30_XTP3`→`20_XTP3` に。期待値のフォルダ名 3 箇所（`[1] 30_XTP3`）も `20_XTP3` に合わせた（機械置換はパスだけだったので落ちていた）

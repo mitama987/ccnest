@@ -14,7 +14,7 @@ use ratatui::Frame;
 use crate::app::{folder_title, App, Rect as AppRect};
 use crate::claude::usage::{UsageLabel, UsageLevel};
 use crate::pane::grid::{Layout, SplitDir};
-use crate::pane::status::{aggregate_status, status_marker, ClaudeStatus};
+use crate::pane::status::{aggregate_status, status_marker};
 use crate::pane::PaneId;
 use crate::sidebar::{claude_ctx, filetree, panelist, Section};
 
@@ -215,7 +215,9 @@ fn draw_tabbar(
             .any(|p| p.claude_running);
         let marker = has_claude.then(|| status_marker(status));
         let task = app.panes.get(&tab.focused).and_then(|p| p.task.as_deref());
-        let style = tab_label_style(base, status, theme);
+        // 状態はマーカー絵文字だけで出す。タブ名の文字色は変えない
+        // (ユーザー決定 2026-11-08: 色のパターンを減らす)。
+        let style = base;
         let label = if active && app.renaming_tab.is_some() {
             format!(" {}\u{258e} ", app.renaming_tab.as_deref().unwrap_or(""))
         } else {
@@ -487,21 +489,6 @@ fn tab_label_marked(
     }
 }
 
-/// ペイン状態をタブ/サイドバー行のスタイルに反映する。Idle は base のまま。
-/// fg だけを差し替え、bg と modifier (アクティブタブの白帯・BOLD) は保持する。
-fn tab_label_style(base: Style, status: ClaudeStatus, theme: &theme::Theme) -> Style {
-    let status_style = match status {
-        ClaudeStatus::Idle => return base,
-        ClaudeStatus::Busy => theme.status_busy,
-        ClaudeStatus::NeedsAttention => theme.status_attention,
-        ClaudeStatus::DoneUnseen => theme.status_done,
-    };
-    match status_style.fg {
-        Some(fg) => base.fg(fg),
-        None => base,
-    }
-}
-
 fn draw_statusbar(app: &App, frame: &mut Frame<'_>, area: Rect, theme: &theme::Theme) {
     let hint_text =
         "Ctrl+D:┃  Ctrl+E:━  Ctrl+T:tab  Ctrl+W:close  Ctrl+F:files  Alt+F:rename  Ctrl+C×2:shell  Ctrl+Q:quit";
@@ -597,11 +584,8 @@ fn draw_sidebar(
         },
         Section::Panes => panelist::rows(app)
             .into_iter()
-            .map(|r| {
-                // 状態色はタブバーと同じマッピング (Idle はデフォルト表示)。
-                let style = tab_label_style(Style::default(), r.status, theme);
-                Line::from(Span::styled(r.display(), style))
-            })
+            // 状態はタブバーと同じマーカー絵文字を行頭に (display 側で付く)。
+            .map(|r| Line::from(Span::raw(r.display())))
             .collect(),
     };
 
@@ -1561,37 +1545,9 @@ mod tests {
     fn tab_label_marked_width_bound() {
         for w in 0..=40usize {
             for task in [Some("タブバーの実装をしてください"), None] {
-                let l = tab_label_marked(Some("🟪"), 3, "タイトル", task, w);
+                let l = tab_label_marked(Some("🟧"), 3, "タイトル", task, w);
                 assert!(width_of(&l) <= w + 3, "w={w} task={task:?}: {l:?}");
             }
-        }
-    }
-
-    // Idle は base スタイルそのまま
-    #[test]
-    fn tab_label_style_idle_keeps_base() {
-        let theme = theme::default_theme();
-        let base = theme.tab_active;
-        assert_eq!(tab_label_style(base, ClaudeStatus::Idle, &theme), base);
-    }
-
-    // Busy/NeedsAttention/DoneUnseen は fg だけ差し替え、bg と BOLD は保持
-    #[test]
-    fn tab_label_style_overrides_fg_only() {
-        let theme = theme::default_theme();
-        let base = theme.tab_active; // 黒文字・白帯・BOLD
-        for (status, expect) in [
-            (ClaudeStatus::Busy, theme.status_busy.fg),
-            (ClaudeStatus::NeedsAttention, theme.status_attention.fg),
-            (ClaudeStatus::DoneUnseen, theme.status_done.fg),
-        ] {
-            let s = tab_label_style(base, status, &theme);
-            assert_eq!(s.fg, expect, "{status:?}");
-            assert_eq!(s.bg, base.bg, "{status:?} で bg を壊してはいけない");
-            assert_eq!(
-                s.add_modifier, base.add_modifier,
-                "{status:?} で modifier を壊してはいけない"
-            );
         }
     }
 
@@ -1692,3 +1648,7 @@ mod tests {
 //                        Fable 7% ⏳2d9h"). Trim order is now cwd → branch →
 //                        countdowns (swap in UsageLabel.bare) → usage whole →
 //                        model; the segment is still never ellipsized.
+// ver0.16 - 2026-11-08 - Status is shown by the tab marker only (🟢 running /
+//                        🟧 your turn); tab_label_style and the per-status text
+//                        tint are removed. Panes rows carry the same marker via
+//                        PaneRow::display. Pane frame colours are unchanged.

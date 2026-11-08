@@ -3,62 +3,75 @@
 //! すべて純関数。I/O・parser ロックは呼び出し側 (`App::refresh_pane_state`,
 //! 2 秒 tick) が握り、描画側はキャッシュされた結果を読むだけにする。
 
-/// タブバー/サイドバーに出す Claude の状態。
+/// タブバー/サイドバーに出す Claude の状態。2 値 (実行中か、こちらの番か)。
+///
+/// 「こちらの番」は質問・許可待ちも作業完了後の入力待ちもまとめて
+/// `NeedsAttention` (ユーザー決定 2026-11-08: どちらも自分の対応が要る)。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum ClaudeStatus {
-    /// 入力待ち (通常色)。
+    /// claude が走っていないペイン (shell)。表示なし。
     #[default]
     Idle,
-    /// 実行中 (緑)。
+    /// 実行中 (🟢)。
     Busy,
-    /// 許可/質問プロンプト表示中 (黄・要対応)。
+    /// 自分の対応が必要 (🟧): 質問・許可プロンプト、または作業が終わって
+    /// 次の指示待ち。実行中でなければすべてこれ。
     NeedsAttention,
-    /// 非アクティブタブで実行が完了し、まだ閲覧していない (マゼンタ)。
-    /// タブを表示すると Idle に戻る。
-    DoneUnseen,
 }
 
-/// 実行中マーカー: Claude Code がスピナー行に表示する文言。
-/// claude v2.1.227 で確認。CLI 更新で変わると検出は Idle に落ちる (安全側)。
-pub const BUSY_MARKER: &str = "esc to interrupt";
+/// 実行中マーカー (文言): 古い Claude Code がスピナー行に出していた
+/// "(esc to interrupt)" (v2.1.227 で確認) と、その別表記。
+///
+/// **v2.1.319 ではこの文言はスピナー行から消えている** (本体に残る 6 箇所は
+/// 再試行待ちと remote 送信の通知だけ・2026-11-08 実測)。そのため文言だけに
+/// 頼っていた間、実行中が一度も Busy にならず「実行中なのに 🟨」に見えていた。
+/// 現行のスピナー行は [`has_spinner_timer`] で検出し、こちらは旧 CLI 向けに残す。
+pub const BUSY_MARKERS: &[&str] = &["esc to interrupt", "enter to interrupt"];
 
-/// 許可/質問プロンプトのマーカー群。claude v2.1.227 で確認。
-/// "Do you want" = ツール実行許可、"Would you like" = プラン承認等、
-/// "❯ 1." = 番号付き選択肢 (AskUserQuestion 等)。
-pub const ATTENTION_MARKERS: &[&str] = &["Do you want", "Would you like", "❯ 1."];
+/// 現行 (v2.1.319) のスピナー行 `✶ Boondoggling…(6s · ↓302 tokens · thought for 1s)`
+/// を検出する: 省略記号 `…` の直後に `(` と経過秒 `<数字>s` が続く。
+///
+/// 動詞 (Brewing / Boondoggling …) とスピナー絵文字は毎回変わるので見ない。
+/// 完了後の `✻ Worked for 9s · done 10:09` には `…(` が無いので一致しない。
+/// 返答本文で `…(12s` という並びが出ることはまず無い。
+pub fn has_spinner_timer(screen_text: &str) -> bool {
+    let mut rest = screen_text;
+    while let Some(i) = rest.find("…(") {
+        let after = &rest["…(".len() + i..];
+        let digits = after.chars().take_while(|c| c.is_ascii_digit()).count();
+        if digits > 0 {
+            let mut tail = after.chars().skip(digits);
+            if tail.next() == Some('s') && matches!(tail.next(), Some(' ') | Some(')')) {
+                return true;
+            }
+        }
+        rest = &rest[i + "…(".len()..];
+    }
+    false
+}
 
 /// 可視画面テキストから Claude の状態を判定する。
 ///
 /// - `screen_text`: 可視画面の全行テキスト (scrollback は含まない)
-/// - `prev`: 前回 tick の判定結果 (Busy→Idle 遷移の検出に使う)
-/// - `tab_active`: このペインの属するタブが現在表示中か
 ///
-/// 判定順 (上が勝つ):
-/// 1. Busy マーカーあり → Busy。実行中は画面上部に古いプロンプト文言が
-///    残っていることがあるため、Busy を Attention より優先する。
-/// 2. Attention マーカーあり → NeedsAttention (DoneUnseen の sticky より優先)。
-/// 3. それ以外: 非アクティブタブで Busy から抜けたら DoneUnseen (sticky)。
-///    アクティブタブなら閲覧済みとして Idle。
-pub fn detect_status(screen_text: &str, prev: ClaudeStatus, tab_active: bool) -> ClaudeStatus {
-    if screen_text.contains(BUSY_MARKER) {
-        return ClaudeStatus::Busy;
-    }
-    if ATTENTION_MARKERS.iter().any(|m| screen_text.contains(m)) {
-        return ClaudeStatus::NeedsAttention;
-    }
-    match prev {
-        ClaudeStatus::Busy | ClaudeStatus::DoneUnseen if !tab_active => ClaudeStatus::DoneUnseen,
-        _ => ClaudeStatus::Idle,
+/// スピナー行 (現行の経過秒つき、または旧 CLI の "esc to interrupt") が
+/// あれば Busy、無ければ NeedsAttention。質問文言の検出はしない (Claude の
+/// 返答本文に "Would you like" が残っているだけで色が変わる誤検知があり、
+/// 2 色化で区別自体が不要になった)。
+pub fn detect_status(screen_text: &str) -> ClaudeStatus {
+    if has_spinner_timer(screen_text) || BUSY_MARKERS.iter().any(|m| screen_text.contains(m)) {
+        ClaudeStatus::Busy
+    } else {
+        ClaudeStatus::NeedsAttention
     }
 }
 
-/// タブ配下の複数ペインの状態を 1 つ (タブの表示色) に畳む。
-/// 優先度: NeedsAttention > DoneUnseen > Busy > Idle。
+/// タブ配下の複数ペインの状態を 1 つ (タブのマーカー) に畳む。
+/// 優先度: NeedsAttention > Busy > Idle (1 ペインでも対応待ちなら 🟧)。
 pub fn aggregate_status(statuses: impl IntoIterator<Item = ClaudeStatus>) -> ClaudeStatus {
     fn rank(s: ClaudeStatus) -> u8 {
         match s {
-            ClaudeStatus::NeedsAttention => 3,
-            ClaudeStatus::DoneUnseen => 2,
+            ClaudeStatus::NeedsAttention => 2,
             ClaudeStatus::Busy => 1,
             ClaudeStatus::Idle => 0,
         }
@@ -72,18 +85,18 @@ pub fn aggregate_status(statuses: impl IntoIterator<Item = ClaudeStatus>) -> Cla
     })
 }
 
-/// タブ先頭に出す状態マーカーの絵文字。文字色より一目で分かる主シグナル。
+/// タブ先頭に出す状態マーカーの絵文字。唯一の状態シグナル (タブ名の
+/// 文字色は変えない・ユーザー決定 2026-11-08)。
 ///
-/// Idle も「こちらの指示待ち＝自分の番」なので NeedsAttention と同じ黄色に
-/// する (ユーザー要望 2026-08-11)。形は四角セット (同日ユーザー選定)。
-/// 🟩🟨🟪 (U+1F7E9/E8/EA) は East Asian Width=Wide で unicode-width=2・
+/// 実行中は緑の丸、対応待ちはオレンジの四角 (色だけでなく形でも区別)。
+/// 🟢 (U+1F7E2) と 🟧 (U+1F7E7) は East Asian Width=Wide で unicode-width=2・
 /// Windows Terminal 描画も 2 セルで一致する (✳ U+2733 のような曖昧幅文字と
-/// 違い、はみ出しを起こさない)。
+/// 違い、はみ出しを起こさない)。Idle (shell) は呼び出し側で出さない。
 pub fn status_marker(status: ClaudeStatus) -> &'static str {
     match status {
-        ClaudeStatus::Busy => "🟩",
-        ClaudeStatus::NeedsAttention | ClaudeStatus::Idle => "🟨",
-        ClaudeStatus::DoneUnseen => "🟪",
+        ClaudeStatus::Busy => "🟢",
+        ClaudeStatus::NeedsAttention => "🟧",
+        ClaudeStatus::Idle => "",
     }
 }
 
@@ -126,107 +139,75 @@ mod tests {
 
     // ---- detect_status ----
 
-    // Busy マーカーがあれば prev/tab_active に関わらず Busy
+    // 現行 (claude v2.1.319) のスピナー行: 省略記号の直後に (経過秒 ・ …)。
+    // 2026-11-08 に使い捨て ccnest の画面から取った実物。
     #[test]
-    fn busy_marker_wins_always() {
-        let text = "✳ Deliberating… (esc to interrupt)";
+    fn current_spinner_with_timer_is_busy() {
+        for line in [
+            "✶ Boondoggling…(6s · ↓302 tokens · thought for 1s)",
+            "✻ Boondoggling…(7s · ↓455 tokens)",
+            "✽Boondoggling…(9s · ↓578 tokens)",
+            "· Thinking…(1s)",
+            "❯ 指示\n✳ Working…(120s · ↓1.2k tokens)\n──\n❯ ",
+        ] {
+            assert!(has_spinner_timer(line), "{line}");
+            assert_eq!(detect_status(line), ClaudeStatus::Busy, "{line}");
+        }
+    }
+
+    // 完了行 "Worked for 9s · done 10:09" と、タイマー無しの "Brewing…" は Busy にしない
+    #[test]
+    fn worked_for_and_bare_ellipsis_are_not_busy() {
+        for line in [
+            "✻ Worked for 9s · done 10:09 · ↓578 tokens",
+            "· Brewing…",
+            "読み込み中…(しばらくお待ちください)",
+            "…(s)",
+            "…(12x)",
+        ] {
+            assert!(!has_spinner_timer(line), "{line}");
+            assert_eq!(detect_status(line), ClaudeStatus::NeedsAttention, "{line}");
+        }
+    }
+
+    // 旧 CLI の文言マーカーも引き続き Busy
+    #[test]
+    fn busy_marker_is_busy() {
         assert_eq!(
-            detect_status(text, ClaudeStatus::Idle, true),
+            detect_status("✳ Deliberating… (esc to interrupt)"),
             ClaudeStatus::Busy
         );
+    }
+
+    // 別表記 "enter to interrupt" も Busy (claude v2.1.319 で併存)
+    #[test]
+    fn enter_to_interrupt_is_busy() {
         assert_eq!(
-            detect_status(text, ClaudeStatus::DoneUnseen, false),
+            detect_status("✳ Working… (enter to interrupt)"),
             ClaudeStatus::Busy
         );
     }
 
-    // 実行中に古いプロンプト文言が画面に残っていても Busy が勝つ (誤検知回帰防止)
+    // 実行中に古いプロンプト文言が画面に残っていても Busy が勝つ
     #[test]
-    fn busy_beats_stale_attention_text() {
-        let text = "Do you want to proceed?\n...\n✳ Working (esc to interrupt)";
-        assert_eq!(
-            detect_status(text, ClaudeStatus::Idle, true),
-            ClaudeStatus::Busy
-        );
+    fn busy_beats_stale_question_text() {
+        let text = "Would you like to proceed?\n...\n✳ Working (esc to interrupt)";
+        assert_eq!(detect_status(text), ClaudeStatus::Busy);
     }
 
-    // 各 Attention マーカー単独で NeedsAttention
+    // マーカーが無ければ入力待ちでも質問中でも NeedsAttention (こちらの番)
     #[test]
-    fn do_you_want_is_attention() {
+    fn no_marker_is_attention() {
+        assert_eq!(detect_status("❯ "), ClaudeStatus::NeedsAttention);
         assert_eq!(
-            detect_status("Do you want to make this edit?", ClaudeStatus::Idle, true),
+            detect_status("Do you want to make this edit?"),
             ClaudeStatus::NeedsAttention
         );
-    }
-
-    #[test]
-    fn would_you_like_is_attention() {
         assert_eq!(
-            detect_status("Would you like to proceed?", ClaudeStatus::Busy, false),
+            detect_status("❯ 1. Yes\n  2. No"),
             ClaudeStatus::NeedsAttention
         );
-    }
-
-    #[test]
-    fn numbered_choice_is_attention() {
-        assert_eq!(
-            detect_status("❯ 1. Yes\n  2. No", ClaudeStatus::Idle, true),
-            ClaudeStatus::NeedsAttention
-        );
-    }
-
-    // 非アクティブタブで Busy→(マーカー消滅) は DoneUnseen
-    #[test]
-    fn busy_to_idle_on_background_tab_is_done_unseen() {
-        assert_eq!(
-            detect_status("❯ ", ClaudeStatus::Busy, false),
-            ClaudeStatus::DoneUnseen
-        );
-    }
-
-    // アクティブタブなら Busy→Idle は素直に Idle (見ているので通知不要)
-    #[test]
-    fn busy_to_idle_on_active_tab_is_idle() {
-        assert_eq!(
-            detect_status("❯ ", ClaudeStatus::Busy, true),
-            ClaudeStatus::Idle
-        );
-    }
-
-    // DoneUnseen は非アクティブの間 sticky
-    #[test]
-    fn done_unseen_sticks_while_background() {
-        assert_eq!(
-            detect_status("❯ ", ClaudeStatus::DoneUnseen, false),
-            ClaudeStatus::DoneUnseen
-        );
-    }
-
-    // タブを閲覧したら DoneUnseen はクリアされて Idle
-    #[test]
-    fn done_unseen_clears_on_view() {
-        assert_eq!(
-            detect_status("❯ ", ClaudeStatus::DoneUnseen, true),
-            ClaudeStatus::Idle
-        );
-    }
-
-    // Busy を経ていない Idle は非アクティブでも Idle のまま
-    #[test]
-    fn idle_stays_idle_on_background_tab() {
-        assert_eq!(
-            detect_status("❯ ", ClaudeStatus::Idle, false),
-            ClaudeStatus::Idle
-        );
-    }
-
-    // sticky 中でも Attention マーカーが出たら NeedsAttention が勝つ
-    #[test]
-    fn attention_beats_done_unseen_sticky() {
-        assert_eq!(
-            detect_status("Do you want to proceed?", ClaudeStatus::DoneUnseen, false),
-            ClaudeStatus::NeedsAttention
-        );
+        assert_eq!(detect_status(""), ClaudeStatus::NeedsAttention);
     }
 
     // ---- aggregate_status ----
@@ -246,27 +227,18 @@ mod tests {
         );
     }
 
-    // DoneUnseen > Busy
+    // NeedsAttention > Busy (順序非依存)
     #[test]
-    fn aggregate_done_unseen_beats_busy() {
+    fn aggregate_attention_beats_busy_any_order() {
         assert_eq!(
-            aggregate_status([ClaudeStatus::Busy, ClaudeStatus::DoneUnseen]),
-            ClaudeStatus::DoneUnseen
-        );
-    }
-
-    // NeedsAttention > DoneUnseen (順序非依存)
-    #[test]
-    fn aggregate_attention_beats_all_any_order() {
-        assert_eq!(
-            aggregate_status([ClaudeStatus::NeedsAttention, ClaudeStatus::DoneUnseen]),
+            aggregate_status([ClaudeStatus::Busy, ClaudeStatus::NeedsAttention]),
             ClaudeStatus::NeedsAttention
         );
         assert_eq!(
             aggregate_status([
+                ClaudeStatus::NeedsAttention,
                 ClaudeStatus::Idle,
-                ClaudeStatus::Busy,
-                ClaudeStatus::NeedsAttention
+                ClaudeStatus::Busy
             ]),
             ClaudeStatus::NeedsAttention
         );
@@ -274,23 +246,30 @@ mod tests {
 
     // ---- status_marker ----
 
-    // 実行中は緑四角
+    // 実行中は緑の丸
     #[test]
-    fn marker_busy_is_green() {
-        assert_eq!(status_marker(ClaudeStatus::Busy), "🟩");
+    fn marker_busy_is_green_circle() {
+        assert_eq!(status_marker(ClaudeStatus::Busy), "🟢");
     }
 
-    // アイドルも「こちらの番」なので黄四角 (許可待ちと同じ)
+    // 対応待ちはオレンジの四角
     #[test]
-    fn marker_idle_and_attention_are_yellow() {
-        assert_eq!(status_marker(ClaudeStatus::Idle), "🟨");
-        assert_eq!(status_marker(ClaudeStatus::NeedsAttention), "🟨");
+    fn marker_attention_is_orange_square() {
+        assert_eq!(status_marker(ClaudeStatus::NeedsAttention), "🟧");
     }
 
-    // 未閲覧完了は紫四角
+    // shell (Idle) は空 (呼び出し側も出さない)
     #[test]
-    fn marker_done_unseen_is_purple() {
-        assert_eq!(status_marker(ClaudeStatus::DoneUnseen), "🟪");
+    fn marker_idle_is_empty() {
+        assert_eq!(status_marker(ClaudeStatus::Idle), "");
+    }
+
+    // 両マーカーは表示幅 2 (従来の 🟩 と同じ・タブ幅計算の前提)
+    #[test]
+    fn markers_are_width_two() {
+        use unicode_width::UnicodeWidthStr;
+        assert_eq!("🟢".width(), 2);
+        assert_eq!("🟧".width(), 2);
     }
 
     // ---- sanitize_task ----
@@ -363,6 +342,12 @@ mod tests {
 }
 
 // Version History
+// - ver1.3 (2026-11-08): 2 色化 (ユーザー決定)。DoneUnseen と ATTENTION_MARKERS を
+//   削除し、detect_status は「スピナー行があるか」だけ (prev / tab_active 不要)。
+//   マーカーは 🟢 実行中 (緑の丸) / 🟧 対応が必要 (質問も作業完了も)。
+//   has_spinner_timer を追加: claude v2.1.319 のスピナー行 "…(6s · ↓302 tokens)" を
+//   検出 (旧文言 "esc to interrupt" はスピナー行から消えていて、実行中が一度も
+//   Busy にならなかった＝「実行中なのに 🟨」の原因)。BUSY_MARKERS は旧 CLI 向けに残す
 // - ver1.2 (2026-08-11): マーカーを四角セット 🟩🟨🟪 に変更 (ユーザー選定)
 // - ver1.1 (2026-08-11): status_marker 追加 (タブ先頭の絵文字 🟢🟡🟣。Idle も
 //   「こちらの番」として黄色扱い)。汎用タイトル "Claude Code" を task から除外
