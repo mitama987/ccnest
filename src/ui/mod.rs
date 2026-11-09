@@ -1545,7 +1545,7 @@ mod tests {
     fn tab_label_marked_width_bound() {
         for w in 0..=40usize {
             for task in [Some("タブバーの実装をしてください"), None] {
-                let l = tab_label_marked(Some("🟧"), 3, "タイトル", task, w);
+                let l = tab_label_marked(Some("🟨"), 3, "タイトル", task, w);
                 assert!(width_of(&l) <= w + 3, "w={w} task={task:?}: {l:?}");
             }
         }
@@ -1652,3 +1652,4 @@ mod tests {
 //                        🟧 your turn); tab_label_style and the per-status text
 //                        tint are removed. Panes rows carry the same marker via
 //                        PaneRow::display. Pane frame colours are unchanged.
+// ver0.17 - 2026-11-09 - Your-turn marker is 🟨 again (was 🟧 in ver0.16).
