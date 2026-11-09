@@ -7,7 +7,8 @@
 # 読めるのは「幅 2 の 1 文字がタブ行の先頭にある」こと (先頭セル attr 0x100 LEADING + 次セル 0x200
 # TRAILING)。🟢/🟨 と状態の対応は src/pane/status.rs の単体テストが固定している。ここで見るのは:
 #  1. 起動直後 (入力待ち) のタブ行に幅 2 のマーカーが 1 つ、はみ出し無し
-#  2. 指示を入れて実行中 ("esc to interrupt" が見える) でもマーカーが 1 つ (消えない・増えない)
+#  2. 指示を入れて実行中 (スピナー行 "… (6s · …)" が見える) でもマーカーが 1 つ (消えない・増えない)
+#     実機のスピナー行はそのまま "spinner:" に出す (v0.1.34: `…` と `(` の間の空白・1 分超の "2m 24s" の確認材料)
 #  3. 返答が終わって入力待ちに戻ってもマーカーが 1 つ
 # Claude に 1 回だけ短い指示を送る (プラン利用量をごく僅かに使う)。ユーザーの ccnest には触らない。
 param(
@@ -160,10 +161,11 @@ try {
   Check-MarkerCells $cc 'idle'
 
   # 2. 数秒かかる指示を入れて実行中に (2 秒 tick で拾えるよう、返答が 1 秒で終わるものは避ける)。
-  #    スピナー行 "✶ Boondoggling…(6s · ↓302 tokens)" (claude 2.1.319・経過秒つき) が見えている画面で
+  #    スピナー行 "✶ Boondoggling… (6s · ↓302 tokens)" (claude 2.1.319・経過時間つき・1 分超は "2m 24s") が見えている画面で
   #    タブ行のマーカーを見る (🟢 のはず・同定は単体テスト)。
   [void](Send $cc 'type' 'Print the numbers 1 to 400, one per line, no other text.')
-  $SPIN = [char]0x2026 + '\(\d+s( |\))'
+  # v0.1.34: 実物は "… (2m 24s · …)" のように `…` と `(` の間に空白があり、60 秒超は分、1 時間超は時が付く。
+  $SPIN = [char]0x2026 + ' *\((\d+h )?(\d+m )?\d+s( |\))'
   $screen = Wait-Screen $cc $SPIN 40
   Check ($screen -match $SPIN) "spinner line with elapsed seconds '...(Ns' is on screen (claude is running)"
   "  spinner: " + ((($screen -split "`n") | Where-Object { $_ -match $SPIN } | Select-Object -First 1) -replace '^\s*\S\s*', '').Trim()

@@ -143,7 +143,7 @@ its normal colour:
 
 | Marker | Meaning |
 |---|---|
-| 🟢 | Claude is running (the spinner line with its elapsed time, `✶ Boondoggling…(6s · ↓302 tokens)`, is visible; the older `esc to interrupt` wording is still recognised) |
+| 🟢 | Claude is running (the spinner line with its elapsed time, `✶ Boondoggling… (6s · ↓302 tokens)` or `✢ Metamorphosing… (2m 24s · ↓ 4.4k tokens · …)`, is visible; the older `esc to interrupt` wording is still recognised) |
 | 🟨 | your turn — a question or permission prompt, or the work finished and Claude is waiting for the next instruction |
 | (none) | shell-only tab (no Claude pane) |
 
@@ -278,3 +278,4 @@ ver0.1.27 - 2026-10-27 - Copying Claude Code's Japanese replies pastes as plain 
 ver0.1.31 - 2026-11-08 - Two-state status markers: 🟢 (green circle) while Claude is running, 🟧 (orange square) whenever it is your turn — a question or permission prompt, or the work finished and Claude waits for the next instruction. The 🟨 idle / 🟪 done-unseen distinction and the per-status tinting of the tab label text are gone (too many colour patterns to read at a glance); the sidebar Panes rows carry the same marker. Running is now detected from the spinner's elapsed-time suffix `…(6s · …)`: Claude Code 2.1.319 no longer prints `esc to interrupt` on the spinner line, so since that change every tab had looked idle (🟨) even while Claude was working. Pane frame colours and the status bar are unchanged. E2E: `scripts/e2e/status-marker.ps1`.
 ver0.1.32 - 2026-11-08 - Shift+Enter inserts a newline in the Claude prompt again when ccnest runs inside Windows Terminal with the usual `shift+enter → sendInput "\u001b\r"` binding: ConPTY turns that ESC CR into an Alt+Enter key event, which ccnest used to forward as a bare CR (submitting the prompt). Alt+Enter is now sent as `ESC CR` like Shift+Enter / Ctrl+Enter. Measured with `scripts/e2e/conpty-input-probe.py`; E2E `scripts/e2e/shift-enter-newline.ps1`.
 ver0.1.33 - 2026-11-09 - The "your turn" tab marker is 🟨 (yellow square, the colour used up to v0.1.30) instead of 🟧; meaning and detection are unchanged.
+ver0.1.34 - 2026-11-09 - Running detection fixed: the spinner line is `… (2m 24s · …)` — a space between `…` and `(`, and minutes/hours once the reply passes 60 s / 1 h — so the v0.1.31 matcher (`…(` glued, seconds only) never fired and every working tab stayed 🟨. `has_spinner_timer` now allows the space and `<n>h <n>m <n>s`. E2E `scripts/e2e/status-marker.ps1` uses the same pattern; `scripts/e2e/status-marker-wt.ps1` screenshots a disposable ccnest in a new Windows Terminal window (PrintWindow) so the emoji itself can be checked.

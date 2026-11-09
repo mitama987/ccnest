@@ -28,26 +28,61 @@ pub enum ClaudeStatus {
 /// 現行のスピナー行は [`has_spinner_timer`] で検出し、こちらは旧 CLI 向けに残す。
 pub const BUSY_MARKERS: &[&str] = &["esc to interrupt", "enter to interrupt"];
 
-/// 現行 (v2.1.319) のスピナー行 `✶ Boondoggling…(6s · ↓302 tokens · thought for 1s)`
-/// を検出する: 省略記号 `…` の直後に `(` と経過秒 `<数字>s` が続く。
+/// 現行 (v2.1.319) のスピナー行 `✢ Metamorphosing… (2m 24s · ↓ 4.4k tokens · …)`
+/// を検出する: 省略記号 `…` の後ろ (空白 0 個以上) に `(` と経過時間が続く。
+/// 経過時間は `6s` / `2m 24s` / `1h 2m 3s` (60 秒超で分、1 時間超で時が付く。
+/// 単位は h → m → s の順・間は空白 1 個・末尾は必ず `s`)、その直後は ` ` か `)`。
 ///
 /// 動詞 (Brewing / Boondoggling …) とスピナー絵文字は毎回変わるので見ない。
-/// 完了後の `✻ Worked for 9s · done 10:09` には `…(` が無いので一致しない。
-/// 返答本文で `…(12s` という並びが出ることはまず無い。
+/// 完了後の `✻ Worked for 2m 24s · done 10:09` には `…(` が無いので一致しない。
+/// 返答本文で `…(12s` / `… (2m 24s` という並びが出ることはまず無い。
+///
+/// v0.1.31〜33 は `…(` の直結と秒だけ (`<n>s`) を見ていて、`… (2m 24s` のように
+/// 空白が入る／分が付く実物を一度も拾えず「実行中なのに 🟨」のままだった。
 pub fn has_spinner_timer(screen_text: &str) -> bool {
+    const ELLIPSIS: &str = "…";
     let mut rest = screen_text;
-    while let Some(i) = rest.find("…(") {
-        let after = &rest["…(".len() + i..];
-        let digits = after.chars().take_while(|c| c.is_ascii_digit()).count();
-        if digits > 0 {
-            let mut tail = after.chars().skip(digits);
-            if tail.next() == Some('s') && matches!(tail.next(), Some(' ') | Some(')')) {
+    while let Some(i) = rest.find(ELLIPSIS) {
+        let after = rest[i + ELLIPSIS.len()..].trim_start_matches(' ');
+        if let Some(inner) = after.strip_prefix('(') {
+            if elapsed_time_prefix(inner) {
                 return true;
             }
         }
-        rest = &rest[i + "…(".len()..];
+        rest = &rest[i + ELLIPSIS.len()..];
     }
     false
+}
+
+/// `s` が `<n>h <n>m <n>s` / `<n>m <n>s` / `<n>s` で始まり、その直後が ` ` か `)` なら真。
+fn elapsed_time_prefix(s: &str) -> bool {
+    // 単位は h → m → s の順にしか現れない。読んだ単位より後ろのものだけ次に許す。
+    let mut allowed: &[char] = &['h', 'm', 's'];
+    let mut rest = s;
+    loop {
+        let digits = rest.chars().take_while(|c| c.is_ascii_digit()).count();
+        if digits == 0 {
+            return false;
+        }
+        let mut tail = rest[digits..].chars();
+        let unit = match tail.next() {
+            Some(u) if allowed.contains(&u) => u,
+            _ => return false,
+        };
+        let next = tail.next();
+        if unit == 's' {
+            return matches!(next, Some(' ') | Some(')'));
+        }
+        if next != Some(' ') {
+            return false;
+        }
+        // "2m " の後ろへ。allowed を m より後ろ (s だけ) / h より後ろ (m, s) に絞る。
+        allowed = match unit {
+            'h' => &['m', 's'],
+            _ => &['s'],
+        };
+        rest = &rest[digits + unit.len_utf8() + 1..];
+    }
 }
 
 /// 可視画面テキストから Claude の状態を判定する。
@@ -155,6 +190,24 @@ mod tests {
         }
     }
 
+    // 60 秒を超えると経過時間は "2m 24s"、1 時間超は "1h 2m 3s" になり、`…` と `(` の
+    // 間に空白が入る (2026-11-09 のゆうさんのスクショ:
+    // "✢ Metamorphosing… (2m 24s · ↓ 4.4k tokens · thinking with high effort)")。
+    // v0.1.31〜33 はどちらも取りこぼし、実行中が Busy にならず 🟨 のままだった。
+    #[test]
+    fn spinner_timer_with_minutes_and_space_is_busy() {
+        for line in [
+            "✢ Metamorphosing… (2m 24s · ↓ 4.4k tokens · thinking with high effort)",
+            "✶ Boondoggling… (6s · ↓302 tokens)",
+            "✳ Working…(1h 2m 3s · ↓1.2k tokens)",
+            "✻ Thinking… (59s)",
+            "· Pondering…  (10m 0s)",
+        ] {
+            assert!(has_spinner_timer(line), "{line}");
+            assert_eq!(detect_status(line), ClaudeStatus::Busy, "{line}");
+        }
+    }
+
     // 完了行 "Worked for 9s · done 10:09" と、タイマー無しの "Brewing…" は Busy にしない
     #[test]
     fn worked_for_and_bare_ellipsis_are_not_busy() {
@@ -164,6 +217,13 @@ mod tests {
             "読み込み中…(しばらくお待ちください)",
             "…(s)",
             "…(12x)",
+            "✻ Worked for 2m 24s · done 10:09",
+            "…(2m)",
+            "…(2m24s)",
+            "…(2m 24)",
+            "… 2m 24s",
+            "…(2h 3m)",
+            "…(3s2m)",
         ] {
             assert!(!has_spinner_timer(line), "{line}");
             assert_eq!(detect_status(line), ClaudeStatus::NeedsAttention, "{line}");
@@ -342,6 +402,10 @@ mod tests {
 }
 
 // Version History
+// - ver1.5 (2026-11-09): has_spinner_timer が実物のスピナー行を拾えていなかったのを修正。
+//   `…` と `(` の間の空白を許し、経過時間を `<n>h <n>m <n>s` (60 秒超で分・1 時間超で時)
+//   まで受ける (elapsed_time_prefix)。v0.1.31〜33 は `…(` 直結かつ秒だけだったので
+//   "✢ Metamorphosing… (2m 24s · …)" が一度も Busy にならず 🟨 のままだった
 // - ver1.4 (2026-11-09): 対応が必要のマーカーを 🟧 → 🟨 (U+1F7E8) に戻す
 //   (ユーザー指示「四角のオレンジは前のオレンジの色に」= v0.1.30 までの 🟨)
 // - ver1.3 (2026-11-08): 2 色化 (ユーザー決定)。DoneUnseen と ATTENTION_MARKERS を

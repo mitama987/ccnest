@@ -5,6 +5,29 @@
 
 ---
 
+## 2026-11-09 — 実行中判定がスピナー行を拾えていなかった修正（v0.1.34）
+
+ブランチ: `fix/spinner-timer-minutes`
+
+### 背景
+
+ゆうさん「ccnest で CC が実行中も結局オレンジ四角なんだが」「そもそも、最初の 60 秒も緑になってないが」。スクショのスピナー行は `✢ Metamorphosing… (2m 24s · ↓ 4.4k tokens · thinking with high effort)`。v0.1.31 の `has_spinner_timer` は `…(` が直結し、かつ経過時間が秒だけ（`<n>s`）の形しか見ていなかった。実物は `…` と `(` の間に空白があり、60 秒を超えると `2m 24s`、1 時間超は `1h 2m 3s` になるので、一度も Busy にならず全タブ 🟨 のままだった（v0.1.31 の単体テストは conhost 読み取りで空白が落ちた文字列を正としていた）。Claude Code は昨日と同じ 2.1.319。
+
+### 変更点
+
+| ファイル | 内容 |
+|---|---|
+| src/pane/status.rs | `has_spinner_timer`: `…` の後ろの空白を読み飛ばして `(`、続く `elapsed_time_prefix`（`<n>h `? `<n>m `? `<n>s` → ` ` か `)`）。テスト `spinner_timer_with_minutes_and_space_is_busy` 追加・不一致側に `Worked for 2m 24s` / `…(2m)` / `…(2m24s)` 等を追加 |
+| scripts/e2e/status-marker.ps1 | `$SPIN` を `… *\((\d+h )?(\d+m )?\d+s( \|\))` に・コメント |
+| scripts/e2e/status-marker-wt.ps1 | 新規。使い捨て ccnest を WT の新しい窓で起こし、入力待ち／実行中／終了後の 3 枚を PrintWindow で撮る（conhost では絵文字が読めないため・隠れていても撮れる・起動フォルダは信頼済みリポ配下 target/） |
+| README.md / Cargo.toml | 🟢 の説明に実物の例・0.1.34 |
+
+### 確認
+
+`cargo test` 353 件 PASS・`status-marker.ps1` PASS・`status-marker-wt.ps1` のスクショで実行中 🟢（`✶ Spelunking… (7s · ↓ 363 tokens · thought for 3s)`）→ 終了後 🟨 を目視。ConPTY（WT）経由の画面では `…` と `(` の間の空白がそのまま見え、conhost 直では `…(3s` と潰れる（conhost が `…` を全角扱い）＝ v0.1.31 のテスト文字列はこの潰れた形を写していた。
+
+---
+
 ## 2026-11-09 — 「対応が必要」のマーカーを 🟨 に戻す（v0.1.33）
 
 ブランチ: `fix/attention-marker-yellow`
