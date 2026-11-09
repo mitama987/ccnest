@@ -5,6 +5,26 @@
 
 ---
 
+## 2026-11-09 — 「対応が必要」のマーカーを 🟨 に戻す（v0.1.33）
+
+ブランチ: `fix/attention-marker-yellow`
+
+### 背景
+
+ゆうさん「ccnest の四角のオレンジは前のオレンジの色にして」。v0.1.31 で「対応が必要」を 🟧（U+1F7E7）にしたが、ゆうさんが「オレンジ」と呼んでいたのは v0.1.30 までの 🟨（U+1F7E8・Segoe UI Emoji では橙寄りの黄に見える）。絵文字の色はフォントが決めるので、ccnest 側は絵文字を差し替えるだけ。意味（質問も作業完了も＝実行中でなければ全部）と判定は変えない。幅はどちらも 2 でレイアウト不変。
+
+### 変更点
+
+| ファイル | 内容 |
+|---|---|
+| src/pane/status.rs | `status_marker`: `NeedsAttention => "🟨"`。テスト `marker_attention_is_yellow_square`・幅テスト |
+| src/sidebar/panelist.rs | Panes 行のマーカー期待値を 🟨 に |
+| src/ui/mod.rs | `tab_label_marked_width_bound` のマーカーを 🟨 に |
+| scripts/e2e/status-marker.ps1 | コメントのみ（判定はセル属性で幅 2 を見るので不変） |
+| README.md / Cargo.toml | 説明を 🟨 に・0.1.33 |
+
+---
+
 ## 2026-11-08 — Shift+Enter で Claude の入力欄に改行（v0.1.32）
 
 ブランチ: `feature/shift-enter-newline`

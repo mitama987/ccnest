@@ -3,9 +3,9 @@
 # 直接入れる (SendInput は使わない＝ユーザー操作と衝突しない)。画面はコンソールバッファから読む。
 #
 # 制約: conhost の ReadConsoleOutputW / ReadConsoleOutputCharacterW は非 BMP 文字 (🟢 U+1F7E2 /
-# 🟧 U+1F7E7) を U+FFFD に潰して返すので、どちらの絵文字かはこの経路では読めない (2026-11-08 実測)。
+# 🟨 U+1F7E8) を U+FFFD に潰して返すので、どちらの絵文字かはこの経路では読めない (2026-11-08 実測)。
 # 読めるのは「幅 2 の 1 文字がタブ行の先頭にある」こと (先頭セル attr 0x100 LEADING + 次セル 0x200
-# TRAILING)。🟢/🟧 と状態の対応は src/pane/status.rs の単体テストが固定している。ここで見るのは:
+# TRAILING)。🟢/🟨 と状態の対応は src/pane/status.rs の単体テストが固定している。ここで見るのは:
 #  1. 起動直後 (入力待ち) のタブ行に幅 2 のマーカーが 1 つ、はみ出し無し
 #  2. 指示を入れて実行中 ("esc to interrupt" が見える) でもマーカーが 1 つ (消えない・増えない)
 #  3. 返答が終わって入力待ちに戻ってもマーカーが 1 つ
@@ -150,7 +150,7 @@ try {
   if ($cl -and ($cl.CommandLine -match '--session-id\s+([0-9a-f-]{36})')) { $sessionId = $Matches[1] }
   "claude session: $sessionId"
 
-  # 1. Claude Code の入力欄 (❯ プロンプト) が出るまで待ち、次の 2 秒 tick でタブ行にマーカー (🟧)。
+  # 1. Claude Code の入力欄 (❯ プロンプト) が出るまで待ち、次の 2 秒 tick でタブ行にマーカー (🟨)。
   $screen = Wait-Screen $cc '[>\u276F]\s' 40
   Check ($screen -match '[>\u276F]\s') "claude prompt is up"
   $screen = Wait-Screen $cc ('^ ' + [regex]::Escape($MARK) + ' ') 8
@@ -174,7 +174,7 @@ try {
   Check ($row -match ('^ ' + [regex]::Escape($MARK) + ' \S')) "running tab still has exactly one marker"
   Check-MarkerCells $cc 'running'
 
-  # 3. 返答が終わって入力待ちに戻ってもマーカーは 1 つ (🟧 のはず)。
+  # 3. 返答が終わって入力待ちに戻ってもマーカーは 1 つ (🟨 のはず)。
   $deadline = (Get-Date).AddSeconds(120)
   do { $screen = Send $cc 'screen'; if ($screen -notmatch $SPIN) { break }; Start-Sleep -Seconds 1 } while ((Get-Date) -lt $deadline)
   Check (-not ($screen -match $SPIN)) "spinner line gone after the reply"

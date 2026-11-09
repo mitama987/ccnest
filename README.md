@@ -144,10 +144,10 @@ its normal colour:
 | Marker | Meaning |
 |---|---|
 | 🟢 | Claude is running (the spinner line with its elapsed time, `✶ Boondoggling…(6s · ↓302 tokens)`, is visible; the older `esc to interrupt` wording is still recognised) |
-| 🟧 | your turn — a question or permission prompt, or the work finished and Claude is waiting for the next instruction |
+| 🟨 | your turn — a question or permission prompt, or the work finished and Claude is waiting for the next instruction |
 | (none) | shell-only tab (no Claude pane) |
 
-A tab with several Claude panes shows 🟧 as soon as one of them is
+A tab with several Claude panes shows 🟨 as soon as one of them is
 waiting for you.
 
 ## Claude launch flags
@@ -216,7 +216,7 @@ sections:
   pane's cwd.
 - **Panes** — a list of every pane in the current tab, marking the active
   one and whether Claude is running. When a task is known the row shows
-  `— <task>` in full; Claude rows start with the same 🟢 / 🟧 marker as
+  `— <task>` in full; Claude rows start with the same 🟢 / 🟨 marker as
   the tab bar.
 
 The selection cursor is a solid white reversed block (`bg=white`,
@@ -277,3 +277,4 @@ ver0.1.28 - 2026-10-31 - Ctrl+click on a URL that Claude Code wrapped at the rig
 ver0.1.27 - 2026-10-27 - Copying Claude Code's Japanese replies pastes as plain paragraphs: rows that Claude Code wrapped at the right edge are joined with no newline and no space when the break falls next to a wide (CJK / full-width) character and the next row continues at the paragraph's body column (also when ConPTY continued through the terminal's auto-wrap), so Japanese lines with ASCII words such as `（@sx09s のポスト 20 件を確認）` no longer break. Rows starting a list item (`- `, `1. `, `・`, `1）`, `①` ...) or with a different indent keep their newline, and English word-wrapped prose is unchanged. The copy then drops the indent shared by every non-empty line (Claude Code's 2-column gutter, and the reply's leading `● ` when the selection starts at column 0); blank lines between paragraphs and the relative indent of nested lists stay, and a selection that starts mid-row leaves its first line as is. Dev: `CCNEST_PTY_DUMP=<path>` appends the raw ConPTY output bytes to `<path>` (`CCNEST_PTY_DUMP=1` keeps the escaped `pty-dump.log`).
 ver0.1.31 - 2026-11-08 - Two-state status markers: 🟢 (green circle) while Claude is running, 🟧 (orange square) whenever it is your turn — a question or permission prompt, or the work finished and Claude waits for the next instruction. The 🟨 idle / 🟪 done-unseen distinction and the per-status tinting of the tab label text are gone (too many colour patterns to read at a glance); the sidebar Panes rows carry the same marker. Running is now detected from the spinner's elapsed-time suffix `…(6s · …)`: Claude Code 2.1.319 no longer prints `esc to interrupt` on the spinner line, so since that change every tab had looked idle (🟨) even while Claude was working. Pane frame colours and the status bar are unchanged. E2E: `scripts/e2e/status-marker.ps1`.
 ver0.1.32 - 2026-11-08 - Shift+Enter inserts a newline in the Claude prompt again when ccnest runs inside Windows Terminal with the usual `shift+enter → sendInput "\u001b\r"` binding: ConPTY turns that ESC CR into an Alt+Enter key event, which ccnest used to forward as a bare CR (submitting the prompt). Alt+Enter is now sent as `ESC CR` like Shift+Enter / Ctrl+Enter. Measured with `scripts/e2e/conpty-input-probe.py`; E2E `scripts/e2e/shift-enter-newline.ps1`.
+ver0.1.33 - 2026-11-09 - The "your turn" tab marker is 🟨 (yellow square, the colour used up to v0.1.30) instead of 🟧; meaning and detection are unchanged.

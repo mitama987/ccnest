@@ -11,7 +11,7 @@ pub struct PaneRow {
     /// 「今なにをしているか」(Pane::task のコピー)。フル文字列のまま持ち、
     /// 描画時はサイドバー幅で自然に切れるのに任せる。
     pub task: Option<String>,
-    /// 状態。Claude ペインなら行頭にタブバーと同じマーカー (🟢/🟧) が付く。
+    /// 状態。Claude ペインなら行頭にタブバーと同じマーカー (🟢/🟨) が付く。
     pub status: ClaudeStatus,
 }
 
@@ -37,7 +37,7 @@ pub fn rows(app: &App) -> Vec<PaneRow> {
 
 impl PaneRow {
     pub fn display(&self) -> String {
-        // 状態マーカー (🟢 実行中 / 🟧 対応が必要) は Claude ペインだけ。
+        // 状態マーカー (🟢 実行中 / 🟨 対応が必要) は Claude ペインだけ。
         // shell ペイン (Idle) は従来どおり何も付けない。
         let status = if self.claude && self.status != ClaudeStatus::Idle {
             format!("{} ", status_marker(self.status))
@@ -90,14 +90,14 @@ mod tests {
         assert_eq!(row(None).display(), "▶[1] ⏵ claude  (C:\\work)");
     }
 
-    // Claude ペインは状態マーカーが行頭に付く (タブバーと同じ 🟢 / 🟧)
+    // Claude ペインは状態マーカーが行頭に付く (タブバーと同じ 🟢 / 🟨)
     #[test]
     fn display_prefixes_status_marker_for_claude_pane() {
         let mut r = row(Some("テスト修正"));
         r.status = ClaudeStatus::Busy;
         assert_eq!(r.display(), "🟢 ▶[1] ⏵ claude — テスト修正  (C:\\work)");
         r.status = ClaudeStatus::NeedsAttention;
-        assert_eq!(r.display(), "🟧 ▶[1] ⏵ claude — テスト修正  (C:\\work)");
+        assert_eq!(r.display(), "🟨 ▶[1] ⏵ claude — テスト修正  (C:\\work)");
     }
 
     // shell ペインは状態が何であれマーカー無し
@@ -121,6 +121,7 @@ mod tests {
 }
 
 // Version History
+// ver0.4 - 2026-11-09 - 対応が必要のマーカーを 🟧 → 🟨 に (status_marker に追従)
 // ver0.3 - 2026-11-08 - display() が Claude ペインの行頭に状態マーカー (🟢/🟧) を
 //                       付ける。文字色での状態表示は廃止 (ui 側から削除)。
 // ver0.2 - 2026-08-11 - PaneRow に task / status を追加。タスクがあれば

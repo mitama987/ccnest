@@ -14,7 +14,7 @@ pub enum ClaudeStatus {
     Idle,
     /// 実行中 (🟢)。
     Busy,
-    /// 自分の対応が必要 (🟧): 質問・許可プロンプト、または作業が終わって
+    /// 自分の対応が必要 (🟨): 質問・許可プロンプト、または作業が終わって
     /// 次の指示待ち。実行中でなければすべてこれ。
     NeedsAttention,
 }
@@ -67,7 +67,7 @@ pub fn detect_status(screen_text: &str) -> ClaudeStatus {
 }
 
 /// タブ配下の複数ペインの状態を 1 つ (タブのマーカー) に畳む。
-/// 優先度: NeedsAttention > Busy > Idle (1 ペインでも対応待ちなら 🟧)。
+/// 優先度: NeedsAttention > Busy > Idle (1 ペインでも対応待ちなら 🟨)。
 pub fn aggregate_status(statuses: impl IntoIterator<Item = ClaudeStatus>) -> ClaudeStatus {
     fn rank(s: ClaudeStatus) -> u8 {
         match s {
@@ -89,13 +89,13 @@ pub fn aggregate_status(statuses: impl IntoIterator<Item = ClaudeStatus>) -> Cla
 /// 文字色は変えない・ユーザー決定 2026-11-08)。
 ///
 /// 実行中は緑の丸、対応待ちはオレンジの四角 (色だけでなく形でも区別)。
-/// 🟢 (U+1F7E2) と 🟧 (U+1F7E7) は East Asian Width=Wide で unicode-width=2・
+/// 🟢 (U+1F7E2) と 🟨 (U+1F7E8) は East Asian Width=Wide で unicode-width=2・
 /// Windows Terminal 描画も 2 セルで一致する (✳ U+2733 のような曖昧幅文字と
 /// 違い、はみ出しを起こさない)。Idle (shell) は呼び出し側で出さない。
 pub fn status_marker(status: ClaudeStatus) -> &'static str {
     match status {
         ClaudeStatus::Busy => "🟢",
-        ClaudeStatus::NeedsAttention => "🟧",
+        ClaudeStatus::NeedsAttention => "🟨",
         ClaudeStatus::Idle => "",
     }
 }
@@ -254,8 +254,8 @@ mod tests {
 
     // 対応待ちはオレンジの四角
     #[test]
-    fn marker_attention_is_orange_square() {
-        assert_eq!(status_marker(ClaudeStatus::NeedsAttention), "🟧");
+    fn marker_attention_is_yellow_square() {
+        assert_eq!(status_marker(ClaudeStatus::NeedsAttention), "🟨");
     }
 
     // shell (Idle) は空 (呼び出し側も出さない)
@@ -269,7 +269,7 @@ mod tests {
     fn markers_are_width_two() {
         use unicode_width::UnicodeWidthStr;
         assert_eq!("🟢".width(), 2);
-        assert_eq!("🟧".width(), 2);
+        assert_eq!("🟨".width(), 2);
     }
 
     // ---- sanitize_task ----
@@ -342,6 +342,8 @@ mod tests {
 }
 
 // Version History
+// - ver1.4 (2026-11-09): 対応が必要のマーカーを 🟧 → 🟨 (U+1F7E8) に戻す
+//   (ユーザー指示「四角のオレンジは前のオレンジの色に」= v0.1.30 までの 🟨)
 // - ver1.3 (2026-11-08): 2 色化 (ユーザー決定)。DoneUnseen と ATTENTION_MARKERS を
 //   削除し、detect_status は「スピナー行があるか」だけ (prev / tab_active 不要)。
 //   マーカーは 🟢 実行中 (緑の丸) / 🟧 対応が必要 (質問も作業完了も)。
