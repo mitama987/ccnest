@@ -191,6 +191,9 @@ fn apply_env(cmd: &mut CommandBuilder) {
     cmd.env("COLORTERM", "truecolor");
     cmd.env("FORCE_COLOR", "1");
     cmd.env("CI", "");
+    // 「この窓の pid」。タブの中から `ccnest --add` を打つと、この値を宛先に
+    // する (remote.rs)。親から継いだ値 (入れ子の ccnest) は必ず上書きする。
+    cmd.env(crate::remote::PID_ENV, std::process::id().to_string());
 }
 
 /// Locate the `claude` executable by walking `PATH` with all plausible
@@ -361,9 +364,23 @@ mod tests {
             Some("plan")
         );
     }
+
+    /// ペインの子には「この窓の pid」を渡す (`ccnest --add` の宛先になる)。
+    /// 親から継いだ値ではなく、必ず自分の pid。
+    #[test]
+    fn apply_env_sets_ccnest_pid_to_this_process() {
+        let mut cmd = CommandBuilder::new("x");
+        apply_env(&mut cmd);
+        assert_eq!(
+            cmd.get_env(crate::remote::PID_ENV).and_then(|v| v.to_str()),
+            Some(std::process::id().to_string().as_str())
+        );
+    }
 }
 
 // Version History
+// - ver1.5 (2026-11-11): apply_env が子へ `CCNEST_PID=<この ccnest の pid>` を渡す
+//   (タブの中から `ccnest --add` を打ったときの宛先。remote.rs)。
 // - ver1.4 (2026-10-19): SessionStart (New / Resume) を追加。Resume は `--session-id` の
 //   代わりに `--resume <id>` で既存セッションを開き直す (再起動後の復元用)。
 // - ver1.3 (2026-09-07): should_pass_env() で端末アイデンティティ変数 (WT_SESSION /

@@ -1,4 +1,4 @@
-use std::collections::{HashMap, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
@@ -12,6 +12,7 @@ use crate::cli::ResumeSpec;
 use crate::pane::grid::{Direction, Layout};
 use crate::pane::status::{detect_status, sanitize_task, ClaudeStatus};
 use crate::pane::{Pane, PaneId};
+use crate::remote::{self, Inbox, Reply};
 use crate::sidebar::SidebarState;
 use crate::wake::{WakeRx, WakeTx};
 
@@ -115,6 +116,9 @@ pub struct App {
     pub pending_resumes: VecDeque<ResumeSpec>,
     /// 閉じたタブ (新しいものが末尾)。Ctrl+Shift+T で末尾から開き直す。
     pub closed_tabs: Vec<ClosedTab>,
+    /// `ccnest --add` の依頼が届くフォルダ (`remote::Inbox`)。作れなかったら
+    /// None (依頼を受けないだけ)。App と一緒に drop されてフォルダが消える。
+    inbox: Option<Inbox>,
     /// イベントループを起こすチャネルの送信側。ペイン生成時に reader へ配る。
     wake_tx: WakeTx,
     /// 受信側。`run_event_loop` が起動時に `take_wake_rx` で持っていく。
@@ -268,6 +272,7 @@ impl App {
             jp_titler: JpTitler::from_env(),
             pending_resumes,
             closed_tabs: Vec::new(),
+            inbox: Inbox::open_own(),
             wake_tx,
             wake_rx: Some(wake_rx),
         })
@@ -298,6 +303,58 @@ impl App {
             focused: new_id,
         });
         Ok(true)
+    }
+
+    /// `ccnest --add` で届いた依頼を拾い、開けるセッションを `pending_resumes`
+    /// に積む (実際に開くのは [`App::spawn_next_resume`] が 1 tick 1 タブ)。
+    /// 結果は依頼ごとに `.done` で返す。1 件でも受け取ったら true。
+    /// イベントループの 2 秒 tick からのみ呼ぶ。
+    pub fn accept_remote_requests(&mut self) -> bool {
+        let Some(dir) = self.inbox.as_ref().map(|i| i.dir().to_path_buf()) else {
+            return false;
+        };
+        let incoming = remote::take_requests(&dir);
+        if incoming.is_empty() {
+            return false;
+        }
+        let mut added = 0;
+        for inc in incoming {
+            let reply = match inc.request {
+                Ok(req) => {
+                    // シェルに切り戻したペインのセッションは「開いている」に数えない。
+                    let open: HashSet<Uuid> = self
+                        .panes
+                        .values()
+                        .filter(|p| p.claude_running)
+                        .map(|p| p.session_id)
+                        .chain(self.pending_resumes.iter().map(|r| r.session_id))
+                        .collect();
+                    let cwd = &self.cwd;
+                    let (accepted, skipped) = remote::plan_requests(req.resumes, &open, |id| {
+                        crate::claude::session::session_path(cwd, &id.to_string())
+                            .is_some_and(|path| path.is_file())
+                    });
+                    added += accepted.len();
+                    let reply = Reply {
+                        accepted: accepted.iter().map(|r| r.session_id).collect(),
+                        skipped,
+                        error: None,
+                    };
+                    self.pending_resumes.extend(accepted);
+                    reply
+                }
+                Err(e) => Reply {
+                    error: Some(e),
+                    ..Reply::default()
+                },
+            };
+            // 返事を書けなくても、積んだタブは開く (送る側が時間切れになるだけ)。
+            let _ = remote::write_reply(&inc.reply_path, &reply);
+        }
+        if added > 0 {
+            self.status = Some(format!("タブを追加: {added} 件"));
+        }
+        true
     }
 
     /// 入力ポンプスレッドなどに配る送信側。
@@ -935,3 +992,10 @@ mod tests {
 //                        detect_status(screen) only (no prev / tab_active);
 //                        mark_active_tab_seen and the DoneUnseen bookkeeping
 //                        are gone (idle and finished both mean "your turn").
+// ver0.11 - 2026-11-11 - `ccnest --add`: App owns a remote::Inbox (per-pid
+//                        request folder, removed on drop) and
+//                        accept_remote_requests() queues the requested
+//                        sessions into pending_resumes on the 2 s tick,
+//                        skipping ones already open here or without a
+//                        session log in this window's folder, and writes
+//                        the reply file.

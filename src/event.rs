@@ -233,6 +233,8 @@ pub fn run_event_loop<B: Backend>(term: &mut Terminal<B>, mut app: App) -> Resul
                 app.sidebar.refresh();
             }
             app.refresh_pane_state();
+            // `ccnest --add` で外から届いた依頼を開き待ちに積む (下で 1 つ開く)。
+            app.accept_remote_requests();
             // `--resume` の残りを 1 tick 1 タブずつ開く。失敗はステータス行に
             // 出して次へ (1 件の失敗で残りを止めない)。
             if let Err(e) = app.spawn_next_resume() {
@@ -4920,3 +4922,6 @@ mod tests {
 //                        ConPTY as an Alt+Enter KEY_EVENT (measured with
 //                        scripts/e2e/conpty-input-probe.py), which used to be
 //                        forwarded as a bare CR and submitted the prompt.
+// ver0.19 - 2026-11-11 - The 2 s tick calls app.accept_remote_requests() before
+//                        spawn_next_resume(), so sessions requested with
+//                        `ccnest --add` open as tabs in this window.
