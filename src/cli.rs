@@ -1,13 +1,16 @@
 use std::path::PathBuf;
 
 use anyhow::{anyhow, Result};
+use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
-/// 起動時に開き直す既存 Claude セッション (`--resume <uuid>[=<タブ名>]`)。
-#[derive(Debug, Clone, PartialEq, Eq)]
+/// 開き直す既存 Claude セッション (`--resume <uuid>[=<タブ名>]`)。
+/// 起動時の引数と、動いている窓への依頼 (`remote::Request`) の両方で使う。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ResumeSpec {
     pub session_id: Uuid,
     /// タブ名。None ならフォルダ名 (新規タブと同じ)。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub title: Option<String>,
 }
 
@@ -18,9 +21,14 @@ pub struct Cli {
     pub cwd: Option<PathBuf>,
     /// 1 セッション 1 タブで開き直すセッション。空なら従来どおり新規 1 ペイン。
     pub resumes: Vec<ResumeSpec>,
+    /// `--add`: 新しい窓を開かず、動いている ccnest の窓へ `resumes` を送る。
+    pub add: bool,
+    /// `--to <pid>`: `--add` の宛先。None なら環境変数 `CCNEST_PID`。
+    pub to: Option<u32>,
 }
 
-/// `ccnest [cwd] [--resume <uuid>[=<タブ名>]]...` を解析する純粋関数
+/// `ccnest [cwd] [--resume <uuid>[=<タブ名>]]...` と
+/// `ccnest --add [--to <pid>] --resume <uuid>[=<タブ名>]...` を解析する純粋関数
 /// (`args` はプログラム名を除いたもの)。
 pub fn parse_args<I: IntoIterator<Item = String>>(args: I) -> Result<Cli> {
     let mut cli = Cli::default();
@@ -33,6 +41,13 @@ pub fn parse_args<I: IntoIterator<Item = String>>(args: I) -> Result<Cli> {
             cli.resumes.push(parse_resume(&value)?);
         } else if let Some(value) = arg.strip_prefix("--resume=") {
             cli.resumes.push(parse_resume(value)?);
+        } else if arg == "--add" {
+            cli.add = true;
+        } else if arg == "--to" {
+            let value = it.next().ok_or_else(|| anyhow!("--to needs <pid>"))?;
+            cli.to = Some(parse_pid(&value)?);
+        } else if let Some(value) = arg.strip_prefix("--to=") {
+            cli.to = Some(parse_pid(value)?);
         } else if arg.starts_with("--") {
             return Err(anyhow!("unknown option: {arg}"));
         } else if cli.cwd.is_none() {
@@ -41,7 +56,28 @@ pub fn parse_args<I: IntoIterator<Item = String>>(args: I) -> Result<Cli> {
             return Err(anyhow!("unexpected argument: {arg}"));
         }
     }
+    if cli.add {
+        if cli.resumes.is_empty() {
+            return Err(anyhow!(
+                "--add needs at least one --resume <uuid>[=<title>]"
+            ));
+        }
+        if cli.cwd.is_some() {
+            return Err(anyhow!(
+                "--add takes no folder (tabs open in the running window's folder)"
+            ));
+        }
+    } else if cli.to.is_some() {
+        return Err(anyhow!("--to is only valid with --add"));
+    }
     Ok(cli)
+}
+
+fn parse_pid(value: &str) -> Result<u32> {
+    value
+        .trim()
+        .parse::<u32>()
+        .map_err(|e| anyhow!("--to: invalid pid {value:?}: {e}"))
 }
 
 fn parse_resume(value: &str) -> Result<ResumeSpec> {
@@ -122,9 +158,51 @@ mod tests {
         assert!(parse(&["--help"]).is_err());
         assert!(parse(&["a", "b"]).is_err());
     }
+
+    /// `--add`: 動いている窓へ送る。`--to <pid>` は宛先 (無ければ CCNEST_PID)。
+    #[test]
+    fn add_with_and_without_to() {
+        let cli = parse(&["--add", "--resume", ID]).unwrap();
+        assert!(cli.add);
+        assert_eq!(cli.to, None);
+        assert_eq!(cli.resumes.len(), 1);
+
+        let cli = parse(&["--add", "--to", "15416", "--resume", ID, "--resume", ID2]).unwrap();
+        assert_eq!(cli.to, Some(15416));
+        assert_eq!(cli.resumes.len(), 2);
+
+        let cli = parse(&["--resume", ID, "--to=7", "--add"]).unwrap();
+        assert!(cli.add, "順番は問わない");
+        assert_eq!(cli.to, Some(7));
+    }
+
+    /// `--add` の誤用は raw mode に入る前にエラーで終わる。
+    #[test]
+    fn add_errors() {
+        assert!(parse(&["--add"]).is_err(), "--resume が 1 つも無い");
+        assert!(parse(&["--to", "1", "--resume", ID]).is_err(), "--to だけ");
+        assert!(parse(&["--add", "--to"]).is_err());
+        assert!(parse(&["--add", "--to", "abc", "--resume", ID]).is_err());
+        assert!(
+            parse(&["--add", r"C:\work\repo", "--resume", ID]).is_err(),
+            "フォルダは窓側のものを使うので指定できない"
+        );
+    }
+
+    /// 既存の起動 (--add 無し) は add=false のまま。
+    #[test]
+    fn plain_launch_is_not_add() {
+        let cli = parse(&[r"C:\work\repo", "--resume", ID]).unwrap();
+        assert!(!cli.add);
+        assert_eq!(cli.to, None);
+    }
 }
 
 // Version History
 // ver0.1 - 2026-10-19 - First version: positional cwd + repeated
 //                       `--resume <uuid>[=<title>]` (reopen saved sessions,
 //                       one tab each).
+// ver0.2 - 2026-11-11 - `--add [--to <pid>]`: send the `--resume` sessions to
+//                       a running ccnest window instead of starting one
+//                       (see remote.rs). ResumeSpec derives Serialize /
+//                       Deserialize for the request file.

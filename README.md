@@ -58,6 +58,32 @@ folder name otherwise). The first session opens right away; the rest open one
 per 2 seconds without switching the active tab, so parallel Claude starts do
 not write `~/.claude.json` at the same time.
 
+### Add tabs to a running window
+
+```sh
+ccnest --add --resume <session-id>=<tab name> --resume <session-id>
+ccnest --add --to <pid> --resume <session-id>
+```
+
+`--add` does not start a new window. It asks a ccnest that is already running
+to open the sessions as new tabs (same rules as above: one per 2 seconds, the
+active tab stays). The target is `--to <pid>`, or the `CCNEST_PID` environment
+variable, which ccnest sets for everything it starts in a pane — so from
+inside a tab (for example from Claude's shell tool) plain `ccnest --add ...`
+reaches that window.
+
+The window answers within a couple of seconds and the command prints one line
+per session: opened, or skipped because it is already open in that window, or
+skipped because that window's folder has no conversation log for it (a tab
+that would close at once). The exit code is 0 only when every requested
+session ends up as a tab there. Sessions resume in the window's start folder,
+so they must belong to that project. A window started before v0.1.35 has no
+request folder and the command fails at once; restart that window first.
+
+Requests are small JSON files under `%APPDATA%\ccnest\requests\<pid>\`, picked
+up on the 2 second tick; the folder is removed when the window exits, and
+folders of dead pids are removed the next time a ccnest starts.
+
 ## Default keybindings
 
 | Key | Action |
@@ -279,3 +305,4 @@ ver0.1.31 - 2026-11-08 - Two-state status markers: 🟢 (green circle) while Cla
 ver0.1.32 - 2026-11-08 - Shift+Enter inserts a newline in the Claude prompt again when ccnest runs inside Windows Terminal with the usual `shift+enter → sendInput "\u001b\r"` binding: ConPTY turns that ESC CR into an Alt+Enter key event, which ccnest used to forward as a bare CR (submitting the prompt). Alt+Enter is now sent as `ESC CR` like Shift+Enter / Ctrl+Enter. Measured with `scripts/e2e/conpty-input-probe.py`; E2E `scripts/e2e/shift-enter-newline.ps1`.
 ver0.1.33 - 2026-11-09 - The "your turn" tab marker is 🟨 (yellow square, the colour used up to v0.1.30) instead of 🟧; meaning and detection are unchanged.
 ver0.1.34 - 2026-11-09 - Running detection fixed: the spinner line is `… (2m 24s · …)` — a space between `…` and `(`, and minutes/hours once the reply passes 60 s / 1 h — so the v0.1.31 matcher (`…(` glued, seconds only) never fired and every working tab stayed 🟨. `has_spinner_timer` now allows the space and `<n>h <n>m <n>s`. E2E `scripts/e2e/status-marker.ps1` uses the same pattern; `scripts/e2e/status-marker-wt.ps1` screenshots a disposable ccnest in a new Windows Terminal window (PrintWindow) so the emoji itself can be checked.
+ver0.1.35 - 2026-11-11 - `ccnest --add [--to <pid>] --resume <session-id>[=<tab name>] ...` adds tabs to a ccnest window that is already running instead of starting a new one. The request is a small JSON file dropped into `%APPDATA%\ccnest\requests\<pid>\`; the window picks it up on its 2 s tick, queues the sessions like startup `--resume` (one tab per tick, active tab untouched) and answers which were opened and which were skipped (already open there, or no conversation log in that window's folder). Panes now get `CCNEST_PID=<pid of their ccnest>`, so the command needs no `--to` when run from inside a tab. E2E `scripts/e2e/add-tab.ps1`.

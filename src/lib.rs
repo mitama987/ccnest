@@ -5,6 +5,7 @@ pub mod event;
 pub mod keymap;
 pub mod mouse;
 pub mod pane;
+pub mod remote;
 pub mod sidebar;
 pub mod ui;
 pub mod wake;

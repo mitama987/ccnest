@@ -5,6 +5,52 @@
 
 ---
 
+## 2026-11-11 — 動いている窓にタブを足す `ccnest --add`（v0.1.35）
+
+ブランチ: `feature/add-tab-remote`
+
+### 背景
+
+ゆうさん「対応必要な 4 本のセッションをこの ccnest 内で新タブで追加できたりする？」。v0.1.34 までの `--resume` は起動時にしか読まず、動いている窓へ外から「このセッションを開いて」を届ける口が無かった（Ctrl+T → `/resume` を人が打つしかない）。レイナ（タブの中の Claude）が自分でタブを足せるようにする。
+
+### 仕組み
+
+パイプやソケットは使わず、依頼ファイルの受け渡し。既存の「`pending_resumes` を 2 秒 tick で 1 タブずつ開く」流れに積むだけなので、スレッドも依存も増えない。
+
+1. 窓側は起動時に `%APPDATA%\ccnest\requests\<自分の pid>\` を作る（ついでに、動いていない pid のフォルダを消す）。App と一緒に drop されて消える
+2. 送る側 `ccnest --add [--to <pid>] --resume <uuid>[=<タブ名>]...` は raw mode に入らず、依頼を `.json.tmp` → rename で置き、`.done` を最大 10 秒待つ
+3. 窓側は 2 秒 tick で `*.json` を拾い、検査して `pending_resumes` に積み、結果を `.done` に書く
+4. 宛先は `--to <pid>` → 環境変数 `CCNEST_PID`。ccnest がペインの子へ `CCNEST_PID=<自分の pid>` を渡すので、タブの中から打てば「この窓」に届く
+5. 開かずに理由を返すもの: その窓ですでに開いている／開き待ち（`already_open`）、その窓のフォルダに会話ログが無い（`no_session_log`＝開いてもすぐ終わる）
+6. 終了コード: 頼んだセッションがすべてその窓のタブにある（開いた／開いていた）なら 0、それ以外は 1
+
+### 変更点
+
+| ファイル | 内容 |
+|---|---|
+| src/remote.rs | 新規。`Inbox`（pid ごとの依頼フォルダ・起動時に死んだ pid を片付け・Drop で削除）、`take_requests`／`plan_requests`／`write_reply`（窓側）、`resolve_target`／`send`／`format_reply`（送る側）、`pid_alive`（Windows は OpenProcess＋WaitForSingleObject）。テスト 19 件 |
+| src/cli.rs | `Cli.add`・`Cli.to`、`--add`／`--to <pid>` の解析（`--add` で `--resume` 0 件・フォルダ指定・`--to` だけ、はエラー）。`ResumeSpec` に Serialize／Deserialize。テスト 3 件 |
+| src/main.rs | `cli.add` なら raw mode の前に `run_add` → 結果表示 → 終了コード |
+| src/app.rs | `App.inbox`、`accept_remote_requests()`（シェルに切り戻したペインは「開いている」に数えない） |
+| src/event.rs | 2 秒 tick で `spawn_next_resume()` の前に `accept_remote_requests()` |
+| src/claude/launcher.rs | `apply_env` が `CCNEST_PID` を自分の pid で上書き。テスト 1 件 |
+| scripts/e2e/add-tab.ps1 | 新規。使い捨て ccnest（conhost・偽 claude）へ別プロセスの `ccnest --add` を送る |
+| README.md / Cargo.toml | 「Add tabs to a running window」の節・0.1.35 |
+
+### 確認
+
+`cargo fmt --all -- --check`・`cargo clippy --all-targets -- -D warnings`・`cargo test`（lib 375 件 PASS・353 → 375）。`scripts/e2e/add-tab.ps1` PASS（18 項目）: 2 本送る → 終了コード 0・偽 claude が `--resume <id>` で 2 つ起動・タブバーに `first-tab` と `追加タブ`・表示中のタブは 1 のまま・3 ペインとも `CCNEST_PID` が窓の pid ／ 同じセッションをもう一度 → 「すでに開いています」で増えない（終了コード 0）／ 会話ログの無いセッション → 「会話ログがありません」で開かない（終了コード 1）／ 動いていない pid 宛て → 1 秒でエラー（終了コード 1）／ 依頼フォルダは空に戻る。
+
+### 知っておくこと
+
+- **動いている窓は旧 exe のまま**。この機能は v0.1.35 で起動した窓にしか届かない（旧版の窓には依頼フォルダが無く、送る側はすぐエラーになる）
+- タブ名（`=<タブ名>`）は、Claude がタスク名（`/rename`・日本語タブ名・端末タイトル・最後の発話）を出すまでの表示。起動時の `--resume` と同じ
+- セッションは窓の起動フォルダで再開する。別フォルダ（別リポジトリ）のセッションは `no_session_log` で断る
+- 別の ccnest やターミナルで開いているセッションは検出しない（開くとそのタブがすぐ終わるだけで、会話は壊れない）
+- E2E の偽 claude は `title claude` を出す（cmd 既定のタイトル `C:\WINDOWS\system32\cmd.exe` はタスク名として扱われ、タブ名を上書きするため）
+
+---
+
 ## 2026-11-09 — 実行中判定がスピナー行を拾えていなかった修正（v0.1.34）
 
 ブランチ: `fix/spinner-timer-minutes`

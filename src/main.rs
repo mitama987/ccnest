@@ -2,6 +2,7 @@ use std::backtrace::Backtrace;
 use std::fs::{create_dir_all, OpenOptions};
 use std::io::{self, BufWriter, Write};
 use std::path::PathBuf;
+use std::time::Duration;
 
 use anyhow::{Context, Result};
 use crossterm::event::{
@@ -15,12 +16,17 @@ use ratatui::backend::CrosstermBackend;
 use ratatui::Terminal;
 
 use ccnest::app::{folder_title, App};
-use ccnest::cli::parse_args;
+use ccnest::cli::{parse_args, Cli};
 use ccnest::event::run_event_loop;
+use ccnest::remote;
 
 fn main() -> Result<()> {
     // raw mode に入る前に解析する (不正な引数はエラー表示で即終了)。
     let cli = parse_args(std::env::args().skip(1))?;
+    if cli.add {
+        // 新しい窓は開かない。動いている窓へ依頼を送って結果を表示するだけ。
+        std::process::exit(run_add(&cli));
+    }
     let cwd = cli
         .cwd
         .unwrap_or_else(|| std::env::current_dir().expect("current_dir"));
@@ -52,6 +58,39 @@ fn main() -> Result<()> {
 
     result
 }
+
+/// `ccnest --add [--to <pid>] --resume <uuid>[=<タブ名>]...`: 動いている窓へ
+/// 「このセッションをタブで開いて」を送る。終了コードは、頼んだセッションが
+/// すべてその窓のタブにある (開いた／開いていた) なら 0、それ以外は 1。
+fn run_add(cli: &Cli) -> i32 {
+    match send_add(cli) {
+        Ok((text, ok)) => {
+            println!("{text}");
+            i32::from(!ok)
+        }
+        Err(e) => {
+            eprintln!("ccnest --add: {e:#}");
+            1
+        }
+    }
+}
+
+fn send_add(cli: &Cli) -> Result<(String, bool)> {
+    let env = std::env::var(remote::PID_ENV).ok();
+    let pid = remote::resolve_target(cli.to, env.as_deref())?;
+    let root = remote::requests_root().context("no data dir for ccnest requests")?;
+    if !remote::pid_alive(pid) {
+        anyhow::bail!("pid {pid} の ccnest は動いていません");
+    }
+    let reply = remote::send(&remote::inbox_dir(&root, pid), &cli.resumes, ADD_TIMEOUT)?;
+    Ok((
+        remote::format_reply(pid, &cli.resumes, &reply),
+        reply.all_present(),
+    ))
+}
+
+/// 窓側は 2 秒 tick で拾う。tick が重い瞬間 (git の走査など) を見込んで余裕を持つ。
+const ADD_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// Restore the terminal to a usable state. Safe to call multiple times and
 /// from a panic context — every operation is best-effort and ignores errors
@@ -119,3 +158,7 @@ fn write_crash_log(info: &std::panic::PanicHookInfo<'_>) -> Option<PathBuf> {
 // ver0.3 - 2026-10-25 - Set the window title (taskbar name) to the start
 //                       folder name (folder_title) so ccnest windows can be
 //                       told apart instead of all reading "C:\Windows\...".
+// ver0.4 - 2026-11-11 - `--add`: run_add() sends the `--resume` sessions to a
+//                       running window (remote::send) and exits without
+//                       entering raw mode; exit code 0 only when every
+//                       requested session ends up as a tab there.
