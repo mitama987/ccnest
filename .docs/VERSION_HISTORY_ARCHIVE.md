@@ -50,7 +50,7 @@ npm の `ccnest-cli` が 0.1.3（2026-04-27）のまま止まっていた。GitH
 ### 残り
 
 - タグ push からの自動公開（`build` → `checksums` → `publish-npm` の順）は、次のタグ（v0.1.36 以降）で初めて通る。今回確かめたのは手動の出し直しの道
-- secret `NPM_TOKEN` は使わなくなった（期限切れのまま残っている）
+- secret `NPM_TOKEN` は使わなくなったので、同日に削除した（`gh secret delete NPM_TOKEN`。リポジトリの secret は 0 件）
 
 ---
 
