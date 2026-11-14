@@ -3,10 +3,13 @@
 //! すべて純関数。I/O・parser ロックは呼び出し側 (`App::refresh_pane_state`,
 //! 2 秒 tick) が握り、描画側はキャッシュされた結果を読むだけにする。
 
-/// タブバー/サイドバーに出す Claude の状態。2 値 (実行中か、こちらの番か)。
+/// タブバー/サイドバーに出す Claude の状態。3 値 (実行中か、返答は終わったが
+/// 裏で何かが動いているか、こちらの番か)。
 ///
 /// 「こちらの番」は質問・許可待ちも作業完了後の入力待ちもまとめて
 /// `NeedsAttention` (ユーザー決定 2026-11-08: どちらも自分の対応が要る)。
+/// `Background` は 2026-11-14 に追加 (ユーザー決定: 🟢 に混ぜず別マーカー。
+/// 裏に dev サーバーを置いたままのタブが「実行中」と見分けられなくなるため)。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum ClaudeStatus {
     /// claude が走っていないペイン (shell)。表示なし。
@@ -14,6 +17,9 @@ pub enum ClaudeStatus {
     Idle,
     /// 実行中 (🟢)。
     Busy,
+    /// 裏で実行中 (🔵): 返答は終わっているが、裏のシェル・エージェントなどが
+    /// 動いている (終われば Claude に通知が届き、自分で続きを始める)。
+    Background,
     /// 自分の対応が必要 (🟨): 質問・許可プロンプト、または作業が終わって
     /// 次の指示待ち。実行中でなければすべてこれ。
     NeedsAttention,
@@ -85,29 +91,119 @@ fn elapsed_time_prefix(s: &str) -> bool {
     }
 }
 
+/// フッターの「裏で動いているもの」の札に出る名詞 (Claude Code v2.1.325 の本体で
+/// 確認・2026-11-14)。札は `<n> <名詞>` で、種類が混ざると `<n> background tasks`、
+/// シェルと monitor だけは `1 shell, 1 monitor` と並ぶ。
+///
+/// わざと入れていないもの:
+/// - `Artifact comment monitor`: アーティファクトを公開したあとずっと出る見張り
+/// - `dreaming` / `saving memories` / `memory import` / `auto-mode scan`: 本体の後片付け
+/// - `← 8 agents` の `agents`: 札ではなくエージェント一覧への案内
+const BACKGROUND_NOUNS: &[&str] = &[
+    "shell",
+    "shells",
+    "monitor",
+    "monitors",
+    "local agent",
+    "local agents",
+    "team",
+    "teams",
+    "background task",
+    "background tasks",
+    "background dynamic workflow",
+    "background dynamic workflows",
+    "remote dynamic workflow",
+    "remote dynamic workflows",
+    "cloud session",
+    "cloud sessions",
+    "MCP task",
+    "MCP tasks",
+];
+
+/// 返答が終わったあとも裏で何かが動いているか。入力欄の下のフッター
+/// `  ⏵⏵ bypass permissions on · 1 shell · ← 8 agents          /rc` の札を見る。
+///
+/// 見るのは「画面で最後の罫線 (`─` が 3 個以上並んだ所) より後ろ」だけ。
+/// 入力欄の下枠がその罫線なので、後ろはフッターになる。罫線が無い画面
+/// (許可ダイアログなど入力欄が出ていない場面) は false。
+/// 行ではなく罫線の終わりで切るのは、vt100 の `contents()` が幅いっぱいの行を
+/// 次の行と改行なしでつなぐことがあるため (実測: `────…────❯ `)。
+///
+/// 完了行 `✻ Sautéed for 3s · done 18:08 · 1 shell still running` は使わない。
+/// 会話に残る文字で、裏の仕事が終わったあとも画面に残りうる (罫線より上にあり、
+/// 札の文言とも完全一致しないので当たらない)。
+pub fn has_background_work(screen_text: &str) -> bool {
+    const RULE: char = '─';
+    let Some(last) = screen_text.rfind(RULE) else {
+        return false;
+    };
+    // 入力欄の上枠は右端にセッション名の札が付いて `── name ─` で終わることが
+    // あるが、最後の `─` は必ず下枠 (長い罫線) の側に来る。1〜2 個だけの `─` は
+    // 罫線ではない (本文中の記号) とみなす。
+    let run = 1 + screen_text[..last]
+        .chars()
+        .rev()
+        .take_while(|c| *c == RULE)
+        .count();
+    if run < 3 {
+        return false;
+    }
+    screen_text[last + RULE.len_utf8()..]
+        .lines()
+        .flat_map(|line| line.split('·'))
+        .flat_map(|piece| piece.split("  "))
+        .any(|token| is_background_pill(token.trim()))
+}
+
+/// `1 shell` / `2 local agents` / `1 shell, 1 monitor` / `◇ 1 cloud session` の形か。
+/// 区切った 1 つ分と完全に一致するときだけ真 (`1 shell still running` は偽)。
+fn is_background_pill(token: &str) -> bool {
+    // クラウド系の札は先頭に記号 1 つと空白が付く。
+    let mut chars = token.chars();
+    let body = match (chars.next(), chars.next()) {
+        (Some(glyph), Some(' ')) if !glyph.is_alphanumeric() => chars.as_str(),
+        _ => token,
+    };
+    !body.is_empty() && body.split(", ").all(is_count_and_noun)
+}
+
+/// `<数字> <BACKGROUND_NOUNS のどれか>` か。
+fn is_count_and_noun(part: &str) -> bool {
+    let digits = part.chars().take_while(|c| c.is_ascii_digit()).count();
+    digits > 0
+        && part[digits..]
+            .strip_prefix(' ')
+            .is_some_and(|noun| BACKGROUND_NOUNS.contains(&noun))
+}
+
 /// 可視画面テキストから Claude の状態を判定する。
 ///
 /// - `screen_text`: 可視画面の全行テキスト (scrollback は含まない)
 ///
 /// スピナー行 (現行の経過秒つき、または旧 CLI の "esc to interrupt") が
-/// あれば Busy、無ければ NeedsAttention。質問文言の検出はしない (Claude の
-/// 返答本文に "Would you like" が残っているだけで色が変わる誤検知があり、
-/// 2 色化で区別自体が不要になった)。
+/// あれば Busy。無くて、フッターに裏の仕事の札があれば Background
+/// ([`has_background_work`])。どちらも無ければ NeedsAttention。
+/// 質問文言の検出はしない (Claude の返答本文に "Would you like" が残っている
+/// だけで色が変わる誤検知があり、区別自体をやめた)。そのため、裏の仕事が
+/// 動いている間に Claude が文章で質問して返答を終えた場合も Background になる。
 pub fn detect_status(screen_text: &str) -> ClaudeStatus {
     if has_spinner_timer(screen_text) || BUSY_MARKERS.iter().any(|m| screen_text.contains(m)) {
         ClaudeStatus::Busy
+    } else if has_background_work(screen_text) {
+        ClaudeStatus::Background
     } else {
         ClaudeStatus::NeedsAttention
     }
 }
 
 /// タブ配下の複数ペインの状態を 1 つ (タブのマーカー) に畳む。
-/// 優先度: NeedsAttention > Busy > Idle (1 ペインでも対応待ちなら 🟨)。
+/// 優先度: NeedsAttention > Busy > Background > Idle (1 ペインでも対応待ちなら 🟨)。
 pub fn aggregate_status(statuses: impl IntoIterator<Item = ClaudeStatus>) -> ClaudeStatus {
     fn rank(s: ClaudeStatus) -> u8 {
         match s {
-            ClaudeStatus::NeedsAttention => 2,
-            ClaudeStatus::Busy => 1,
+            ClaudeStatus::NeedsAttention => 3,
+            ClaudeStatus::Busy => 2,
+            ClaudeStatus::Background => 1,
             ClaudeStatus::Idle => 0,
         }
     }
@@ -123,13 +219,15 @@ pub fn aggregate_status(statuses: impl IntoIterator<Item = ClaudeStatus>) -> Cla
 /// タブ先頭に出す状態マーカーの絵文字。唯一の状態シグナル (タブ名の
 /// 文字色は変えない・ユーザー決定 2026-11-08)。
 ///
-/// 実行中は緑の丸、対応待ちはオレンジの四角 (色だけでなく形でも区別)。
-/// 🟢 (U+1F7E2) と 🟨 (U+1F7E8) は East Asian Width=Wide で unicode-width=2・
+/// 実行中は緑の丸、裏で実行中は青の丸、対応待ちはオレンジの四角 (自分の番
+/// だけ形が違う)。🟢 (U+1F7E2)・🔵 (U+1F535)・🟨 (U+1F7E8) は East Asian
+/// Width=Wide で unicode-width=2・
 /// Windows Terminal 描画も 2 セルで一致する (✳ U+2733 のような曖昧幅文字と
 /// 違い、はみ出しを起こさない)。Idle (shell) は呼び出し側で出さない。
 pub fn status_marker(status: ClaudeStatus) -> &'static str {
     match status {
         ClaudeStatus::Busy => "🟢",
+        ClaudeStatus::Background => "🔵",
         ClaudeStatus::NeedsAttention => "🟨",
         ClaudeStatus::Idle => "",
     }
@@ -270,7 +368,214 @@ mod tests {
         assert_eq!(detect_status(""), ClaudeStatus::NeedsAttention);
     }
 
+    // ---- has_background_work / Background ----
+
+    /// Claude Code の入力欄まわり (上枠・プロンプト・下枠・フッター) を付けた画面。
+    fn screen_with_footer(body: &str, footer: &str) -> String {
+        let rule = "─".repeat(72);
+        format!("{body}\n{rule}\n❯ \n{rule}\n  {footer}\n")
+    }
+
+    // 2026-11-14 に使い捨て ccnest の CCNEST_STATUS_TRACE で取った実物
+    // (claude v2.1.325・裏で Start-Sleep 60 を走らせて返答を終えた直後)。
+    const REAL_BACKGROUND_SCREEN: &str = "\
+  Then reply with only the word started.
+
+● PowerShell(Start-Sleep -Seconds 60)
+  ⎿  Running in the background (↓ to manage)
+
+● started
+
+✻ Sautéed for 3s · done 18:08 · 1 shell still running
+
+────────────────────────────────────────────────────────────────────────
+❯
+────────────────────────────────────────────────────────────────────────
+  ⏵⏵ bypass permissions on · 1 shell · ← 8 agents                  /rc
+";
+
+    // 同じ実行で、裏のシェルが終わって通知の返答も終わったあとの実物。上枠と
+    // プロンプトが改行なしでつながっている (vt100 の contents() の折り返し扱い)。
+    const REAL_DONE_SCREEN: &str = "\
+● Background command \"Sleep for 60 seconds in the background\" completed
+(exit code 0)
+
+● ゆうさん、バックグラウンドの sleep 60 が終了コード 0 で完了したよ✨
+
+✻ Cooked for 1s · done 18:09
+
+────────────────────────────────────────────────────────────────────────❯
+────────────────────────────────────────────────────────────────────────
+  ⏵⏵ bypass permissions on (shift+tab to cycle) · ← 8 agents       /rc
+";
+
+    // 返答は終わり、フッターに "1 shell" の札 → 裏で実行中
+    #[test]
+    fn real_screen_with_background_shell_is_background() {
+        assert!(has_background_work(REAL_BACKGROUND_SCREEN));
+        assert_eq!(
+            detect_status(REAL_BACKGROUND_SCREEN),
+            ClaudeStatus::Background
+        );
+    }
+
+    // 裏のシェルが終わってフッターの札が消えたら、こちらの番に戻る
+    #[test]
+    fn real_screen_after_background_finished_is_attention() {
+        assert!(!has_background_work(REAL_DONE_SCREEN));
+        assert_eq!(
+            detect_status(REAL_DONE_SCREEN),
+            ClaudeStatus::NeedsAttention
+        );
+    }
+
+    // 札の文言 (本体の関数が作る形) はどれも裏で実行中
+    #[test]
+    fn footer_pills_are_background() {
+        for footer in [
+            "⏵⏵ bypass permissions on · 1 shell · ← 8 agents                  /rc",
+            "⏵⏵ bypass permissions on · 2 shells · ⧉ index · ← 8 agents",
+            "⏵⏵ bypass permissions on · 1 local agent · ← 8 agents",
+            "⏵⏵ bypass permissions on · 3 local agents",
+            "⏵⏵ bypass permissions on · 1 shell, 1 monitor · ← 8 agents",
+            "⏵⏵ bypass permissions on · 2 monitors",
+            "⏵⏵ bypass permissions on · 3 background tasks · ← 8 agents",
+            "⏵⏵ bypass permissions on · 1 team",
+            "⏵⏵ bypass permissions on · 1 background dynamic workflow",
+            "⏵⏵ bypass permissions on · 2 MCP tasks",
+            "⏵⏵ bypass permissions on · ◇ 1 cloud session · ← 8 agents",
+            "⏵⏵ bypass permissions on · ◇ 2 remote dynamic workflows",
+            // 札が左側の最後で、右側の表示と空白だけで離れている
+            "⏵⏵ bypass permissions on · 1 shell                    ✔Update installed · Restart to update",
+            // 札が先頭
+            "1 shell · ? for shortcuts",
+            "⏸ plan mode on (shift+tab to cycle) · 12 shells",
+        ] {
+            let text = screen_with_footer("● started", footer);
+            assert!(has_background_work(&text), "{footer}");
+            assert_eq!(detect_status(&text), ClaudeStatus::Background, "{footer}");
+        }
+    }
+
+    // 返答中 (スピナー行あり) は、裏の札があっても実行中が勝つ
+    #[test]
+    fn spinner_beats_background_pill() {
+        let text = screen_with_footer(
+            "✶ Boondoggling… (6s · ↓302 tokens)",
+            "⏵⏵ bypass permissions on · 1 shell · ← 8 agents",
+        );
+        assert!(has_background_work(&text));
+        assert_eq!(detect_status(&text), ClaudeStatus::Busy);
+    }
+
+    // 完了行の "1 shell still running" は会話に残る文字。フッターに札が無ければ
+    // (= 裏の仕事は終わっている) こちらの番
+    #[test]
+    fn stale_still_running_line_is_not_background() {
+        let text = screen_with_footer(
+            "● started\n\n✻ Sautéed for 3s · done 18:08 · 1 shell still running",
+            "⏵⏵ bypass permissions on (shift+tab to cycle) · ← 8 agents       /rc",
+        );
+        assert!(!has_background_work(&text));
+        assert_eq!(detect_status(&text), ClaudeStatus::NeedsAttention);
+    }
+
+    // 本文 (罫線より上) にフッターそっくりの文字があっても当たらない
+    #[test]
+    fn pill_text_above_the_input_box_is_not_background() {
+        let text = screen_with_footer(
+            "フッターは次の形:\n  ⏵⏵ bypass permissions on · 1 shell · ← 8 agents",
+            "⏵⏵ bypass permissions on · ← 8 agents",
+        );
+        assert!(!has_background_work(&text));
+    }
+
+    // 札ではないもの: ずっと出る見張り・本体の後片付け・エージェント一覧の案内・
+    // 完全一致しない文字
+    #[test]
+    fn non_pill_footer_text_is_not_background() {
+        for footer in [
+            "⏵⏵ bypass permissions on · 1 Artifact comment monitor",
+            "⏵⏵ bypass permissions on · saving memories",
+            "⏵⏵ bypass permissions on · dreaming",
+            "⏵⏵ bypass permissions on · ← 8 agents",
+            "⏵⏵ bypass permissions on · 8 agents",
+            "⏵⏵ bypass permissions on · 1 shell still running",
+            "⏵⏵ bypass permissions on · shell",
+            "⏵⏵ bypass permissions on · 1 shellfish",
+            "⏵⏵ bypass permissions on · v1 shell",
+            "⏵⏵ bypass permissions on · 1 shell, done",
+            "⏵⏵ bypass permissions on",
+            "",
+        ] {
+            let text = screen_with_footer("● started", footer);
+            assert!(!has_background_work(&text), "{footer}");
+            assert_eq!(
+                detect_status(&text),
+                ClaudeStatus::NeedsAttention,
+                "{footer}"
+            );
+        }
+    }
+
+    // 入力欄 (罫線) が無い画面 = 許可ダイアログなど。札の文字があっても見ない
+    #[test]
+    fn no_input_box_is_not_background() {
+        for text in [
+            "Do you want to proceed?\n❯ 1. Yes\n  2. No\n  ⏵⏵ bypass permissions on · 1 shell",
+            "a ─ b\n  1 shell",
+            "a ── b\n  1 shell",
+        ] {
+            assert!(!has_background_work(text), "{text}");
+            assert_eq!(detect_status(text), ClaudeStatus::NeedsAttention, "{text}");
+        }
+    }
+
+    // 下枠が幅いっぱいで、フッターの行と改行なしでつながっていても拾う
+    #[test]
+    fn rule_joined_with_footer_line_is_background() {
+        let rule = "─".repeat(72);
+        let text =
+            format!("● started\n{rule}❯ \n{rule}  ⏵⏵ bypass permissions on · 1 shell · ← 8 agents");
+        assert_eq!(detect_status(&text), ClaudeStatus::Background);
+    }
+
+    // 上枠の右端にセッション名の札が付いていても、下枠より後ろだけを見る
+    // (2026-11-14 のゆうさんのスクショの形)
+    #[test]
+    fn labelled_top_rule_does_not_hide_the_footer() {
+        let rule = "─".repeat(72);
+        let top = format!("{} tune-question-intonation-samples ─", "─".repeat(40));
+        let footer = "  ⏵⏵ bypass permissions on · 1 shell · ⧉ index · ← 8 agents          ✔Update installed · Restart to update";
+        let text = format!(
+            "✻ Crunched for 1m 25s · done 17:44 · 1 shell still running\n\n{top}\n❯ \n{rule}\n{footer}\n{:>70}\n",
+            "/rc"
+        );
+        assert_eq!(detect_status(&text), ClaudeStatus::Background);
+    }
+
     // ---- aggregate_status ----
+
+    // 裏で実行中は shell より上、実行中・対応待ちより下 (順序非依存)
+    #[test]
+    fn aggregate_background_ranks_between_idle_and_busy() {
+        assert_eq!(
+            aggregate_status([ClaudeStatus::Idle, ClaudeStatus::Background]),
+            ClaudeStatus::Background
+        );
+        assert_eq!(
+            aggregate_status([ClaudeStatus::Busy, ClaudeStatus::Background]),
+            ClaudeStatus::Busy
+        );
+        assert_eq!(
+            aggregate_status([ClaudeStatus::Background, ClaudeStatus::Busy]),
+            ClaudeStatus::Busy
+        );
+        assert_eq!(
+            aggregate_status([ClaudeStatus::NeedsAttention, ClaudeStatus::Background]),
+            ClaudeStatus::NeedsAttention
+        );
+    }
 
     // 空イテレータは Idle
     #[test]
@@ -312,6 +617,12 @@ mod tests {
         assert_eq!(status_marker(ClaudeStatus::Busy), "🟢");
     }
 
+    // 裏で実行中は青の丸
+    #[test]
+    fn marker_background_is_blue_circle() {
+        assert_eq!(status_marker(ClaudeStatus::Background), "🔵");
+    }
+
     // 対応待ちはオレンジの四角
     #[test]
     fn marker_attention_is_yellow_square() {
@@ -324,11 +635,12 @@ mod tests {
         assert_eq!(status_marker(ClaudeStatus::Idle), "");
     }
 
-    // 両マーカーは表示幅 2 (従来の 🟩 と同じ・タブ幅計算の前提)
+    // どのマーカーも表示幅 2 (従来の 🟩 と同じ・タブ幅計算の前提)
     #[test]
     fn markers_are_width_two() {
         use unicode_width::UnicodeWidthStr;
         assert_eq!("🟢".width(), 2);
+        assert_eq!("🔵".width(), 2);
         assert_eq!("🟨".width(), 2);
     }
 
@@ -402,6 +714,13 @@ mod tests {
 }
 
 // Version History
+// - ver1.6 (2026-11-14): 3 つ目の状態 Background (🔵 裏で実行中) を追加 (ユーザー決定)。
+//   返答が終わるとスピナー行が消え、裏でシェルやエージェントが動いていても 🟨 に
+//   なっていた。has_background_work がフッター (最後の罫線より後ろ) の札
+//   "1 shell" / "2 local agents" / "3 background tasks" … を見る。完了行の
+//   "· 1 shell still running" は会話に残る文字なので使わない。優先度は
+//   NeedsAttention > Busy > Background > Idle。テスト文字列は CCNEST_STATUS_TRACE
+//   (app.rs) で取った claude v2.1.325 の実物
 // - ver1.5 (2026-11-09): has_spinner_timer が実物のスピナー行を拾えていなかったのを修正。
 //   `…` と `(` の間の空白を許し、経過時間を `<n>h <n>m <n>s` (60 秒超で分・1 時間超で時)
 //   まで受ける (elapsed_time_prefix)。v0.1.31〜33 は `…(` 直結かつ秒だけだったので

@@ -380,7 +380,9 @@ impl App {
         // 日本語タブ名の生成 (claude -p) は、再開待ちのタブを開き終えてから。
         // claude を並行起動して ~/.claude.json を同時に書かないため。
         let resumes_done = self.pending_resumes.is_empty();
-        for pane in self.panes.values_mut() {
+        // 開発用 (CCNEST_STATUS_TRACE): 判定結果と、判定に使った画面テキストを控える。
+        let mut trace = status_trace_path().map(|_| String::new());
+        for (id, pane) in self.panes.iter_mut() {
             pane.session.refresh();
             if !pane.claude_running {
                 // shell ペインに状態色・タスク名は出さない
@@ -403,7 +405,16 @@ impl App {
             // 判定しない (前回の状態を据え置き、最下部へ戻った次の tick で
             // 回復する)。
             if screen.scrollback() == 0 {
-                pane.status = detect_status(&screen.contents());
+                let text = screen.contents();
+                pane.status = detect_status(&text);
+                if let Some(t) = trace.as_mut() {
+                    t.push_str(&format!(
+                        "=== pane {id} status={:?} ===
+{text}
+",
+                        pane.status
+                    ));
+                }
             }
             let title_task = sanitize_task(screen.title());
             drop(p);
@@ -425,6 +436,9 @@ impl App {
                 title_task,
                 info.task.as_deref(),
             );
+        }
+        if let (Some(path), Some(text)) = (status_trace_path(), trace) {
+            write_status_trace(path, &text);
         }
         // ブランチは TTL キャッシュ。現存ペインの cwd だけで作り直す = 閉じた
         // ペインの分は自然に落ちる。TTL 内のエントリは引き継ぎ、切れた分だけ
@@ -746,6 +760,31 @@ fn direction_score(from: &Rect, to: &Rect, dir: Direction) -> Option<i64> {
 /// 再探索すべき cwd 列) を決める。閉じたペインの cwd は引き継がれず自然に落ち、
 /// 重複 cwd は 1 回だけ再探索する。`App` 非依存 (実 PTY spawn なし) で単体テスト
 /// 可能にするため探索そのもの (`git::branch_of`) は呼び出し側で行う。
+/// 開発用: `CCNEST_STATUS_TRACE=<path>` のとき、2 秒 tick ごとに Claude ペインの
+/// 判定結果と、判定に使った画面テキスト (vt100 の contents) を `<path>` に書く。
+/// 状態判定のテスト文字列を実物から起こすため (v0.1.31〜33 は conhost 越しに
+/// 読んで空白が潰れた文字列でテストを書き、実物に一度も当たらなかった)。
+/// 未設定なら OnceLock の判定だけ。
+fn status_trace_path() -> Option<&'static Path> {
+    use std::sync::OnceLock;
+    static PATH: OnceLock<Option<PathBuf>> = OnceLock::new();
+    PATH.get_or_init(|| {
+        std::env::var_os("CCNEST_STATUS_TRACE")
+            .filter(|v| !v.is_empty())
+            .map(PathBuf::from)
+    })
+    .as_deref()
+}
+
+/// 読む側が書きかけを見ないよう、隣の一時ファイルに書いてから置き換える。
+fn write_status_trace(path: &Path, text: &str) {
+    let mut tmp = path.as_os_str().to_owned();
+    tmp.push(".tmp");
+    if std::fs::write(&tmp, text).is_ok() {
+        let _ = std::fs::rename(&tmp, path);
+    }
+}
+
 fn plan_branch_refresh(
     cwds: &[PathBuf],
     cache: &BranchCache,
@@ -999,3 +1038,7 @@ mod tests {
 //                        skipping ones already open here or without a
 //                        session log in this window's folder, and writes
 //                        the reply file.
+// ver0.13 - 2026-11-14 - detect_status can return Background (🔵). Dev aid
+//                        CCNEST_STATUS_TRACE=<path>: every 2 s tick writes each
+//                        Claude pane's status and the screen text it was judged
+//                        from (source of the real strings in status.rs tests).
