@@ -5,6 +5,55 @@
 
 ---
 
+## 2026-11-14 — npm（ccnest-cli）の公開を Trusted Publishing（OIDC）に切り替え
+
+ブランチ: `claude/npm-trusted-publishing`（11/11 に別セッションが作成）→ `fix/npm-trusted-publishing` として main にマージ
+
+### 背景
+
+npm の `ccnest-cli` が 0.1.3（2026-04-27）のまま止まっていた。GitHub の secret `NPM_TOKEN`（2026-04-26 登録）が期限切れで、v0.1.22／24／30／35 のタグ push は 4 回とも `publish-npm` だけ `E404 Not Found - PUT https://registry.npmjs.org/ccnest-cli` で落ちていた（npm は認証失敗を 404 で返す）。公式サイトの導入手順は `npm install -g ccnest-cli` なので、そこから入れた人には 7 か月前の版が入っていた。
+
+トークンを作り直してもまた期限で切れる。npm 側も「2FA を迂回するトークンは制限していく」と告知しているので、トークンをやめて OIDC にした。
+
+### 変更点（`.github/workflows/release.yml` だけ。Rust のコードと version は変えていない）
+
+| 箇所 | 内容 |
+|---|---|
+| `publish-npm` の権限 | `permissions: id-token: write`・`contents: read` を追加。`NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}` を削除 |
+| Node | 20 → 24。続けて `npm install -g npm@latest`（Trusted Publishing は npm 11.5.1 以上・Node 22.14 以上が要る） |
+| 入力 `npm_publish_tag` | `workflow_dispatch` に追加。Release がすでにあるタグを指定すると、ビルドせず npm だけ出し直す。失敗した run の再実行はタグ時点の古い workflow で動くので、main の workflow から出し直す道が要った |
+| `publish-npm` の条件 | タグ push で `checksums` が成功、または `npm_publish_tag` 指定の手動実行（`!cancelled() && (…)`） |
+| checkout | `RELEASE_TAG`（入力のタグ、無ければ push されたタグ）を checkout するので、`npm/` の中身はそのタグのもの |
+| Release の確認 | publish の前に `releases/download/<tag>/` の `ccnest-windows-x64.exe` と `checksums.txt` があるか確かめる（postinstall が同じ版の Release から exe を落とすため。Release の無い版を npm に出さない） |
+| `build` | `npm_publish_tag` 指定のときは回さない |
+
+### npm 側の設定（npmjs.com → ccnest-cli → Settings → Trusted Publisher）
+
+- Publisher: GitHub Actions ／ `mitama987` / `ccnest` ／ Workflow filename: `release.yml` ／ Environment: なし
+- Allowed actions: `npm publish` を許可（`npm stage publish` は常に許可）。`npm dist-tag` は不許可
+- この接続の必須項目はあとから変えられない（変えるときは消して作り直す）
+- 登録にはアカウントの 2 段階認証が要る（このとき有効にした）
+
+### 使い方
+
+- ふだん: これまでどおり `vX.Y.Z` のタグを push すれば、Release と npm の両方が出る
+- 既存タグを npm にだけ出し直す: `gh workflow run release.yml -R mitama987/ccnest --ref main -f npm_publish_tag=vX.Y.Z`
+
+### 確認
+
+- 登録前の試し実行（run 43570426250）: Release の確認・`npm version 0.1.35` までは通り、publish だけ E404（未登録なので想定どおり）
+- 登録後（run 43571389832）: success。`+ ccnest-cli@0.1.35`、provenance 付き（sigstore logIndex 3872792419）。node v24.22.2・npm 12.2.2
+- レジストリへの反映は publish の約 1 分半後（直後の `npm view` はまだ 0.1.3 を返す。「Your package is being processed」と出る）
+- `npm view ccnest-cli version` → `0.1.35`
+- 実際に入れて確認（PATH の `ccnest` には触らず、一時フォルダへ `npm install ccnest-cli@latest --prefix <一時フォルダ>`）: `Downloading ccnest v0.1.35 for win32-x64...` → `Checksum verified.` → `ccnest v0.1.35 installed.`。落ちてきた `bin/ccnest.exe` は 5,979,648 バイトで、SHA-256 `c013bd11…23ed8` が Release の `ccnest-windows-x64.exe.sha256` と一致
+
+### 残り
+
+- タグ push からの自動公開（`build` → `checksums` → `publish-npm` の順）は、次のタグ（v0.1.36 以降）で初めて通る。今回確かめたのは手動の出し直しの道
+- secret `NPM_TOKEN` は使わなくなった（期限切れのまま残っている）
+
+---
+
 ## 2026-11-11 — 動いている窓にタブを足す `ccnest --add`（v0.1.35）
 
 ブランチ: `feature/add-tab-remote`
