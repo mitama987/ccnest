@@ -5,6 +5,54 @@
 
 ---
 
+## 2026-11-14 — 裏で実行中のタブに 🔵（v0.1.36）
+
+ブランチ: `feature/background-marker`
+
+### 背景
+
+返答が終わるとスピナー行（`… (2m 24s`）が消えるので、裏でシェル（レンダーなど）やエージェントが動いていてもタブは 🟨（対応が必要）になっていた。実際には何もしなくてよい（終われば Claude に通知が届いて自分で続きを始める）ので、🟨 の意味が薄まっていた。
+
+ゆうさんの決定（2026-11-14）: 🟢 に混ぜず **🔵 の別マーカー**にする。裏に dev サーバーを置いたままのタブが「実行中」と見分けられなくなるため。マーカーは 🟢 実行中／🔵 裏で実行中／🟨 対応が必要 の 3 つ。
+
+### 調べたこと（Claude Code v2.1.325 の本体）
+
+- 裏で動いているものは、入力欄の下のフッターに札で出る: `  ⏵⏵ bypass permissions on · 1 shell · ← 8 agents          /rc`
+- 札の文言は本体の 1 つの関数が作る: `1 shell`／`N shells`、`1 monitor`、`1 shell, 1 monitor`、`1 local agent`、`1 team`、`1 background dynamic workflow`、`1 MCP task`、`<記号> 1 cloud session`、`<記号> 1 remote dynamic workflow`、種類が混ざると `N background tasks`
+- 完了行 `✻ Sautéed for 3s · done 18:08 · 1 shell still running` にも同じ文言が出るが、こちらは会話に残る文字。判定には使わない
+- `← 8 agents` は札ではない（エージェント一覧への案内）
+
+### 変更点
+
+| ファイル | 内容 |
+|---|---|
+| `src/pane/status.rs` ver1.6 | `ClaudeStatus::Background`・`has_background_work`（最後の罫線 `─`×3 以上より後ろ＝フッターを ` · ` と空白 2 個以上で区切り、1 つが札の文言と完全一致）・`detect_status` はスピナー行 → Busy／札 → Background／どちらも無い → NeedsAttention・`aggregate_status` は NeedsAttention > Busy > Background > Idle・`status_marker` に 🔵 |
+| `src/app.rs` ver0.13 | 開発用 `CCNEST_STATUS_TRACE=<path>`: 2 秒 tick ごとに、Claude ペインの判定結果と判定に使った画面の文字を書く |
+| `src/sidebar/panelist.rs` ver0.5・`src/ui/mod.rs` ver0.18 | 表示は `status_marker` に追従（コードはコメントとテストだけ） |
+| `scripts/e2e/background-marker.ps1` | 新規。WT の新しい窓に使い捨て ccnest → 本物の claude に裏で sleep を走らせる → 4 場面の判定とスクショ |
+
+🔵 にしないもの: `1 Artifact comment monitor`（アーティファクト公開後ずっと出る見張り）、`dreaming`／`saving memories`／`memory import`／`auto-mode scan`（本体の後片付け）。
+
+### はまった所
+
+- **罫線の行で切れない**: vt100 の `contents()` は幅いっぱいの行を次の行と改行なしでつなぐことがある（実測 `────…────❯ `）。「罫線だけの行」を探すと外れるので、最後の `─` の位置で切る
+- **テスト文字列は実物から**: v0.1.31〜33 は conhost 越しに読んだ（空白が潰れた）文字列でテストを書いて 3 回外した。今回は `CCNEST_STATUS_TRACE` で vt100 の文字をそのまま取り、`REAL_BACKGROUND_SCREEN`／`REAL_DONE_SCREEN` としてテストに入れた
+- **WT は環境変数を引き継がないことがある**: E2E は窓の中で `run.cmd` を走らせて環境変数を決める。既定は plan モードで裏のコマンドを走らせないので `CCNEST_CLAUDE_PERMISSION_MODE=off`
+- **PrintWindow が真っ黒（約 2 KB）を返すことがある**: 窓が最小化されたとき。`ShowWindow(SW_SHOWNOACTIVATE)` で戻して撮り直す
+
+### 確認
+
+- `cargo fmt --all`・`cargo clippy --all-targets -- -D warnings`・`cargo test --all`（lib 387 件）
+- `scripts/e2e/background-marker.ps1`: PASS。入力待ち NeedsAttention（🟨）→ 返答中 Busy（🟢）→ 返答が終わって `1 shell` の札 Background（🔵）→ 裏の sleep が終わって NeedsAttention（🟨）。スクショで 🔵 と 🟨 を目視
+
+### 残る制限
+
+- 裏が動いている間に Claude が文章で質問して返答を終えた場合も 🔵（画面からは区別できない）。許可ダイアログは入力欄ごとフッターが消えるので 🟨
+- ペインが狭くてフッターの札が切れると 🟨（今までどおりの側に倒れる）
+- 札の文言が Claude Code の版で変わると 🟨 に戻る。そのときは `BACKGROUND_NOUNS` に足す
+
+---
+
 ## 2026-11-14 — npm（ccnest-cli）の公開を Trusted Publishing（OIDC）に切り替え
 
 ブランチ: `claude/npm-trusted-publishing`（11/11 に別セッションが作成）→ `fix/npm-trusted-publishing` として main にマージ

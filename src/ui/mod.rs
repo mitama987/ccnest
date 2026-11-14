@@ -1653,3 +1653,7 @@ mod tests {
 //                        tint are removed. Panes rows carry the same marker via
 //                        PaneRow::display. Pane frame colours are unchanged.
 // ver0.17 - 2026-11-09 - Your-turn marker is 🟨 again (was 🟧 in ver0.16).
+// ver0.18 - 2026-11-14 - Third tab marker 🔵 (ClaudeStatus::Background: the reply
+//                        ended but a background shell / agent is still running),
+//                        via status_marker; a tab folds its panes as
+//                        NeedsAttention > Busy > Background > Idle.

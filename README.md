@@ -170,11 +170,19 @@ its normal colour:
 | Marker | Meaning |
 |---|---|
 | 🟢 | Claude is running (the spinner line with its elapsed time, `✶ Boondoggling… (6s · ↓302 tokens)` or `✢ Metamorphosing… (2m 24s · ↓ 4.4k tokens · …)`, is visible; the older `esc to interrupt` wording is still recognised) |
+| 🔵 | the reply ended but something is still running in the background — the footer under the prompt shows `1 shell`, `2 local agents`, `1 monitor`, `3 background tasks`, … (Claude is notified when it finishes and carries on by itself) |
 | 🟨 | your turn — a question or permission prompt, or the work finished and Claude is waiting for the next instruction |
 | (none) | shell-only tab (no Claude pane) |
 
 A tab with several Claude panes shows 🟨 as soon as one of them is
-waiting for you.
+waiting for you, otherwise 🟢 if any is running, otherwise 🔵.
+
+🔵 is read from the footer only (the text after the prompt box), so a
+tab that keeps a dev server in the background stays 🔵, not 🟢. If Claude
+ends its reply with a question in plain text while a background job is
+still running, the tab is 🔵 as well; permission prompts hide the footer
+and show 🟨. The always-on `Artifact comment monitor` and Claude Code's
+own housekeeping (`saving memories`, `dreaming`) do not count.
 
 ## Claude launch flags
 
@@ -242,7 +250,7 @@ sections:
   pane's cwd.
 - **Panes** — a list of every pane in the current tab, marking the active
   one and whether Claude is running. When a task is known the row shows
-  `— <task>` in full; Claude rows start with the same 🟢 / 🟨 marker as
+  `— <task>` in full; Claude rows start with the same 🟢 / 🔵 / 🟨 marker as
   the tab bar.
 
 The selection cursor is a solid white reversed block (`bg=white`,
@@ -306,3 +314,4 @@ ver0.1.32 - 2026-11-08 - Shift+Enter inserts a newline in the Claude prompt agai
 ver0.1.33 - 2026-11-09 - The "your turn" tab marker is 🟨 (yellow square, the colour used up to v0.1.30) instead of 🟧; meaning and detection are unchanged.
 ver0.1.34 - 2026-11-09 - Running detection fixed: the spinner line is `… (2m 24s · …)` — a space between `…` and `(`, and minutes/hours once the reply passes 60 s / 1 h — so the v0.1.31 matcher (`…(` glued, seconds only) never fired and every working tab stayed 🟨. `has_spinner_timer` now allows the space and `<n>h <n>m <n>s`. E2E `scripts/e2e/status-marker.ps1` uses the same pattern; `scripts/e2e/status-marker-wt.ps1` screenshots a disposable ccnest in a new Windows Terminal window (PrintWindow) so the emoji itself can be checked.
 ver0.1.35 - 2026-11-11 - `ccnest --add [--to <pid>] --resume <session-id>[=<tab name>] ...` adds tabs to a ccnest window that is already running instead of starting a new one. The request is a small JSON file dropped into `%APPDATA%\ccnest\requests\<pid>\`; the window picks it up on its 2 s tick, queues the sessions like startup `--resume` (one tab per tick, active tab untouched) and answers which were opened and which were skipped (already open there, or no conversation log in that window's folder). Panes now get `CCNEST_PID=<pid of their ccnest>`, so the command needs no `--to` when run from inside a tab. E2E `scripts/e2e/add-tab.ps1`.
+ver0.1.36 - 2026-11-14 - Third tab marker 🔵: the reply has ended but something is still running in the background. When a reply ends the spinner line disappears, so a tab waiting on a background shell or agent used to show 🟨 (your turn) although nothing was needed from you. ccnest now reads the footer under the prompt box (the text after the last `─` rule) and shows 🔵 when it carries a background pill — `1 shell`, `2 local agents`, `1 shell, 1 monitor`, `3 background tasks`, `1 team`, `1 background dynamic workflow`, `1 MCP task`, `◇ 1 cloud session` (wording from Claude Code v2.1.325). The done line `… · 1 shell still running` is not used: it is transcript text and can stay on screen after the job has finished. A tab folds its panes as 🟨 > 🟢 > 🔵. A separate marker rather than 🟢 so that a tab that merely keeps a dev server in the background is not mistaken for one that is working (user decision). Dev aid `CCNEST_STATUS_TRACE=<path>` writes each Claude pane's status and the screen text it was judged from on every 2 s tick; the test strings come from it. E2E `scripts/e2e/background-marker.ps1`.
