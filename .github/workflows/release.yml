@@ -10,10 +10,16 @@ on:
         description: 'Dry-run tag (artifacts only, no GitHub Release). Leave empty to skip.'
         required: false
         default: ''
+      npm_publish_tag:
+        description: 'npm だけ公開し直す既存のタグ（例: v0.1.30）。GitHub Release が既にあるタグを指定。空ならビルドだけ'
+        required: false
+        default: ''
 
 jobs:
   build:
     name: Build ${{ matrix.target }}
+    # npm だけの公開し直し（npm_publish_tag 指定）ではビルドしない
+    if: ${{ inputs.npm_publish_tag == '' }}
     runs-on: ${{ matrix.os }}
     permissions:
       contents: write
@@ -116,25 +122,48 @@ jobs:
   publish-npm:
     name: Publish ccnest-cli to npm
     needs: [build, checksums]
-    if: startsWith(github.ref, 'refs/tags/v')
+    # タグ push のリリース、または npm_publish_tag 指定の手動実行（既存タグの npm だけ公開し直す）
+    if: >-
+      ${{ !cancelled() && (
+        (startsWith(github.ref, 'refs/tags/v') && needs.checksums.result == 'success') ||
+        (github.event_name == 'workflow_dispatch' && inputs.npm_publish_tag != '')
+      ) }}
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write   # npm Trusted Publishing（OIDC）。NPM_TOKEN は使わない
+    env:
+      RELEASE_TAG: ${{ inputs.npm_publish_tag != '' && inputs.npm_publish_tag || github.ref_name }}
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ env.RELEASE_TAG }}
 
       - uses: actions/setup-node@v4
         with:
-          node-version: '20'
+          node-version: '24'
           registry-url: 'https://registry.npmjs.org'
+
+      # Trusted Publishing は npm 11.5.1 以上が必要
+      - name: Update npm
+        run: npm install -g npm@latest && npm --version
+
+      - name: Check GitHub Release assets exist
+        # postinstall は releases/download/<tag>/ から exe と checksums.txt を落とすので、無いタグは公開しない
+        run: |
+          case "${RELEASE_TAG}" in v*) ;; *) echo "tag must start with v: ${RELEASE_TAG}"; exit 1;; esac
+          for f in ccnest-windows-x64.exe checksums.txt; do
+            curl -fsSL -r 0-0 -o /dev/null "https://github.com/${GITHUB_REPOSITORY}/releases/download/${RELEASE_TAG}/${f}" \
+              || { echo "missing release asset: ${RELEASE_TAG}/${f}"; exit 1; }
+          done
 
       - name: Sync npm package version with git tag
         working-directory: npm
         run: |
-          TAG="${GITHUB_REF#refs/tags/v}"
-          echo "Setting ccnest-cli version to ${TAG}"
-          npm version "${TAG}" --no-git-tag-version --allow-same-version
+          VERSION="${RELEASE_TAG#v}"
+          echo "Setting ccnest-cli version to ${VERSION}"
+          npm version "${VERSION}" --no-git-tag-version --allow-same-version
 
       - name: Publish to npm
         working-directory: npm
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
         run: npm publish --access public
