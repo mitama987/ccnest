@@ -23,7 +23,7 @@
 | `src/claude/jp_title.rs` ver0.2 | `SYSTEM_PROMPT` を作り直し: 目安は全角 6 文字（以前は 8）・対象（製品名・固有名詞）を必ず入れる・「再開」「続き」「修正」「確認」など動作だけの名前を禁止・「続きから」「進めて」「まだだめ」のような内容の無い依頼は無視・長いカタカナ語は言い換え。`PROMPT_VERSION`（`p2`）を保存キーの末尾に足し、古い文面で作った名前を作り直させる |
 | `src/ui/mod.rs` ver0.20 | `TAB_LABEL_MAX` 20 → 16 セル（`NN:` ＋ 全角 6 文字が切れない幅）|
 | `scripts/dev/try_title_prompt.py` | ソースの `SYSTEM_PROMPT` を読み、本体と同じ呼び方（`claude -p --model haiku`・設定やツール無し）でサンプル 12 件を言い換えて幅を出す |
-| `scripts/e2e/background-marker.ps1` | `-Agent` の指示を `Start-Sleep`（PowerShell ツール）に。`sleep 60` はフォアグラウンドだと Bash ツールに止められ、エージェントが 4 秒で終わっていた |
+| `scripts/e2e/background-marker.ps1` | `-Agent` でエージェントにさせる仕事を `ping -n <秒> 127.0.0.1` に（`sleep 60` も `Start-Sleep` も、フォアグラウンドの「待つだけのコマンド」としてツールに止められ、エージェントが 4 秒で終わっていた）。待ち中のスクショを判定の直後に撮る。`-Model`（既定 `sonnet`）を `ANTHROPIC_MODEL` で渡す＝使い捨ての claude が本人の既定モデル（Fable）の週の枠を 1 回で約 1% 使っていたため |
 | `README.md`・`Cargo.toml`／`Cargo.lock` | 説明・0.1.41 |
 
 ### プロンプトの試行（Haiku・同じ 12 件）
