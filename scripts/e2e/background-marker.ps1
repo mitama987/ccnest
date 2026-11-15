@@ -10,6 +10,9 @@
 # 各場面の画面の文字は $OutDir の trace-*.txt に残す (単体テストの文字列の出どころ)。
 # -Agent (v0.1.39): 裏のシェルの代わりに「裏のエージェント」で同じ 4 場面を見る。この場面は
 #   フッターに札が出ず、入力欄のすぐ上に "Waiting for 1 background agent to finish" が出る。
+# -Decision (v0.1.42): 裏のシェルを動かしたまま、返答を「▼ ゆうさんの判断待ち」の節で終わらせる。
+#   中身あり → NeedsAttention (🟨)、次の返答が「今はなし」→ Background (🟢) を見る。
+#   シェルが 2 回の返答のあいだ動いているよう、-SleepSec は 150 くらいにする。
 # ゆうさんの ccnest には触らない。Claude に 1 回だけ短い指示を送る (プラン利用量をごく僅かに使う)。
 # 起動フォルダは信頼済みのリポ配下 target/ に作る (新しい一時フォルダだと信頼ダイアログが出る)。
 param(
@@ -17,6 +20,7 @@ param(
   [string]$OutDir = (Join-Path $env:TEMP 'ccnest-e2e-background-marker'),
   [int]$SleepSec = 60,
   [switch]$Agent,
+  [switch]$Decision,
   # 使い捨ての claude に使わせるモデル。既定のまま (本人の設定) だと上位モデルの週の枠を
   # 1 回で約 1% 使うので、判定の確認には軽いモデルで足りる。
   [string]$Model = 'sonnet'
@@ -166,7 +170,40 @@ try {
   if ($cl -and ($cl.CommandLine -match '--session-id\s+([0-9a-f-]{36})')) { $sessionId = $Matches[1] }
   "claude session: $sessionId"
 
-  if ($Agent) {
+  if ($Decision) {
+  # 返答の文面はファイルから読ませる (日本語をキー入力で送らないため)。
+  $utf8 = New-Object Text.UTF8Encoding $false
+  $HEAD = 'ゆうさんの判断待ち'
+  $ITEM = 'マーク: A か B のどれにするか'
+  $NONE = '今はなし'
+  [IO.File]::WriteAllText((Join-Path $work 'reply1.txt'), "▼ $HEAD`n・$ITEM`n", $utf8)
+  [IO.File]::WriteAllText((Join-Path $work 'reply2.txt'), "▼ $HEAD`n・$NONE`n", $utf8)
+  $quiet = { param($t) ($t -notmatch $SPIN) -and ($t -notmatch $BARE_SPIN) -and $t.Contains($PROMPT) }
+
+  # 2. 裏のシェルを動かしたまま、返答が「判断待ち (中身あり)」で終わる → こちらの番
+  Type-Line $cc.Id "Use a shell tool with run_in_background set to true to run the command ping -n $SleepSec 127.0.0.1. Do not wait for it and do not check its output. Then read the file reply1.txt in the current folder and reply with exactly its contents and nothing else."
+  $t = Wait-Trace { param($t) (& $quiet $t) -and ((Footer $t) -match '\b1 shell\b') -and $t.Contains($ITEM) } 120
+  Shot $hwnd 'background-marker-2-decision.png'
+  Save $t 'trace-2-decision.txt'
+  Check ([bool]$t) "reply ended with the decision section while '1 shell' is in the footer"
+  if ($t) {
+    "  footer: " + ((Footer $t) -split "`n" | Where-Object { $_ -match 'shell' } | Select-Object -First 1).Trim()
+    "  status (decision pending): $(Status $t)"
+    Check ((Status $t) -eq 'NeedsAttention') 'status is NeedsAttention: a decision is pending although a background shell runs'
+  }
+
+  # 3. 次の返答の判断待ちが「今はなし」→ 裏で実行中に戻る (シェルはまだ動いている)
+  Type-Line $cc.Id "Read the file reply2.txt in the current folder and reply with exactly its contents and nothing else."
+  $t = Wait-Trace { param($t) (& $quiet $t) -and $t.Contains($NONE) } 120
+  Shot $hwnd 'background-marker-3-none.png'
+  Save $t 'trace-3-none.txt'
+  Check ([bool]$t) "reply ended with the decision section saying none"
+  if ($t) {
+    Check ((Footer $t) -match '\b1 shell\b') "the background shell is still running ('1 shell' in the footer)"
+    "  status (no decision): $(Status $t)"
+    Check ((Status $t) -eq 'Background') 'status is Background: nothing to decide, the background shell still runs'
+  }
+  } elseif ($Agent) {
   # 2. 返答中
   Type-Line $cc.Id "Use the Agent tool with run_in_background set to true to start one general-purpose agent. Its only job is to run the shell command ping -n $SleepSec 127.0.0.1 once in the foreground (not in the background), wait for it to end and then answer done. Do not wait for the agent and do not check on it. Then reply with only the word started."
   $t = Wait-Trace { param($t) ((Status $t) -eq 'Busy') -or (Waiting-Is-Last $t) } 90
