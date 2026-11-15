@@ -7,6 +7,10 @@ pub struct Theme {
     pub border_claude: Style,
     pub tab_active: Style,
     pub tab_inactive: Style,
+    /// ドラッグで引いている最中の (浮いた) タブ。前面のタブと同じ白帯にする:
+    /// オレンジの帯だと状態マーカー 🟨 が背景に溶けて見えない (実機で確認)。
+    /// 浮いていることは、ほかのタブの上に重なって動くことで伝わる。
+    pub tab_floating: Style,
     pub section_active: Style,
     pub section_inactive: Style,
     pub hint: Style,
@@ -54,6 +58,10 @@ pub fn default_theme() -> Theme {
             .bg(Color::White)
             .add_modifier(Modifier::BOLD),
         tab_inactive: Style::default().fg(Color::Gray),
+        tab_floating: Style::default()
+            .fg(Color::Black)
+            .bg(Color::White)
+            .add_modifier(Modifier::BOLD),
         section_active: Style::default()
             .fg(Color::Black)
             .bg(Color::White)
@@ -111,3 +119,6 @@ pub fn default_theme() -> Theme {
 // ver0.6 - 2026-11-08 - Removed the Claude pane status colours
 //                       (status_busy / status_attention / status_done): the
 //                       state is shown by the tab marker emoji only.
+// ver0.7 - 2026-11-15 - Added tab_floating for the tab being dragged in the
+//                       tab bar: the same white band as tab_active (an orange
+//                       band hid the 🟨 status marker).

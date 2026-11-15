@@ -31,6 +31,9 @@ pub fn run_event_loop<B: Backend>(term: &mut Terminal<B>, mut app: App) -> Resul
     let echo_window = env_ms("CCNEST_ECHO_WINDOW_MS", 100);
     let mut last_refresh = Instant::now();
     let mut last_auto_scroll = Instant::now();
+    // タブのすべりを描き直す間隔 (約 60fps。Windows のタイマー分解能 15.6ms と同程度)。
+    let tab_anim_interval = Duration::from_millis(16);
+    let mut last_tab_anim = Instant::now();
     let refresh_every = Duration::from_secs(2);
     let mut pane_rects: HashMap<PaneId, Rect> = HashMap::new();
     let mut sidebar_file_rect: Option<Rect> = None;
@@ -124,12 +127,26 @@ pub fn run_event_loop<B: Backend>(term: &mut Terminal<B>, mut app: App) -> Resul
             input_dirty = true;
         }
 
+        // タブのすべり (ドラッグで押しのけられた／離されて収まる): 途中のタブが
+        // あるあいだだけ、約 16ms ごとに描き直す。終わったすべりはここで片付け、
+        // 最後の 1 回で定位置に描いて止まる (以降は起こされるまで何もしない)。
+        if app.has_tab_slides() && last_tab_anim.elapsed() >= tab_anim_interval {
+            app.expire_tab_slides(Instant::now());
+            last_tab_anim = Instant::now();
+            dirty = true;
+            input_dirty = true;
+        }
+
         // 入力 or PTY 出力 or タイムアウトを待つ。出力起因で dirty のときは
         // frame cap の残りだけ待ち、それ以外はアイドル上限まで待つ。
         let wait = if dirty && !echo_exempt {
             min_output_frame.saturating_sub(last_output_draw.elapsed())
         } else if dirty {
             Duration::ZERO
+        } else if app.has_tab_slides() {
+            tab_anim_interval
+                .saturating_sub(last_tab_anim.elapsed())
+                .min(idle_wait)
         } else {
             idle_wait
         };
@@ -1273,12 +1290,27 @@ fn handle_mouse(
     // 並べ替え、Up(Left) で終わり。try_forward より先に取るのは、ポインタが
     // ペインの上まで下がったとき、press の無い Drag/Up がマウスモードの子へ
     // 流れないようにするため。縦位置は見ない (横位置だけで判定)。
-    if let Some(from) = app.tab_drag {
+    if let Some(mut drag) = app.tab_drag {
         match me.kind {
             Drag(MouseButton::Left) => {
+                // 押した桁から動いたら浮かせる (描画がポインタの位置に重ねて描く)。
+                // クリックの手ぶれ (同じ桁の Drag) では浮かせない。
+                drag.pointer_x = mx;
+                if mx != drag.press_x && crate::app::tab_anim_enabled() {
+                    drag.floating = true;
+                }
+                let from = drag.idx;
                 if let Some(to) = tab_drop_target(tab_rects, from, mx) {
+                    // 押しのけられるタブが動く桁数 = 引いているタブの幅 + 区切り 1。
+                    let shift = tab_rects
+                        .iter()
+                        .find(|(_, i)| *i == from)
+                        .map_or(0, |(r, _)| r.w + 1);
                     if app.move_tab(from, to) {
-                        app.tab_drag = Some(to);
+                        if drag.floating {
+                            app.slide_displaced(from, to, shift, Instant::now());
+                        }
+                        drag.idx = to;
                         if input_trace_enabled() {
                             trace_append_line(&format!("move_tab from={from} to={to}"));
                         }
@@ -1288,9 +1320,17 @@ fn handle_mouse(
                         tab_rects.clear();
                     }
                 }
+                app.tab_drag = Some(drag);
                 return;
             }
             Up(MouseButton::Left) => {
+                // 浮いていた位置から、空けてあった定位置へすべらせて収める。
+                // (動かした直後で矩形が無いフレームは、すべらせず定位置に出す。)
+                if drag.floating {
+                    if let Some((fx, slot_x)) = crate::app::float_in_strip(tab_rects, &drag) {
+                        app.settle_tab(drag.idx, fx - slot_x, Instant::now());
+                    }
+                }
                 app.tab_drag = None;
                 return;
             }
@@ -1353,7 +1393,17 @@ fn handle_mouse(
             app.active_tab = i;
             app.selection = None;
             // このまま左右に引けば並べ替え (上の (0.3))。離せばただの切替。
-            app.tab_drag = Some(i);
+            let tab_x = tab_rects
+                .iter()
+                .find(|(_, idx)| *idx == i)
+                .map_or(mx, |(r, _)| r.x);
+            app.tab_drag = Some(crate::app::TabDrag {
+                idx: i,
+                press_x: mx,
+                grab_dx: mx - tab_x,
+                pointer_x: mx,
+                floating: false,
+            });
             return;
         }
         TabMouseAction::Close(i) => {
@@ -5112,3 +5162,10 @@ mod tests {
 //                        back and forth. tab_rects is cleared after each move.
 //                        Up(Left) ends the drag. CCNEST_INPUT_TRACE logs
 //                        "move_tab from=A to=B".
+// ver0.21 - 2026-11-15 - Floating tab drag: Drag(Left) updates
+//                        TabDrag::pointer_x and lifts the tab once the pointer
+//                        leaves the pressed column; after move_tab the tabs it
+//                        passed start sliding (App::slide_displaced) and
+//                        Up(Left) starts the drop from the floating column
+//                        (float_in_strip -> App::settle_tab). The loop redraws
+//                        about every 16 ms only while a tab is sliding.
