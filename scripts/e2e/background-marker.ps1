@@ -7,12 +7,15 @@
 # 文字」を書く開発用ファイル) で行う。conhost 越しの読み取りは空白が潰れるので使わない。
 # 絵文字の見た目は PrintWindow のスクショ (他の窓に隠れていても撮れる) で目視する。
 # 各場面の画面の文字は $OutDir の trace-*.txt に残す (単体テストの文字列の出どころ)。
+# -Agent (v0.1.39): 裏のシェルの代わりに「裏のエージェント」で同じ 4 場面を見る。この場面は
+#   フッターに札が出ず、入力欄のすぐ上に "Waiting for 1 background agent to finish" が出る。
 # ゆうさんの ccnest には触らない。Claude に 1 回だけ短い指示を送る (プラン利用量をごく僅かに使う)。
 # 起動フォルダは信頼済みのリポ配下 target/ に作る (新しい一時フォルダだと信頼ダイアログが出る)。
 param(
   [string]$Exe = (Join-Path $PSScriptRoot '..\..\target\release\ccnest.exe'),
   [string]$OutDir = (Join-Path $env:TEMP 'ccnest-e2e-background-marker'),
-  [int]$SleepSec = 60
+  [int]$SleepSec = 60,
+  [switch]$Agent
 )
 $ErrorActionPreference = 'Stop'
 $typer = Join-Path $PSScriptRoot 'status-marker.ps1'
@@ -114,6 +117,23 @@ function Descendants($id) { Get-CimInstance Win32_Process | Where-Object { $_.Pa
 
 $PROMPT = [string][char]0x276F
 $SPIN = [char]0x2026 + ' *\((\d+h )?(\d+m )?\d+s( |\))'
+# 裏のエージェント待ちの行 (ターン終了の行の差し替え)。
+$WAIT = 'Waiting for \d+ background agents? to finish'
+# 経過秒がまだ付いていないスピナー行 ("* Tinkering…")。
+$BARE_SPIN = '(?m)^\s*\S \S+' + [char]0x2026 + '\s*$'
+# その行が「入力欄のすぐ上の最後の行」か (ccnest の判定と同じ見方)。古い行の下に別の内容が
+# 足されていれば偽。
+function Waiting-Is-Last($t) {
+  $lines = @($t -split "`n")
+  $idx = -1
+  for ($i = 0; $i -lt $lines.Count; $i++) { if ($lines[$i] -match $WAIT) { $idx = $i } }
+  if ($idx -lt 0) { return $false }
+  for ($i = $idx + 1; $i -lt $lines.Count; $i++) {
+    if ($lines[$i].Contains(([string][char]0x2500) * 3)) { return $true }
+    if ($lines[$i].Trim()) { return $false }
+  }
+  return $false
+}
 $cc = $null; $hwnd = [IntPtr]::Zero; $sessionId = $null
 try {
   Start-Process wt.exe -ArgumentList @('-w', 'new', '--size', '110,26', '-d', "`"$work`"", 'cmd.exe', '/c', "`"$runCmd`"")
@@ -141,11 +161,54 @@ try {
   if ($cl -and ($cl.CommandLine -match '--session-id\s+([0-9a-f-]{36})')) { $sessionId = $Matches[1] }
   "claude session: $sessionId"
 
+  if ($Agent) {
+  # 2. 返答中
+  Type-Line $cc.Id "Use the Agent tool with run_in_background set to true to start one general-purpose agent. Its only job is to run the shell command sleep $SleepSec once in the foreground (not in the background), wait for it to end and then answer done. Do not wait for the agent and do not check on it. Then reply with only the word started."
+  $t = Wait-Trace { param($t) ((Status $t) -eq 'Busy') -or (Waiting-Is-Last $t) } 90
+  if ($t -and (Status $t) -eq 'Busy') {
+    Save $t 'trace-2-busy.txt'
+    "  status (replying): Busy"
+    Start-Sleep -Milliseconds 500
+    Shot $hwnd 'background-marker-2-busy.png'
+  } else { "  (reply was too short to catch Busy on a 2 s tick; skipped)" }
+
+  # 3. 返答は終わり、裏のエージェントが動いている: スピナー行が無く、入力欄のすぐ上が待ちの行
+  $t = Wait-Trace { param($t) ($t -notmatch $SPIN) -and (Waiting-Is-Last $t) } 120
+  Save $t 'trace-3-background.txt'
+  Check ([bool]$t) "reply ended with the 'Waiting for 1 background agent to finish' line above the input box"
+  if ($t) {
+    "  line: " + ((($t -split "`n") | Where-Object { $_ -match $WAIT } | Select-Object -Last 1)).Trim()
+    "  footer: " + (((Footer $t) -split "`n") -join ' | ')
+    "  status (background): $(Status $t)"
+    Check ((Status $t) -eq 'Background') 'status is Background while only the background agent runs'
+  }
+  Start-Sleep -Milliseconds 500
+  Shot $hwnd 'background-marker-3-background.png'
+
+  # 4. 裏のエージェントが終わり、通知を受けた返答も終わる: スピナー行が無く、待ちの行が最後ではない
+  #    通知を受けたターンの出だしは経過秒の無いスピナー行 ("* Tinkering…") なので、それも待つ。
+  #    落ち着いたとみなすのは、同じ条件が 6 秒あけて 2 回続いたとき。
+  $settled = { param($t) ($t -notmatch $SPIN) -and ($t -notmatch $BARE_SPIN) -and -not (Waiting-Is-Last $t) -and $t.Contains($PROMPT) -and ((Footer $t) -notmatch '\b(shells?|monitors?)\b') }
+  $deadline = (Get-Date).AddSeconds($SleepSec + 300)
+  $t = $null
+  do {
+    $first = Wait-Trace $settled 20
+    if ($first) { Start-Sleep -Seconds 6; $again = Trace; if (& $settled $again) { $t = $again } }
+  } while (-not $t -and (Get-Date) -lt $deadline)
+  Check ([bool]$t) 'background agent finished (no spinner, the waiting line is no longer the last line)'
+  if (-not $t) { $t = Trace }
+  Save $t 'trace-4-done.txt'
+  "  status (done): $(Status $t)"
+  "  footer: " + (((Footer $t) -split "`n") -join ' | ')
+  "  stale waiting line left on screen: $([bool]($t -match $WAIT))"
+  Check ((Status $t) -eq 'NeedsAttention') 'status is back to NeedsAttention after the background agent finished'
+  Shot $hwnd 'background-marker-4-done.png'
+  } else {
   # 2. 返答中
   Type-Line $cc.Id "Use a shell tool with run_in_background set to true to run the command sleep $SleepSec. Do not wait for it and do not check its output. Then reply with only the word started."
   #    返答が 2 秒 tick より短いと Busy を 1 度も見ないまま終わることがあるので、ここは記録だけ
   #    (🟢 の確認は status-marker-wt.ps1 の役目)。裏のシェルの札が先に出たら次へ進む。
-  $t = Wait-Trace { param($t) ((Status $t) -eq 'Busy') -or ((Footer $t) -match '1 shell') } 60
+  $t = Wait-Trace { param($t) ((Status $t) -eq 'Busy') -or ((Footer $t) -match '\b1 shell\b') } 60
   if ($t -and (Status $t) -eq 'Busy') {
     Save $t 'trace-2-busy.txt'
     "  status (replying): Busy"
@@ -175,6 +238,7 @@ try {
   "  stale 'still running' line left on screen: $([bool]($t -match 'still running'))"
   Check ((Status $t) -eq 'NeedsAttention') 'status is back to NeedsAttention after the background shell finished'
   Shot $hwnd 'background-marker-4-done.png'
+  }
 
   if ($fails -eq 0) { 'PASS' } else { "FAIL ($fails)" }
 } finally {
