@@ -8,8 +8,8 @@
 ///
 /// 「こちらの番」は質問・許可待ちも作業完了後の入力待ちもまとめて
 /// `NeedsAttention` (ユーザー決定 2026-11-08: どちらも自分の対応が要る)。
-/// `Background` は 2026-11-14 に追加 (ユーザー決定: 🟢 に混ぜず別マーカー。
-/// 裏に dev サーバーを置いたままのタブが「実行中」と見分けられなくなるため)。
+/// `Background` は 2026-11-14 に追加。当初は別マーカー 🔵 だったが、2026-11-15 の
+/// ユーザー決定で表示は `Busy` と同じ 🟢 ([`status_marker`])。判定は分けたまま。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum ClaudeStatus {
     /// claude が走っていないペイン (shell)。表示なし。
@@ -17,7 +17,7 @@ pub enum ClaudeStatus {
     Idle,
     /// 実行中 (🟢)。
     Busy,
-    /// 裏で実行中 (🔵): 返答は終わっているが、裏のシェル・エージェントなどが
+    /// 裏で実行中 (表示は実行中と同じ 🟢): 返答は終わっているが、裏のシェル・エージェントなどが
     /// 動いている (終われば Claude に通知が届き、自分で続きを始める)。
     Background,
     /// 自分の対応が必要 (🟨): 質問・許可プロンプト、または作業が終わって
@@ -293,15 +293,16 @@ pub fn aggregate_status(statuses: impl IntoIterator<Item = ClaudeStatus>) -> Cla
 /// タブ先頭に出す状態マーカーの絵文字。唯一の状態シグナル (タブ名の
 /// 文字色は変えない・ユーザー決定 2026-11-08)。
 ///
-/// 実行中は緑の丸、裏で実行中は青の丸、対応待ちはオレンジの四角 (自分の番
-/// だけ形が違う)。🟢 (U+1F7E2)・🔵 (U+1F535)・🟨 (U+1F7E8) は East Asian
-/// Width=Wide で unicode-width=2・
+/// 実行中と裏で実行中は緑の丸、対応待ちはオレンジの四角 (自分の番だけ形が
+/// 違う)。裏で実行中は v0.1.36〜39 では青の丸 🔵 だったが、同じ 🟢 にそろえた
+/// (ユーザー決定 2026-11-15「青の判定時も緑アイコンに」)。判定 ([`ClaudeStatus::
+/// Background`]) は分けたまま残してあるので、また分けるときはここの絵文字だけ変える。
+/// 🟢 (U+1F7E2)・🟨 (U+1F7E8) は East Asian Width=Wide で unicode-width=2・
 /// Windows Terminal 描画も 2 セルで一致する (✳ U+2733 のような曖昧幅文字と
 /// 違い、はみ出しを起こさない)。Idle (shell) は呼び出し側で出さない。
 pub fn status_marker(status: ClaudeStatus) -> &'static str {
     match status {
-        ClaudeStatus::Busy => "🟢",
-        ClaudeStatus::Background => "🔵",
+        ClaudeStatus::Busy | ClaudeStatus::Background => "🟢",
         ClaudeStatus::NeedsAttention => "🟨",
         ClaudeStatus::Idle => "",
     }
@@ -880,10 +881,14 @@ mod tests {
         assert_eq!(status_marker(ClaudeStatus::Busy), "🟢");
     }
 
-    // 裏で実行中は青の丸
+    // 裏で実行中も緑の丸 (実行中と同じ絵文字・ユーザー決定 2026-11-15)
     #[test]
-    fn marker_background_is_blue_circle() {
-        assert_eq!(status_marker(ClaudeStatus::Background), "🔵");
+    fn marker_background_is_green_circle_like_busy() {
+        assert_eq!(status_marker(ClaudeStatus::Background), "🟢");
+        assert_eq!(
+            status_marker(ClaudeStatus::Background),
+            status_marker(ClaudeStatus::Busy)
+        );
     }
 
     // 対応待ちはオレンジの四角
@@ -903,7 +908,6 @@ mod tests {
     fn markers_are_width_two() {
         use unicode_width::UnicodeWidthStr;
         assert_eq!("🟢".width(), 2);
-        assert_eq!("🔵".width(), 2);
         assert_eq!("🟨".width(), 2);
     }
 
@@ -977,6 +981,9 @@ mod tests {
 }
 
 // Version History
+// - ver1.8 (2026-11-15): 裏で実行中 (Background) のマーカーを 🔵 → 🟢 に (ユーザー決定
+//   「やっぱり、青の判定時も緑アイコンにして欲しい」)。status_marker だけの変更で、
+//   判定と畳み込みの順位 (NeedsAttention > Busy > Background > Idle) はそのまま
 // - ver1.7 (2026-11-15): 裏のエージェント待ちも Background (🔵) にする。この場面は
 //   フッターに札が出ず (裏のエージェントはフッターの下の一覧に出る)、返答が
 //   "✻ Waiting for 1 background agent to finish" で終わるのに 🟨 だった。
