@@ -16,7 +16,10 @@ param(
   [string]$Exe = (Join-Path $PSScriptRoot '..\..\target\release\ccnest.exe'),
   [string]$OutDir = (Join-Path $env:TEMP 'ccnest-e2e-background-marker'),
   [int]$SleepSec = 60,
-  [switch]$Agent
+  [switch]$Agent,
+  # 使い捨ての claude に使わせるモデル。既定のまま (本人の設定) だと上位モデルの週の枠を
+  # 1 回で約 1% 使うので、判定の確認には軽いモデルで足りる。
+  [string]$Model = 'sonnet'
 )
 $ErrorActionPreference = 'Stop'
 $typer = Join-Path $PSScriptRoot 'status-marker.ps1'
@@ -65,6 +68,7 @@ for /f "delims==" %%v in ('set AI_AGENT 2^>nul') do set "%%v="
 for /f "delims==" %%v in ('set CCNEST 2^>nul') do set "%%v="
 set "CCNEST_JP_TITLE=off"
 set "CCNEST_CLAUDE_PERMISSION_MODE=off"
+set "ANTHROPIC_MODEL=$Model"
 set "CCNEST_STATUS_TRACE=$traceFile"
 "$exe"
 "@ | Set-Content $runCmd -Encoding ASCII
@@ -164,7 +168,7 @@ try {
 
   if ($Agent) {
   # 2. 返答中
-  Type-Line $cc.Id "Use the Agent tool with run_in_background set to true to start one general-purpose agent. Its only job is to run the shell command sleep $SleepSec once in the foreground (not in the background), wait for it to end and then answer done. Do not wait for the agent and do not check on it. Then reply with only the word started."
+  Type-Line $cc.Id "Use the Agent tool with run_in_background set to true to start one general-purpose agent. Its only job is to run the shell command ping -n $SleepSec 127.0.0.1 once in the foreground (not in the background), wait for it to end and then answer done. Do not wait for the agent and do not check on it. Then reply with only the word started."
   $t = Wait-Trace { param($t) ((Status $t) -eq 'Busy') -or (Waiting-Is-Last $t) } 90
   if ($t -and (Status $t) -eq 'Busy') {
     Save $t 'trace-2-busy.txt'
@@ -175,6 +179,8 @@ try {
 
   # 3. 返答は終わり、裏のエージェントが動いている: スピナー行が無く、入力欄のすぐ上が待ちの行
   $t = Wait-Trace { param($t) ($t -notmatch $SPIN) -and (Waiting-Is-Last $t) } 120
+  #    待っている間の見た目を先に撮る (エージェントが早く終わると次のターンが写る)。
+  Shot $hwnd 'background-marker-3-background.png'
   Save $t 'trace-3-background.txt'
   Check ([bool]$t) "reply ended with the 'Waiting for 1 background agent to finish' line above the input box"
   if ($t) {
@@ -183,8 +189,6 @@ try {
     "  status (background): $(Status $t)"
     Check ((Status $t) -eq 'Background') 'status is Background while only the background agent runs'
   }
-  Start-Sleep -Milliseconds 500
-  Shot $hwnd 'background-marker-3-background.png'
 
   # 4. 裏のエージェントが終わり、通知を受けた返答も終わる: スピナー行が無く、待ちの行が最後ではない
   #    通知を受けたターンの出だしは経過秒の無いスピナー行 ("* Tinkering…") なので、それも待つ。

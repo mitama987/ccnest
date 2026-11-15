@@ -526,8 +526,9 @@ fn status_line<'a>(
 }
 
 /// タブラベルの表示幅上限 (セル)。タスク名が長くてもタブが際限なく
-/// 育たないよう抑える。
-const TAB_LABEL_MAX: usize = 20;
+/// 育たないよう抑える。2026-11-15 に 20 → 16 (ユーザー要望「タブの文字を短く」)。
+/// 日本語タブ名の目安 (全角 6 文字 = 12 セル) に「NN:」を付けても切れない幅。
+const TAB_LABEL_MAX: usize = 16;
 
 /// タブ 1 個のラベル文字列。タスクがあれば「N:短縮タスク」、無ければ従来の
 /// タイトル。どちらも `max` セルに `ellipsize_right` (unicode-width ベース)
@@ -1573,6 +1574,24 @@ mod tests {
         assert!(width_of(&l) <= 20, "{l:?}");
     }
 
+    // タブの幅は 16 セルまで (2026-11-15 に 20 → 16・ユーザー要望「タブの文字を短く」)。
+    // 日本語タブ名の目安 (全角 6 文字) は「N:」を付けても切れない
+    #[test]
+    fn tab_label_max_fits_a_six_wide_char_name_and_cuts_longer_ones() {
+        assert_eq!(TAB_LABEL_MAX, 16);
+        assert_eq!(
+            tab_label(2, "t", Some("決済GMO移行"), TAB_LABEL_MAX),
+            "2:決済GMO移行"
+        );
+        assert_eq!(
+            tab_label(12, "t", Some("ネームギアDNS"), TAB_LABEL_MAX),
+            "12:ネームギアDNS"
+        );
+        let l = tab_label(3, "t", Some("ホワイトニング相談の準備"), TAB_LABEL_MAX);
+        assert!(l.ends_with('…'), "{l:?}");
+        assert!(width_of(&l) <= 16, "{l:?}");
+    }
+
     // 全幅ループ不変条件: どの幅でもはみ出さない (全角タスク含む)
     #[test]
     fn tab_label_never_exceeds_width_across_the_whole_range() {
@@ -1813,3 +1832,5 @@ mod tests {
 //                        at the pointer in theme.tab_floating on top of the
 //                        others while its slot stays empty. tab_rects still
 //                        records the slots, not the animated positions.
+// ver0.20 - 2026-11-15 - TAB_LABEL_MAX 20 → 16 cells (user request: shorter tab
+//                        text). Fits "NN:" plus a 6-wide-char Japanese name.
