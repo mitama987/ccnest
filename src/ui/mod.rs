@@ -11,7 +11,7 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Clear, Paragraph, Widget};
 use ratatui::Frame;
 
-use crate::app::{folder_title, App, Rect as AppRect};
+use crate::app::{float_in_strip, folder_title, App, Rect as AppRect};
 use crate::claude::usage::{UsageLabel, UsageLevel};
 use crate::pane::grid::{Layout, SplitDir};
 use crate::pane::status::{aggregate_status, status_marker};
@@ -189,7 +189,8 @@ fn draw_tabbar(
     tab_rects: &mut Vec<(AppRect, usize)>,
 ) {
     tab_rects.clear();
-    let mut spans = Vec::new();
+    let now = std::time::Instant::now();
+    let mut items: Vec<TabItem> = Vec::with_capacity(app.tabs.len());
     let mut x_offset: u16 = 0;
     let area_end = area.x.saturating_add(area.width);
     for (i, tab) in app.tabs.iter().enumerate() {
@@ -226,8 +227,7 @@ fn draw_tabbar(
                 tab_label_marked(marker, i + 1, &tab.title, task, TAB_LABEL_MAX)
             )
         };
-        let span = Span::styled(label, style);
-        let width = span.width() as u16;
+        let width = width_of(&label) as u16;
         let abs_x = area.x.saturating_add(x_offset);
         if abs_x < area_end {
             let visible_w = area_end.saturating_sub(abs_x).min(width);
@@ -241,11 +241,78 @@ fn draw_tabbar(
                 i,
             ));
         }
-        spans.push(span);
-        spans.push(Span::raw(" "));
+        items.push(TabItem {
+            label,
+            style,
+            x: abs_x as i32,
+            // 並べ替えで押しのけられた／離されて収まる途中のタブは、定位置から
+            // ずらして描く (時間とともに 0 へ)。当たり判定の矩形は定位置のまま。
+            offset: tab.slide.map_or(0, |s| s.offset_at(now)),
+        });
         x_offset = x_offset.saturating_add(width).saturating_add(1);
     }
-    frame.render_widget(Paragraph::new(Line::from(spans)), area);
+    // 引いているタブはポインタの位置に浮かせて最後に重ねる (定位置は空けておく)。
+    let floating = app
+        .tab_drag
+        .filter(|d| d.floating)
+        .and_then(|d| float_in_strip(tab_rects, &d).map(|(fx, _)| (d.idx, fx)));
+    render_tab_items(
+        frame.buffer_mut(),
+        area,
+        &items,
+        floating,
+        theme.tab_floating,
+    );
+}
+
+/// タブバーに描く 1 枚ぶん。`x` は並び順どおりの定位置 (画面の絶対桁)、
+/// `offset` はすべりの途中のずれ (0 = 定位置)。
+struct TabItem {
+    label: String,
+    style: Style,
+    x: i32,
+    offset: i32,
+}
+
+/// タブを 1 枚ずつ `x + offset` に描く。`floating = (index, x)` のタブは定位置を
+/// 空けたまま、最後に `floating_style` で `x` へ重ねる (ほかのタブの上に浮く)。
+fn render_tab_items(
+    buf: &mut Buffer,
+    area: Rect,
+    items: &[TabItem],
+    floating: Option<(usize, i32)>,
+    floating_style: Style,
+) {
+    let lifted = floating.filter(|(f, _)| *f < items.len());
+    for (i, it) in items.iter().enumerate() {
+        if lifted.is_some_and(|(f, _)| f == i) {
+            continue;
+        }
+        put_tab_label(buf, area, it.x + it.offset, &it.label, it.style);
+    }
+    if let Some((f, fx)) = lifted {
+        put_tab_label(buf, area, fx, &items[f].label, floating_style);
+    }
+}
+
+/// ラベルを `area` の行の桁 `x` から描く (左は `area.x` で止め、右ははみ出た分を切る)。
+/// すでに描かれた文字の上に重ねてよい。
+fn put_tab_label(buf: &mut Buffer, area: Rect, x: i32, label: &str, style: Style) {
+    let end = area.x as i32 + area.width as i32;
+    let x = x.max(area.x as i32);
+    if area.height == 0 || x >= end {
+        return;
+    }
+    let (xu, y) = (x as u16, area.y);
+    // 重ねる左端が全角 (絵文字) の 2 桁目に当たるときは、その文字を空白に戻す。
+    // 残すと端末は 2 桁ぶん描いてしまい、重ねたラベルの 1 桁目が出ない。
+    if xu > area.x {
+        let left = &mut buf[(xu - 1, y)];
+        if width_of(left.symbol()) > 1 {
+            left.set_symbol(" ");
+        }
+    }
+    buf.set_stringn(xu, y, label, (end - x) as usize, style);
 }
 
 /// ステータスバー 1 行目のセグメント区切り (表示幅 3 桁)。
@@ -1573,6 +1640,88 @@ mod tests {
             .to_string()
     }
 
+    fn item(label: &str, x: i32, offset: i32) -> TabItem {
+        TabItem {
+            label: label.to_string(),
+            style: Style::default(),
+            x,
+            offset,
+        }
+    }
+
+    /// `render_tab_items` を幅 `width` の 1 行に描いた結果 (バッファごと返す)。
+    fn tab_items_buf(items: &[TabItem], floating: Option<(usize, i32)>, width: u16) -> Buffer {
+        let area = Rect::new(0, 0, width, 1);
+        let mut buf = Buffer::empty(area);
+        let lifted = Style::default().bg(Color::Red);
+        render_tab_items(&mut buf, area, items, floating, lifted);
+        buf
+    }
+
+    fn row_of(buf: &Buffer) -> String {
+        (0..buf.area.width)
+            .map(|x| buf[(x, 0)].symbol())
+            .collect::<String>()
+            .trim_end()
+            .to_string()
+    }
+
+    fn abc() -> Vec<TabItem> {
+        vec![item(" a ", 0, 0), item(" bb ", 4, 0), item(" c ", 9, 0)]
+    }
+
+    /// 止まっているときは、今までの並び (ラベル + 区切り 1 桁) と同じ。
+    #[test]
+    fn tab_items_at_rest_match_the_plain_row() {
+        assert_eq!(row_of(&tab_items_buf(&abc(), None, 20)), " a   bb   c");
+    }
+
+    /// すべりの途中のタブは定位置からずれて描かれる。
+    #[test]
+    fn tab_items_draw_at_the_slide_offset() {
+        let items = vec![item(" a ", 0, 0), item(" bb ", 4, 0), item(" c ", 9, 3)];
+        assert_eq!(row_of(&tab_items_buf(&items, None, 20)), " a   bb      c");
+        let items = vec![item(" a ", 0, 0), item(" bb ", 4, -1), item(" c ", 9, 0)];
+        assert_eq!(row_of(&tab_items_buf(&items, None, 20)), " a  bb    c");
+    }
+
+    /// 浮いたタブは定位置を空け、指定の位置にほかのタブの上へ重なる (見た目も変える)。
+    #[test]
+    fn tab_items_floating_tab_overlays_and_leaves_its_slot_empty() {
+        let buf = tab_items_buf(&abc(), Some((0, 6)), 20);
+        assert_eq!(row_of(&buf), "     b a  c");
+        assert_eq!(buf[(7, 0)].bg, Color::Red, "浮いたタブの見た目");
+        assert_eq!(buf[(5, 0)].bg, Color::Reset, "下のタブはそのまま");
+        // 範囲外の index は何も浮かせない (全部を定位置に描く)。
+        assert_eq!(
+            row_of(&tab_items_buf(&abc(), Some((9, 6)), 20)),
+            " a   bb   c"
+        );
+    }
+
+    /// 重ねる左端が絵文字の 2 桁目に当たったら、その絵文字は空白に戻す。
+    #[test]
+    fn tab_items_overlay_blanks_a_split_wide_char() {
+        let items = vec![item("\u{1f7e8}x", 0, 0), item(" z ", 3, 0)];
+        let buf = tab_items_buf(&items, Some((1, 1)), 10);
+        assert_eq!(buf[(0, 0)].symbol(), " ", "割れた絵文字は消す");
+        assert_eq!(buf[(2, 0)].symbol(), "z");
+        // 割らない位置なら絵文字は残る。
+        let buf = tab_items_buf(&items, Some((1, 2)), 10);
+        assert_eq!(buf[(0, 0)].symbol(), "\u{1f7e8}");
+    }
+
+    /// 右にはみ出た分は切る。左は行の先頭で止める。行の外は描かない。
+    #[test]
+    fn tab_items_clip_to_the_row() {
+        let items = vec![item(" abc ", 7, 0)];
+        assert_eq!(row_of(&tab_items_buf(&items, None, 10)), "        ab");
+        let items = vec![item(" abc ", 0, -4)];
+        assert_eq!(row_of(&tab_items_buf(&items, None, 10)), " abc");
+        let items = vec![item(" abc ", 10, 0)];
+        assert_eq!(row_of(&tab_items_buf(&items, None, 10)), "");
+    }
+
     // タスク付きラベルが実バッファに期待どおり並ぶ
     // (全角はTestBackendの継続セルが空白になるため、ここではASCIIで検証。
     //  全角の幅不変条件は tab_label_never_exceeds_width... 側で担保)
@@ -1657,3 +1806,10 @@ mod tests {
 //                        ended but a background shell / agent is still running),
 //                        via status_marker; a tab folds its panes as
 //                        NeedsAttention > Busy > Background > Idle.
+// ver0.19 - 2026-11-15 - Tab bar is drawn tab by tab (render_tab_items) instead
+//                        of one Paragraph line: a tab that was pushed aside by a
+//                        drag, or dropped, is drawn at its slot plus the slide
+//                        offset (Tab::slide), and the tab being dragged floats
+//                        at the pointer in theme.tab_floating on top of the
+//                        others while its slot stays empty. tab_rects still
+//                        records the slots, not the animated positions.

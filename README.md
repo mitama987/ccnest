@@ -110,7 +110,7 @@ folders of dead pids are removed the next time a ccnest starts.
 | Mouse wheel | Scroll history in the pane under the cursor (3 lines per tick) |
 | `Ctrl` + Mouse wheel | Resize the focused split — the pane under the cursor grows on scroll-up, shrinks on scroll-down (5% per tick, clamped to 10–90%) |
 | Left-click on a tab | Switch to that tab |
-| Drag a tab left / right (left button) | Reorder the tabs — the tab follows the pointer while you drag, release to drop |
+| Drag a tab left / right (left button) | Reorder the tabs — the tab floats under the pointer while you drag and the others slide aside, release to drop |
 | Middle-click (wheel click) on a tab | Close that tab and every pane in it (no confirmation — same as `Ctrl+W` per pane; closing the last tab quits) |
 | `Shift+PageUp` / `Shift+PageDown` | Scroll the focused pane one screen of history |
 | `Shift+↑` / `Shift+↓` | Scroll the focused pane one line of history |
@@ -143,11 +143,16 @@ click) a tab to close it together with every pane it holds — browser
 style, with no confirmation, the same way `Ctrl+W` closes a single pane.
 Closing the last tab quits ccnest.
 
-Drag a tab with the left button to reorder: the tab follows the pointer
-as you move left or right, and stays where it is when you release. Only
-the horizontal position counts, so the pointer may slip below the tab
-bar while you drag. Tabs that do not fit on screen (cut off at the right
-edge) cannot be reached by dragging.
+Drag a tab with the left button to reorder. As soon as the pointer
+leaves the column you pressed, the tab lifts off and floats under the
+pointer, on top of the other tabs, leaving its slot empty. When it passes
+a neighbour, that neighbour slides into the free slot (about 140 ms);
+when you release, the tab glides from where it floats into its new slot.
+Only the horizontal position counts, so the pointer may slip below the
+tab bar while you drag. Tabs that do not fit on screen (cut off at the
+right edge) cannot be reached by dragging. Set `CCNEST_TAB_ANIM=off` to
+turn the motion off: the tabs then swap in place, without floating or
+sliding.
 
 When the focused pane's Claude session has a current task, the tab label
 becomes `N:<task>` (truncated to 20 cells) so you can tell at a glance
@@ -323,3 +328,4 @@ ver0.1.34 - 2026-11-09 - Running detection fixed: the spinner line is `… (2m 2
 ver0.1.35 - 2026-11-11 - `ccnest --add [--to <pid>] --resume <session-id>[=<tab name>] ...` adds tabs to a ccnest window that is already running instead of starting a new one. The request is a small JSON file dropped into `%APPDATA%\ccnest\requests\<pid>\`; the window picks it up on its 2 s tick, queues the sessions like startup `--resume` (one tab per tick, active tab untouched) and answers which were opened and which were skipped (already open there, or no conversation log in that window's folder). Panes now get `CCNEST_PID=<pid of their ccnest>`, so the command needs no `--to` when run from inside a tab. E2E `scripts/e2e/add-tab.ps1`.
 ver0.1.36 - 2026-11-14 - Third tab marker 🔵: the reply has ended but something is still running in the background. When a reply ends the spinner line disappears, so a tab waiting on a background shell or agent used to show 🟨 (your turn) although nothing was needed from you. ccnest now reads the footer under the prompt box (the text after the last `─` rule) and shows 🔵 when it carries a background pill — `1 shell`, `2 local agents`, `1 shell, 1 monitor`, `3 background tasks`, `1 team`, `1 background dynamic workflow`, `1 MCP task`, `◇ 1 cloud session` (wording from Claude Code v2.1.325). The done line `… · 1 shell still running` is not used: it is transcript text and can stay on screen after the job has finished. A tab folds its panes as 🟨 > 🟢 > 🔵. A separate marker rather than 🟢 so that a tab that merely keeps a dev server in the background is not mistaken for one that is working (user decision). Dev aid `CCNEST_STATUS_TRACE=<path>` writes each Claude pane's status and the screen text it was judged from on every 2 s tick; the test strings come from it. E2E `scripts/e2e/background-marker.ps1`.
 ver0.1.37 - 2026-11-15 - Drag a tab to reorder. Press a tab with the left button (it becomes the active tab, as before) and move left or right: the tab follows the pointer, the tabs in between shift by one, and releasing drops it. Only the pointer column is used, so the drag keeps working when the pointer slips down onto a pane, and a mouse-mode app in that pane (Claude Code) never receives the stray drag / release. A tab moves only once the pointer is on the neighbour and the moved tab would end up under the pointer, so a narrow tab dragged across a wide one (or the reverse) does not flip back and forth. Dragging past either end of the visible tabs moves the tab to the first / last visible position; tabs cut off at the right edge cannot be reached. Nothing happens while a tab is being renamed. CCNEST_INPUT_TRACE logs each move as `move_tab from=A to=B`. E2E `scripts/e2e/drag-reorder-tab.ps1`.
+ver0.1.38 - 2026-11-15 - Floating tab drag. While a tab is dragged it now lifts off and floats under the pointer (drawn on top of the other tabs, its slot left empty) instead of jumping from slot to slot; a neighbour it passes slides into the free slot and, on release, the tab glides from where it floats into its slot (140 ms, ease-out, one cell at a time). A plain click does not lift the tab. The floating tab keeps the white band of the active tab (an orange band hid the 🟨 marker). The reorder rule and the hit-test rectangles are unchanged: they use the slots, never the animated positions. While a slide is running the loop redraws about every 16 ms and then goes back to sleep. `CCNEST_TAB_ANIM=off` disables the motion. The tab bar is now drawn tab by tab instead of as one text line. E2E `scripts/e2e/drag-reorder-tab.ps1` reads the tab bar with the button still down (`-Wt` takes Windows Terminal screenshots mid-drag, `-NoAnim` checks the off switch).

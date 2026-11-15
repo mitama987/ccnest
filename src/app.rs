@@ -20,6 +20,60 @@ pub struct Tab {
     pub title: String,
     pub layout: Layout,
     pub focused: PaneId,
+    /// タブバーでの「すべり」の途中 (ドラッグで押しのけられた／離されて収まる)。
+    /// 描画は定位置からこのずれだけ離して描く。終わったら None。
+    pub slide: Option<TabSlide>,
+}
+
+/// タブがすべる時間。
+pub const TAB_SLIDE: Duration = Duration::from_millis(140);
+
+/// タブバーでのすべり 1 回ぶん。`from_offset` = 始まったときの「定位置からのずれ」
+/// (桁。+ は右)、`start` から `TAB_SLIDE` かけて 0 へ近づく。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TabSlide {
+    pub from_offset: i32,
+    pub start: Instant,
+}
+
+impl TabSlide {
+    /// `now` 時点の定位置からのずれ。
+    pub fn offset_at(&self, now: Instant) -> i32 {
+        slide_offset(
+            self.from_offset,
+            now.saturating_duration_since(self.start),
+            TAB_SLIDE,
+        )
+    }
+
+    pub fn finished(&self, now: Instant) -> bool {
+        now.saturating_duration_since(self.start) >= TAB_SLIDE
+    }
+}
+
+/// タブバーで左ボタンを押して引いている最中の状態。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TabDrag {
+    /// 引いているタブの「今の」位置 (`move_tab` のたびに更新)。
+    pub idx: usize,
+    /// 押したときのポインタの桁。ここから動いたら浮かせる。
+    pub press_x: i32,
+    /// 押した桁 − タブの左端。浮いたタブをポインタの下の同じ所に保つ。
+    pub grab_dx: i32,
+    /// いまのポインタの桁。
+    pub pointer_x: i32,
+    /// 浮いているか (押した桁から動いた)。クリックだけなら false のまま。
+    pub floating: bool,
+}
+
+/// `CCNEST_TAB_ANIM=off` (または `0`) でタブのアニメーションを止める
+/// (浮かせない・すべらせない = v0.1.37 と同じ即時の並べ替え)。初回だけ評価。
+pub fn tab_anim_enabled() -> bool {
+    use std::sync::OnceLock;
+    static ENABLED: OnceLock<bool> = OnceLock::new();
+    *ENABLED.get_or_init(|| {
+        !std::env::var("CCNEST_TAB_ANIM").is_ok_and(|v| v.eq_ignore_ascii_case("off") || v == "0")
+    })
 }
 
 /// 閉じたタブの控え (Ctrl+Shift+T で開き直す用)。
@@ -87,10 +141,10 @@ pub struct App {
     /// 右クリックで開くコンテキストメニュー。開いている間はキー/マウス入力を
     /// モーダルに横取りする (renaming_tab と同じ Option モーダルパターン)。
     pub context_menu: Option<ContextMenu>,
-    /// タブバーで左ボタンを押して引いている最中のタブの「今の」位置。引くと
-    /// `move_tab` でタブがついてくるので、動かすたびにここも更新する。
+    /// タブバーで左ボタンを押して引いている最中の状態。引くと `move_tab` で
+    /// タブがついてくるので、動かすたびに `idx` も更新する。
     /// ボタンを離すか、別の操作でタブの並びが変わったら None。
-    pub tab_drag: Option<usize>,
+    pub tab_drag: Option<TabDrag>,
     /// cwd -> (ブランチ名, 最終探索時刻)。複数ペインが同じ cwd を共有しがちなので、
     /// リポジトリ探索の重複を避けるため App 側に持つ。`refresh_pane_state` が
     /// 現存ペインの cwd だけで作り直すので、ペインを閉じてもエントリが残らない。
@@ -245,6 +299,7 @@ impl App {
             title: title.unwrap_or_else(|| folder_title(&cwd)),
             layout: Layout::Leaf(first_id),
             focused: first_id,
+            slide: None,
         };
 
         Ok(Self {
@@ -306,6 +361,7 @@ impl App {
             title: spec.title.unwrap_or_else(|| folder_title(&cwd)),
             layout: Layout::Leaf(new_id),
             focused: new_id,
+            slide: None,
         });
         Ok(true)
     }
@@ -548,6 +604,7 @@ impl App {
             title: folder_title(&cwd),
             layout: Layout::Leaf(new_id),
             focused: new_id,
+            slide: None,
         });
         self.active_tab = self.tabs.len() - 1;
         Ok(())
@@ -672,6 +729,7 @@ impl App {
                 title: closed.title,
                 layout,
                 focused,
+                slide: None,
             },
         );
         self.active_tab = at;
@@ -701,6 +759,42 @@ impl App {
         }
         self.active_tab = active_after_move(self.active_tab, from, to);
         true
+    }
+
+    /// すべりの途中のタブがあるか (あるあいだだけイベントループが描き続ける)。
+    pub fn has_tab_slides(&self) -> bool {
+        self.tabs.iter().any(|t| t.slide.is_some())
+    }
+
+    /// 終わったすべりを片付ける。
+    pub fn expire_tab_slides(&mut self, now: Instant) {
+        for t in &mut self.tabs {
+            if t.slide.is_some_and(|s| s.finished(now)) {
+                t.slide = None;
+            }
+        }
+    }
+
+    /// `move_tab(from, to)` の直後に呼ぶ: 押しのけられたタブを、元いた位置から
+    /// 新しい定位置へすべらせる。`shift` は動いた桁数 (引いたタブの幅 + 区切り 1)。
+    /// すべりの途中でまた押しのけられたら、今いる所から続ける。
+    pub fn slide_displaced(&mut self, from: usize, to: usize, shift: i32, now: Instant) {
+        let (range, sign) = displaced_after_move(from, to);
+        for i in range {
+            let Some(tab) = self.tabs.get_mut(i) else {
+                continue;
+            };
+            let current = tab.slide.map_or(0, |s| s.offset_at(now));
+            tab.slide = start_slide(current + sign * shift, now);
+        }
+    }
+
+    /// タブ `idx` を「定位置から `from_offset` 桁ずれた所」から定位置へすべらせる
+    /// (ドラッグを離したとき、浮いていた位置からすき間へ収まる動き)。
+    pub fn settle_tab(&mut self, idx: usize, from_offset: i32, now: Instant) {
+        if let Some(tab) = self.tabs.get_mut(idx) {
+            tab.slide = start_slide(from_offset, now);
+        }
     }
 
     pub fn next_tab(&mut self) {
@@ -861,6 +955,48 @@ fn move_in_vec<T>(v: &mut Vec<T>, from: usize, to: usize) -> bool {
     true
 }
 
+/// 純粋: ずれ 0 ならすべらせない。
+fn start_slide(from_offset: i32, now: Instant) -> Option<TabSlide> {
+    (from_offset != 0).then_some(TabSlide {
+        from_offset,
+        start: now,
+    })
+}
+
+/// 純粋: すべりの途中のずれ。始まりは `from_offset`、`total` 経ったら 0。
+/// ease-out (3 乗) = 動き出しが速く、止まり際がゆっくり。向きは変わらない。
+pub fn slide_offset(from_offset: i32, elapsed: Duration, total: Duration) -> i32 {
+    if total.is_zero() || elapsed >= total {
+        return 0;
+    }
+    let left = 1.0 - elapsed.as_secs_f32() / total.as_secs_f32();
+    (from_offset as f32 * left * left * left).round() as i32
+}
+
+/// 純粋: `move_tab(from, to)` のあと、押しのけられたタブが今いる位置の範囲と、
+/// すべり始めのずれの向き。右へ動かした (`from < to`) なら間のタブは左へ寄ったので
+/// 元の位置は右 = +1。左へ動かしたなら -1。
+fn displaced_after_move(from: usize, to: usize) -> (std::ops::Range<usize>, i32) {
+    match from.cmp(&to) {
+        std::cmp::Ordering::Less => (from..to, 1),
+        std::cmp::Ordering::Greater => (to + 1..from + 1, -1),
+        std::cmp::Ordering::Equal => (from..from, 0),
+    }
+}
+
+/// 純粋: 浮いたタブを描く桁と、その定位置 (すき間) の桁 `(float_x, slot_x)`。
+/// 浮いたタブは「ポインタ − 押したときのタブ内の位置」に置き、見えているタブの帯
+/// (先頭タブの左端〜末尾タブの右端) からはみ出さない。`tab_rects` は描画が記録した
+/// 定位置の矩形。引いているタブが描かれていなければ None。
+/// 描画 (浮かせる位置) とイベント (離したときの収まり始め) が同じ値を使う。
+pub fn float_in_strip(tab_rects: &[(Rect, usize)], drag: &TabDrag) -> Option<(i32, i32)> {
+    let slot = tab_rects.iter().find(|(_, i)| *i == drag.idx)?.0;
+    let start = tab_rects.iter().map(|(r, _)| r.x).min()?;
+    let end = tab_rects.iter().map(|(r, _)| r.x + r.w).max()?;
+    let x = (drag.pointer_x - drag.grab_dx).clamp(start, (end - slot.w).max(start));
+    Some((x, slot.x))
+}
+
 /// 純粋: タブ `from` を `to` へ動かした後のアクティブ index (同じタブを指し続ける)。
 /// 動かしたタブ自身なら `to`。アクティブをまたいで右へ動いたら 1 つ左へ、
 /// 左へ動いたら 1 つ右へ。またがなければそのまま。
@@ -1013,6 +1149,81 @@ mod tests {
         assert_eq!(v, vec!['d', 'b', 'c', 'a']);
     }
 
+    /// すべりのずれは、始まりで元のずれ・終わりで 0。途中は元の向きのまま縮む。
+    #[test]
+    fn slide_offset_eases_to_zero() {
+        let total = Duration::from_millis(140);
+        let at = |from: i32, ms: u64| slide_offset(from, Duration::from_millis(ms), total);
+        assert_eq!(at(12, 0), 12, "始まりは元のずれ");
+        assert_eq!(at(12, 140), 0, "終わりは 0");
+        assert_eq!(at(12, 999), 0, "過ぎても 0");
+        assert_eq!(at(-12, 0), -12);
+        assert_eq!(at(-12, 140), 0);
+        assert_eq!(at(0, 50), 0, "ずれが無ければ動かない");
+        // 途中は単調に縮み、向きは変わらない。ease-out = 前半で大きく動く。
+        let mut prev = 12;
+        for ms in (0..=140).step_by(10) {
+            let v = at(12, ms);
+            assert!((0..=prev).contains(&v), "ms={ms} v={v} prev={prev}");
+            assert_eq!(at(-12, ms), -v, "左右対称 ms={ms}");
+            prev = v;
+        }
+        assert!(
+            at(12, 70) <= 3,
+            "半分の時間で 3/4 以上進んでいる: {}",
+            at(12, 70)
+        );
+        assert_eq!(
+            slide_offset(12, Duration::ZERO, Duration::ZERO),
+            0,
+            "時間 0"
+        );
+    }
+
+    /// `move_tab(from, to)` のあと、押しのけられたタブの位置と、ずらす向き。
+    #[test]
+    fn displaced_after_move_ranges() {
+        // 0 → 2: 今 0, 1 にいるタブは左へ寄った → 元の位置 (右) から滑らせる = +。
+        assert_eq!(displaced_after_move(0, 2), (0..2, 1));
+        // 2 → 0: 今 1, 2 にいるタブは右へ寄った → 元の位置 (左) から = -。
+        assert_eq!(displaced_after_move(2, 0), (1..3, -1));
+        assert_eq!(displaced_after_move(1, 2), (1..2, 1));
+        assert_eq!(displaced_after_move(1, 1), (1..1, 0), "動かない");
+    }
+
+    fn rects3() -> Vec<(Rect, usize)> {
+        let r = |x: i32, w: i32| Rect { x, y: 0, w, h: 1 };
+        // サイドバーの右 (x=20) から: 幅 10 / 20 / 6。帯は 20..58。
+        vec![(r(20, 10), 0usize), (r(31, 20), 1usize), (r(52, 6), 2usize)]
+    }
+
+    fn drag(idx: usize, press_x: i32, grab_dx: i32, pointer_x: i32) -> TabDrag {
+        TabDrag {
+            idx,
+            press_x,
+            grab_dx,
+            pointer_x,
+            floating: true,
+        }
+    }
+
+    /// 浮いたタブは「ポインタ − 押したときのタブ内の位置」に来る。タブの帯の外へは出ない。
+    #[test]
+    fn float_in_strip_follows_pointer_and_clamps() {
+        let rects = rects3();
+        // タブ 0 (x=20) の 3 桁目を押して 5 桁右へ → 25。すき間は 20 のまま。
+        assert_eq!(float_in_strip(&rects, &drag(0, 23, 3, 28)), Some((25, 20)));
+        // 左へ引いても帯の左端 (20) で止まる。
+        assert_eq!(float_in_strip(&rects, &drag(0, 23, 3, 2)), Some((20, 20)));
+        // 右は「帯の右端 − 自分の幅」= 58 − 10 = 48 で止まる。
+        assert_eq!(float_in_strip(&rects, &drag(0, 23, 3, 200)), Some((48, 20)));
+        // タブ 2 (x=52・幅 6) を左へ。
+        assert_eq!(float_in_strip(&rects, &drag(2, 54, 2, 40)), Some((38, 52)));
+        // 描かれていないタブ・空の矩形は None。
+        assert_eq!(float_in_strip(&rects, &drag(7, 0, 0, 0)), None);
+        assert_eq!(float_in_strip(&[], &drag(0, 0, 0, 0)), None);
+    }
+
     /// TTL 内のエントリは再探索リストへ入れず、値と時刻ごと引き継ぐ。
     #[test]
     fn plan_branch_refresh_carries_fresh_entry_without_rediscovery() {
@@ -1133,3 +1344,12 @@ mod tests {
 //                        keeps active_tab on the same tab (pure
 //                        active_after_move). remove_tab / reopen_closed_tab
 //                        drop tab_drag because they shift the indexes.
+// ver0.15 - 2026-11-15 - Floating tab drag: tab_drag is a TabDrag (index, press
+//                        column, grab offset, pointer column, floating) and
+//                        Tab::slide a TabSlide (offset from the slot easing to
+//                        0 over TAB_SLIDE = 140 ms, pure slide_offset).
+//                        slide_displaced() starts the slide of the tabs pushed
+//                        aside by move_tab, settle_tab() the drop; pure
+//                        float_in_strip() gives the floating tab's column for
+//                        both the draw and the drop. CCNEST_TAB_ANIM=off
+//                        disables it (tab_anim_enabled).
