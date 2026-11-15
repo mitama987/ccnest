@@ -182,21 +182,22 @@ its normal colour:
 | Marker | Meaning |
 |---|---|
 | 🟢 | Claude is running (the spinner line with its elapsed time, `✶ Boondoggling… (6s · ↓302 tokens)` or `✢ Metamorphosing… (2m 24s · ↓ 4.4k tokens · …)`, is visible; the older `esc to interrupt` wording is still recognised) |
-| 🔵 | the reply ended but something is still running in the background — the footer under the prompt shows `1 shell`, `2 local agents`, `1 monitor`, `3 background tasks`, …, or the line right above the prompt box reads `Waiting for 1 background agent to finish` (Claude is notified when it finishes and carries on by itself) |
+| 🟢 | also when the reply ended but something is still running in the background — the footer under the prompt shows `1 shell`, `2 local agents`, `1 monitor`, `3 background tasks`, …, or the line right above the prompt box reads `Waiting for 1 background agent to finish` (Claude is notified when it finishes and carries on by itself) |
 | 🟨 | your turn — a question or permission prompt, or the work finished and Claude is waiting for the next instruction |
 | (none) | shell-only tab (no Claude pane) |
 
 A tab with several Claude panes shows 🟨 as soon as one of them is
-waiting for you, otherwise 🟢 if any is running, otherwise 🔵.
+waiting for you, otherwise 🟢.
 
-🔵 is read from the footer (the text after the prompt box) and from the
-last line above the prompt box, so a tab that keeps a dev server in the
-background stays 🔵, not 🟢. A background agent shows no footer pill —
+Background work is read from the footer (the text after the prompt box)
+and from the last line above the prompt box, so a tab that keeps a dev
+server in the background stays 🟢 until the server stops (v0.1.36–39
+showed a separate 🔵 for this). A background agent shows no footer pill —
 it is listed under the footer instead — so there the `Waiting for …
 to finish` line is what counts, and only while it is the last line
 above the prompt box (an older one further up is ignored). If Claude
 ends its reply with a question in plain text while a background job is
-still running, the tab is 🔵 as well; permission prompts hide the footer
+still running, the tab is 🟢 as well; permission prompts hide the footer
 and show 🟨. The always-on `Artifact comment monitor` and Claude Code's
 own housekeeping (`saving memories`, `dreaming`) do not count.
 
@@ -266,7 +267,7 @@ sections:
   pane's cwd.
 - **Panes** — a list of every pane in the current tab, marking the active
   one and whether Claude is running. When a task is known the row shows
-  `— <task>` in full; Claude rows start with the same 🟢 / 🔵 / 🟨 marker as
+  `— <task>` in full; Claude rows start with the same 🟢 / 🟨 marker as
   the tab bar.
 
 The selection cursor is a solid white reversed block (`bg=white`,
@@ -334,3 +335,4 @@ ver0.1.36 - 2026-11-14 - Third tab marker 🔵: the reply has ended but somethin
 ver0.1.37 - 2026-11-15 - Drag a tab to reorder. Press a tab with the left button (it becomes the active tab, as before) and move left or right: the tab follows the pointer, the tabs in between shift by one, and releasing drops it. Only the pointer column is used, so the drag keeps working when the pointer slips down onto a pane, and a mouse-mode app in that pane (Claude Code) never receives the stray drag / release. A tab moves only once the pointer is on the neighbour and the moved tab would end up under the pointer, so a narrow tab dragged across a wide one (or the reverse) does not flip back and forth. Dragging past either end of the visible tabs moves the tab to the first / last visible position; tabs cut off at the right edge cannot be reached. Nothing happens while a tab is being renamed. CCNEST_INPUT_TRACE logs each move as `move_tab from=A to=B`. E2E `scripts/e2e/drag-reorder-tab.ps1`.
 ver0.1.38 - 2026-11-15 - Floating tab drag. While a tab is dragged it now lifts off and floats under the pointer (drawn on top of the other tabs, its slot left empty) instead of jumping from slot to slot; a neighbour it passes slides into the free slot and, on release, the tab glides from where it floats into its slot (140 ms, ease-out, one cell at a time). A plain click does not lift the tab. The floating tab keeps the white band of the active tab (an orange band hid the 🟨 marker). The reorder rule and the hit-test rectangles are unchanged: they use the slots, never the animated positions. While a slide is running the loop redraws about every 16 ms and then goes back to sleep. `CCNEST_TAB_ANIM=off` disables the motion. The tab bar is now drawn tab by tab instead of as one text line. E2E `scripts/e2e/drag-reorder-tab.ps1` reads the tab bar with the button still down (`-Wt` takes Windows Terminal screenshots mid-drag, `-NoAnim` checks the off switch).
 ver0.1.39 - 2026-11-15 - 🔵 also while Claude waits for a background agent. A background agent puts no pill in the footer (it is listed under the footer as `◯ general-purpose …`), so a tab whose reply had ended with `✻ Waiting for 1 background agent to finish` showed 🟨. ccnest now also shows 🔵 when the last non-empty line above the prompt box is `Waiting for <n> background agent(s) [and <n> dynamic workflow(s)] to finish` (wording from Claude Code v2.1.325). The line is transcript text that stays on screen, so it only counts while nothing has been printed below it; once the agent finishes Claude starts its next turn and the tab goes back to 🟢 / 🟨. The prompt box is now found as the last run of three or more `─`, so a stray `─` in the list under the footer no longer hides it. E2E `scripts/e2e/background-marker.ps1 -Agent`.
+ver0.1.40 - 2026-11-15 - Background work shows 🟢 instead of 🔵: a tab whose reply has ended but which still has a background shell, monitor or agent running now carries the same green circle as a tab that is replying (user decision — two markers, 🟢 working / 🟨 your turn). Detection is unchanged and still tells the two apart internally (`CCNEST_STATUS_TRACE` prints `Busy` / `Background`); only the emoji is shared.

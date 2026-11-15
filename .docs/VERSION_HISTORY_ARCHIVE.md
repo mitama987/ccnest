@@ -5,6 +5,30 @@
 
 ---
 
+## 2026-11-15 — 裏で実行中のマーカーを 🔵 → 🟢（v0.1.40）
+
+ブランチ: `feature/background-marker-green`
+
+### 背景
+
+v0.1.39 を入れた直後のゆうさんの指示「やっぱり、青の判定時も緑アイコンにして欲しい」。v0.1.36 で「🟢 に混ぜず別マーカー 🔵」と決めていたのを改め、マーカーは **🟢 実行中（裏で実行中も含む）／🟨 対応が必要** の 2 つに戻す。
+
+### 変更点
+
+| ファイル | 内容 |
+|---|---|
+| `src/pane/status.rs` ver1.8 | `status_marker(Background)` を 🔵 → 🟢。判定（`ClaudeStatus::Background`・`has_background_work`・`is_waiting_for_background`）と畳み込みの順位はそのまま＝また分けるときは絵文字 1 か所 |
+| `src/sidebar/panelist.rs` ver0.6 | サイドバーの行頭も 🟢（`status_marker` に追従）|
+| `README.md`・`scripts/e2e/background-marker.ps1` | 説明を 🟢 に |
+| `Cargo.toml`／`Cargo.lock` | 0.1.40 |
+
+### 確認
+
+- `cargo test`
+- `scripts/e2e/background-marker.ps1 -Agent`: 判定は Background のまま、スクショのタブは 🟢
+
+---
+
 ## 2026-11-15 — 裏のエージェント待ちのタブも 🔵（v0.1.39）
 
 ブランチ: `feature/background-agent-wait-marker`
