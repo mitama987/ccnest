@@ -208,7 +208,7 @@ const EXCLUDED_TASK_PREFIXES: &[&str] = &[
     "[Request interrupted",
 ];
 
-/// タスク表示文字列の上限文字数。表示側 (タブ 20 セル・サイドバー横幅) で
+/// タスク表示文字列の上限文字数。表示側 (タブ 16 セル・サイドバー横幅) で
 /// さらに切り詰めるので、ここは「無駄に長い保持」を防ぐだけ。
 const TASK_MAX_CHARS: usize = 200;
 

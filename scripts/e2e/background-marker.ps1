@@ -164,7 +164,7 @@ try {
 
   if ($Agent) {
   # 2. 返答中
-  Type-Line $cc.Id "Use the Agent tool with run_in_background set to true to start one general-purpose agent. Its only job is to run the shell command sleep $SleepSec once in the foreground (not in the background), wait for it to end and then answer done. Do not wait for the agent and do not check on it. Then reply with only the word started."
+  Type-Line $cc.Id "Use the Agent tool with run_in_background set to true to start one general-purpose agent. Its only job is to run the PowerShell command Start-Sleep -Seconds $SleepSec once with the PowerShell tool in the foreground (not in the background), wait for it to end and then answer done. Do not wait for the agent and do not check on it. Then reply with only the word started."
   $t = Wait-Trace { param($t) ((Status $t) -eq 'Busy') -or (Waiting-Is-Last $t) } 90
   if ($t -and (Status $t) -eq 'Busy') {
     Save $t 'trace-2-busy.txt'

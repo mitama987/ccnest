@@ -155,7 +155,7 @@ turn the motion off: the tabs then swap in place, without floating or
 sliding.
 
 When the focused pane's Claude session has a current task, the tab label
-becomes `N:<task>` (truncated to 20 cells) so you can tell at a glance
+becomes `N:<task>` (truncated to 16 cells) so you can tell at a glance
 what each tab is working on. The task is, in order of preference:
 
 1. the name you gave the session (`/rename` or `claude --name`),
@@ -166,13 +166,16 @@ what each tab is working on. The task is, in order of preference:
 Claude Code titles sessions in English kebab-case (`fix-user-name-issues`)
 and offers no setting to change that, so ccnest asks
 `claude -p --model haiku` once per title to rephrase it as a short
-Japanese noun phrase (`ログイン転送の修正`). Titles already in Japanese are
+Japanese noun phrase of about six full-width characters that always
+names what the session is about (`resume-p1-affilia-features` →
+`Affilia P1`, not `続きから再開`). Titles already in Japanese are
 used as is. The call loads no settings, CLAUDE.md, MCP servers or tools
 (about 800 input tokens, 2–3 s), keeps no session, runs one at a time on a
 background thread, and waits until `--resume` tabs have opened and the
 pane's claude has been up for 10 s. Results are cached in
-`%APPDATA%\ccnest\jp-titles.json`, keyed by session and title, so a title
-is only rephrased again when Claude Code changes it.
+`%APPDATA%\ccnest\jp-titles.json`, keyed by session, title and prompt
+version, so a title is only rephrased again when Claude Code changes it
+(or when a new ccnest ships a different prompt).
 `CCNEST_JP_TITLE=off` turns this off.
 
 Tabs containing a Claude pane get a status marker emoji at the head of
@@ -336,3 +339,4 @@ ver0.1.37 - 2026-11-15 - Drag a tab to reorder. Press a tab with the left button
 ver0.1.38 - 2026-11-15 - Floating tab drag. While a tab is dragged it now lifts off and floats under the pointer (drawn on top of the other tabs, its slot left empty) instead of jumping from slot to slot; a neighbour it passes slides into the free slot and, on release, the tab glides from where it floats into its slot (140 ms, ease-out, one cell at a time). A plain click does not lift the tab. The floating tab keeps the white band of the active tab (an orange band hid the 🟨 marker). The reorder rule and the hit-test rectangles are unchanged: they use the slots, never the animated positions. While a slide is running the loop redraws about every 16 ms and then goes back to sleep. `CCNEST_TAB_ANIM=off` disables the motion. The tab bar is now drawn tab by tab instead of as one text line. E2E `scripts/e2e/drag-reorder-tab.ps1` reads the tab bar with the button still down (`-Wt` takes Windows Terminal screenshots mid-drag, `-NoAnim` checks the off switch).
 ver0.1.39 - 2026-11-15 - 🔵 also while Claude waits for a background agent. A background agent puts no pill in the footer (it is listed under the footer as `◯ general-purpose …`), so a tab whose reply had ended with `✻ Waiting for 1 background agent to finish` showed 🟨. ccnest now also shows 🔵 when the last non-empty line above the prompt box is `Waiting for <n> background agent(s) [and <n> dynamic workflow(s)] to finish` (wording from Claude Code v2.1.325). The line is transcript text that stays on screen, so it only counts while nothing has been printed below it; once the agent finishes Claude starts its next turn and the tab goes back to 🟢 / 🟨. The prompt box is now found as the last run of three or more `─`, so a stray `─` in the list under the footer no longer hides it. E2E `scripts/e2e/background-marker.ps1 -Agent`.
 ver0.1.40 - 2026-11-15 - Background work shows 🟢 instead of 🔵: a tab whose reply has ended but which still has a background shell, monitor or agent running now carries the same green circle as a tab that is replying (user decision — two markers, 🟢 working / 🟨 your turn). Detection is unchanged and still tells the two apart internally (`CCNEST_STATUS_TRACE` prints `Busy` / `Background`); only the emoji is shared.
+ver0.1.41 - 2026-11-15 - Shorter tab names that say what the tab is about. The tab label is cut at 16 cells instead of 20, and the Japanese name ccnest asks Haiku for is now about six full-width characters (was eight) and must name the subject — the product or proper noun in the session title — instead of only the action: `resume-p1-affilia-features` used to become `続きから再開` ("resume where we left off") because the last request "続きから再開して" drowned out the title, and is now `Affilia P1`. Empty requests such as "続き" / "進めて" are ignored and long katakana words are rephrased (`リダイレクト` → `転送`). Names cached by an older prompt are regenerated once (the cache key carries a prompt version). `scripts/dev/try_title_prompt.py` runs the prompt from the source against sample titles the way ccnest does.

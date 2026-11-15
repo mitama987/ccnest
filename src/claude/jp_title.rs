@@ -7,8 +7,8 @@
 //!
 //! - 生成は専用スレッド 1 本で 1 件ずつ (描画・入力を止めない。claude を並行
 //!   起動して `~/.claude.json` を同時に書かないため)
-//! - キーは `sessionId + ai-title`。話題が変わって ai-title が変わったときだけ
-//!   作り直す
+//! - キーは `sessionId + ai-title + プロンプトの版`。話題が変わって ai-title が
+//!   変わったとき (とプロンプトを変えたとき) だけ作り直す
 //! - 結果は `<data_dir>/ccnest/jp-titles.json` に保存し、開き直しても再生成しない
 //! - `CCNEST_JP_TITLE=off` で無効 (従来どおり英語の端末タイトル)
 
@@ -21,7 +21,7 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 /// タブ名の上限文字数。ここでは語の途中で切らないよう長めに持ち、見た目の
-/// 長さはタブ側 (20 セル・末尾「…」) に任せる。ここは暴走よけ。
+/// 長さはタブ側 (16 セル・末尾「…」) に任せる。ここは暴走よけ。
 const TITLE_MAX_CHARS: usize = 16;
 /// モデルが説明文を返してきたとみなす長さ。これを超えたら採用しない。
 const REJECT_OVER_CHARS: usize = 40;
@@ -30,11 +30,33 @@ const GENERATE_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// 例を足すと「X上限更新」「アプリ横長バナー化」のように要点だけ残す
 /// 言い換えになる (例なしだと英語の直訳で長くなりがち・2026-10-24 試行)。
+///
+/// 2026-11-15 に作り直した (ユーザー要望「タブの文字を短く」「『続きから再開』の
+/// ようなタイトルだと何のことか不明」):
+/// - 目安を全角 8 文字 → 6 文字に。Haiku は字数を数えられないので、収まる例と
+///   「長い語の言い換え」を書いて寄せる (字数の指定だけでは 15 文字の名前が返る)
+/// - 対象 (製品名・固有名詞) を必ず入れ、動作だけの名前を禁じる。以前は
+///   `resume-p1-affilia-features` + 最後の依頼「続きから再開して」→「続きから再開」
+///   のように、内容の無い依頼文に引っぱられて対象が落ちていた
+///
+/// 文面を変えたら [`PROMPT_VERSION`] も上げる (保存済みの名前を作り直させる)。
+/// 試すときは `scripts/dev/try_title_prompt.py` (この定数を読んで本体と同じ呼び方をする)。
 const SYSTEM_PROMPT: &str =
     "会話の話題を表すタブ名を付けてください。日本語の短い名詞句 1 つだけを返す。\
-全角 8 文字以内 (英字は 2 文字で全角 1 文字)。長いときは要点だけ残して言い換える \
-(例: fix-login-redirect-loop → ログイン転送の修正、port-shadowban-check-xtp6 → XTP6シャドバン判定、\
-revenue-disclosure-video-format → 収益公開動画の型)。説明・引用符・句読点・絵文字は付けない。";
+長さは全角 6 文字まで (英数字は 2 文字で全角 1 文字と数える。「Affilia P1」「XTP6価格改定」\
+「DNS変更」はどれも収まる)。超えそうなら、対象 (製品名・固有名詞) を残して動作や修飾を削り、\
+カタカナの長い語は短い日本語に言い換える (リダイレクト → 転送、バックグラウンド → 裏、\
+アカウント → 垢)。何についての話かを必ず入れ、話題に英語の名前があればそのまま残す。\
+「再開」「続き」「修正」「確認」のような動作だけの名前にしない。「最後の依頼」は対象が\
+分からないときの参考で、「続きから」「進めて」「まだだめ」のような内容の無い依頼は無視する。\
+対象がどうしても分からないときは、話題をそのまま短く訳す。\
+例: fix-login-redirect-loop → ログイン転送、port-shadowban-check-xtp6 → XTP6シャドバン、\
+resume-p1-affilia-features → Affilia P1、namegear-dns-change → ネームギアDNS、\
+ccnest-background-agent-blue-marker → ccnest青マーカー、\
+revenue-disclosure-video-format → 収益公開動画。説明・引用符・句読点・絵文字は付けない。";
+
+/// [`SYSTEM_PROMPT`] の版。保存キーの末尾に付け、古い文面で作った名前を使い回さない。
+const PROMPT_VERSION: &str = "p2";
 
 /// `ai-title` がすでに日本語 (非 ASCII を含む) ならそのまま使ってよい。
 /// Claude Code は日本語の会話でまれに日本語の ai-title を付ける。
@@ -98,8 +120,10 @@ pub fn should_strip_env(key: &str) -> bool {
     k != "CLAUDE_CONFIG_DIR" && (k.starts_with("CLAUDE") || k.starts_with("AI_AGENT"))
 }
 
+/// 保存キー: `sessionId + ai-title + プロンプトの版`。v0.1.40 までは版が無く
+/// (`sessionId + ai-title`)、その形のキーはもう引かない (ファイルには残るが無害)。
 fn cache_key(session_id: &str, ai_title: &str) -> String {
-    format!("{session_id}\u{1f}{ai_title}")
+    format!("{session_id}\u{1f}{ai_title}\u{1f}{PROMPT_VERSION}")
 }
 
 fn cache_path() -> Option<PathBuf> {
@@ -372,6 +396,23 @@ mod tests {
         assert_eq!(t.lookup("other", "fix-bug", None, false), None);
     }
 
+    // プロンプトを変える前 (v0.1.40 まで) に保存した名前は使わない: キーの形が違う。
+    // 「続きから再開」のように対象の無い名前が残り続けないよう、作り直させる
+    #[test]
+    fn titles_cached_with_an_older_prompt_are_not_reused() {
+        let mut t = JpTitler::disabled();
+        t.cache.lock().unwrap().insert(
+            "s\u{1f}resume-p1-affilia-features".to_string(),
+            "続きから再開".to_string(),
+        );
+        assert_eq!(
+            t.lookup("s", "resume-p1-affilia-features", None, false),
+            None
+        );
+        assert!(cache_key("s", "a").ends_with(PROMPT_VERSION));
+        assert_ne!(cache_key("s", "a"), "s\u{1f}a");
+    }
+
     #[test]
     fn request_is_sent_once_and_only_when_allowed() {
         let (tx, rx) = mpsc::channel();
@@ -402,6 +443,10 @@ mod tests {
 
 // ---------------------------------------------------------------------------
 // Version History
+// ver0.2 - 2026-11-15 - タブ名を短く・何の話か分かる名前に (ユーザー要望)。
+//                       プロンプトを作り直し (全角 6 文字目安・対象を必ず入れる・
+//                       動作だけの名前と内容の無い依頼文を使わない)、保存キーに
+//                       PROMPT_VERSION を足して古い名前を作り直させる。
 // ver0.1 - 2026-10-24 - 新規。英語の ai-title を claude -p (haiku) で日本語の
 //                       短いタブ名に言い換え、jp-titles.json に保存して使い回す。
 //                       日本語の ai-title はそのまま。CCNEST_JP_TITLE=off で無効。
