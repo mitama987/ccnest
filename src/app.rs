@@ -87,6 +87,10 @@ pub struct App {
     /// 右クリックで開くコンテキストメニュー。開いている間はキー/マウス入力を
     /// モーダルに横取りする (renaming_tab と同じ Option モーダルパターン)。
     pub context_menu: Option<ContextMenu>,
+    /// タブバーで左ボタンを押して引いている最中のタブの「今の」位置。引くと
+    /// `move_tab` でタブがついてくるので、動かすたびにここも更新する。
+    /// ボタンを離すか、別の操作でタブの並びが変わったら None。
+    pub tab_drag: Option<usize>,
     /// cwd -> (ブランチ名, 最終探索時刻)。複数ペインが同じ cwd を共有しがちなので、
     /// リポジトリ探索の重複を避けるため App 側に持つ。`refresh_pane_state` が
     /// 現存ペインの cwd だけで作り直すので、ペインを閉じてもエントリが残らない。
@@ -262,6 +266,7 @@ impl App {
             pending_mouse: None,
             mouse_local_drag: false,
             context_menu: None,
+            tab_drag: None,
             branch_cache: HashMap::new(),
             last_key_write_us: None,
             last_burst_wait_us: 0,
@@ -670,6 +675,8 @@ impl App {
             },
         );
         self.active_tab = at;
+        // 位置がずれるので、引いている最中の並べ替えは打ち切る。
+        self.tab_drag = None;
         Ok(true)
     }
 
@@ -677,10 +684,23 @@ impl App {
     /// `close_focused_pane` の「最後のペインを閉じた」分岐と `close_tab` で共用。
     fn remove_tab(&mut self, idx: usize) {
         self.tabs.remove(idx);
+        // 位置がずれるので、引いている最中の並べ替えは打ち切る。
+        self.tab_drag = None;
         match active_after_close(self.active_tab, idx, self.tabs.len()) {
             Some(active) => self.active_tab = active,
             None => self.quit = true,
         }
+    }
+
+    /// タブ `from` を `to` の位置へ動かす (タブバーのドラッグ並べ替え用)。
+    /// 間のタブは 1 つずつ寄る。アクティブタブは同じタブを指し続ける。
+    /// 範囲外・同じ位置なら何もせず false。
+    pub fn move_tab(&mut self, from: usize, to: usize) -> bool {
+        if !move_in_vec(&mut self.tabs, from, to) {
+            return false;
+        }
+        self.active_tab = active_after_move(self.active_tab, from, to);
+        true
     }
 
     pub fn next_tab(&mut self) {
@@ -830,6 +850,32 @@ fn start_for(resumable: bool) -> SessionStart {
     }
 }
 
+/// 純粋: `v[from]` を `to` の位置へ移す (間の要素は 1 つずつ寄る)。
+/// 範囲外・同じ位置なら何もせず false。
+fn move_in_vec<T>(v: &mut Vec<T>, from: usize, to: usize) -> bool {
+    if from == to || from >= v.len() || to >= v.len() {
+        return false;
+    }
+    let item = v.remove(from);
+    v.insert(to, item);
+    true
+}
+
+/// 純粋: タブ `from` を `to` へ動かした後のアクティブ index (同じタブを指し続ける)。
+/// 動かしたタブ自身なら `to`。アクティブをまたいで右へ動いたら 1 つ左へ、
+/// 左へ動いたら 1 つ右へ。またがなければそのまま。
+fn active_after_move(active: usize, from: usize, to: usize) -> usize {
+    if active == from {
+        to
+    } else if from < active && active <= to {
+        active - 1
+    } else if to <= active && active < from {
+        active + 1
+    } else {
+        active
+    }
+}
+
 /// 純粋: タブ `closed` を取り除いた後 (残り `remaining` 枚) のアクティブ index。
 /// `closed < active` なら 1 つ左へ、`closed == active` なら同 index (右隣が滑り込む)、
 /// 末尾を超えたら末尾へクランプ。`remaining == 0` なら None (= quit)。
@@ -926,6 +972,45 @@ mod tests {
         );
         assert_eq!(active_after_close(0, 1, 1), Some(0), "右が消えても不変");
         assert_eq!(active_after_close(0, 0, 0), None, "最後の 1 枚 → quit");
+    }
+
+    /// タブ移動後のアクティブ index: 動かしたタブがアクティブならついていく。
+    /// アクティブをまたいで右へ動いたら 1 つ左へ、左へ動いたら 1 つ右へ。
+    /// またがない移動では不変。
+    #[test]
+    fn active_after_move_table() {
+        assert_eq!(active_after_move(0, 0, 2), 2, "動かしたタブについていく");
+        assert_eq!(active_after_move(2, 2, 0), 0, "左へ動かしてもついていく");
+        assert_eq!(
+            active_after_move(1, 0, 2),
+            0,
+            "左のタブが右へまたいだら 1 つ左へ"
+        );
+        assert_eq!(active_after_move(2, 0, 2), 1, "移動先の位置にいたら左へ");
+        assert_eq!(
+            active_after_move(1, 2, 0),
+            2,
+            "右のタブが左へまたいだら 1 つ右へ"
+        );
+        assert_eq!(active_after_move(0, 2, 0), 1, "移動先の位置にいたら右へ");
+        assert_eq!(active_after_move(3, 0, 2), 3, "移動範囲の右外は不変");
+        assert_eq!(active_after_move(0, 1, 3), 0, "移動範囲の左外は不変");
+        assert_eq!(active_after_move(1, 2, 2), 1, "同じ位置への移動は不変");
+    }
+
+    /// `move_in_vec` は from の要素を to の位置へ移し、間の要素を 1 つずつ寄せる。
+    /// 範囲外・同じ位置は何もせず false。
+    #[test]
+    fn move_in_vec_rotates_between_from_and_to() {
+        let mut v = vec!['a', 'b', 'c', 'd'];
+        assert!(move_in_vec(&mut v, 0, 2));
+        assert_eq!(v, vec!['b', 'c', 'a', 'd']);
+        assert!(move_in_vec(&mut v, 3, 0));
+        assert_eq!(v, vec!['d', 'b', 'c', 'a']);
+        assert!(!move_in_vec(&mut v, 1, 1), "同じ位置");
+        assert!(!move_in_vec(&mut v, 4, 0), "from が範囲外");
+        assert!(!move_in_vec(&mut v, 0, 4), "to が範囲外");
+        assert_eq!(v, vec!['d', 'b', 'c', 'a']);
     }
 
     /// TTL 内のエントリは再探索リストへ入れず、値と時刻ごと引き継ぐ。
@@ -1042,3 +1127,9 @@ mod tests {
 //                        CCNEST_STATUS_TRACE=<path>: every 2 s tick writes each
 //                        Claude pane's status and the screen text it was judged
 //                        from (source of the real strings in status.rs tests).
+// ver0.14 - 2026-11-15 - Drag a tab to reorder: tab_drag holds the dragged
+//                        tab's current index, move_tab(from, to) rotates the
+//                        tabs between the two positions (pure move_in_vec) and
+//                        keeps active_tab on the same tab (pure
+//                        active_after_move). remove_tab / reopen_closed_tab
+//                        drop tab_drag because they shift the indexes.

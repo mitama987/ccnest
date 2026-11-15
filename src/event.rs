@@ -1269,6 +1269,36 @@ fn handle_mouse(
         }
     }
 
+    // (0.3) タブを引いている最中 (タブ上の Down(Left) で開始): Drag(Left) は
+    // 並べ替え、Up(Left) で終わり。try_forward より先に取るのは、ポインタが
+    // ペインの上まで下がったとき、press の無い Drag/Up がマウスモードの子へ
+    // 流れないようにするため。縦位置は見ない (横位置だけで判定)。
+    if let Some(from) = app.tab_drag {
+        match me.kind {
+            Drag(MouseButton::Left) => {
+                if let Some(to) = tab_drop_target(tab_rects, from, mx) {
+                    if app.move_tab(from, to) {
+                        app.tab_drag = Some(to);
+                        if input_trace_enabled() {
+                            trace_append_line(&format!("move_tab from={from} to={to}"));
+                        }
+                        // 動かした瞬間に描画済みの矩形は古くなる。次フレームで
+                        // draw_tabbar が組み直すまで判定に使わせない (同じバッチの
+                        // 続きの Drag が古い矩形で二重に動かさないように)。
+                        tab_rects.clear();
+                    }
+                }
+                return;
+            }
+            Up(MouseButton::Left) => {
+                app.tab_drag = None;
+                return;
+            }
+            // 別のボタン・ホイールなど: 並べ替えを打ち切って通常の処理へ。
+            _ => app.tab_drag = None,
+        }
+    }
+
     // (0.5) 右クリック → ローカルのコンテキストメニューを開く。マウスモードの
     // 子への転送 (try_forward) より先に横取りする。従来は Claude Code ペインで
     // 右クリックが子へ転送されて何も起きなかった。
@@ -1322,6 +1352,8 @@ fn handle_mouse(
         TabMouseAction::Switch(i) if i < app.tabs.len() => {
             app.active_tab = i;
             app.selection = None;
+            // このまま左右に引けば並べ替え (上の (0.3))。離せばただの切替。
+            app.tab_drag = Some(i);
             return;
         }
         TabMouseAction::Close(i) => {
@@ -1769,6 +1801,37 @@ fn tab_at(tab_rects: &[(Rect, usize)], mx: i32, my: i32) -> Option<usize> {
         .iter()
         .find(|(r, _)| mx >= r.x && mx < r.x + r.w && my >= r.y && my < r.y + r.h)
         .map(|(_, idx)| *idx)
+}
+
+/// タブを引いている最中、ポインタの横位置 `mx` から「引いているタブ `dragged` を
+/// どの位置へ動かすか」を返す純粋関数。動かさないなら None。縦位置は見ない。
+///
+/// 動かす条件は 2 つとも満たすこと:
+/// - ポインタが動かす先のタブに入っている (自分の上や区切りの上では動かさない)
+/// - 動かしたあと、引いているタブがポインタの下に来る
+///
+/// 2 つ目が無いと、狭いタブを広いタブの向こうへ引いたとき、入れ替えた直後も
+/// ポインタが広いタブの上に残り、次の Drag で元へ戻る (往復してちらつく)。
+/// 見えているタブの左端より左・右端より右は、先頭・末尾として扱う。
+/// 右端に収まらず描かれていないタブ (`tab_rects` に無い) へは動かせない。
+fn tab_drop_target(tab_rects: &[(Rect, usize)], dragged: usize, mx: i32) -> Option<usize> {
+    let w = tab_rects.iter().find(|(_, i)| *i == dragged)?.0.w;
+    // 右へ: 条件を満たすいちばん右のタブ。しきい値はタブの並び順に増えるので、
+    // 一気に引いたときは通り越したタブをまとめて飛ばす。
+    let right = tab_rects
+        .iter()
+        .filter(|(r, i)| *i > dragged && mx >= r.x + (r.w - w).max(0))
+        .map(|(_, i)| *i)
+        .max();
+    if right.is_some() {
+        return right;
+    }
+    // 左へ: 条件を満たすいちばん左のタブ。
+    tab_rects
+        .iter()
+        .filter(|(r, i)| *i < dragged && mx < r.x + r.w.min(w))
+        .map(|(_, i)| *i)
+        .min()
 }
 
 /// 右クリックをローカルのコンテキストメニューにするか。現状は常に true
@@ -4282,6 +4345,119 @@ mod tests {
         assert_eq!(tab_at(&rects, 15, 0), Some(2));
     }
 
+    /// 幅 10 のタブ 3 枚 (区切り 1 桁): x = 0..10 / 11..21 / 22..32。
+    fn even_tabs() -> Vec<(Rect, usize)> {
+        let r = |x: i32, w: i32| Rect { x, y: 0, w, h: 1 };
+        vec![(r(0, 10), 0usize), (r(11, 10), 1usize), (r(22, 10), 2usize)]
+    }
+
+    /// `rects` の並びで `from` を `to` へ動かしたあとの矩形 (index は 0 から振り直し)。
+    fn rects_after_move(rects: &[(Rect, usize)], from: usize, to: usize) -> Vec<(Rect, usize)> {
+        let mut widths: Vec<i32> = rects.iter().map(|(r, _)| r.w).collect();
+        let w = widths.remove(from);
+        widths.insert(to, w);
+        let mut x = rects[0].0.x;
+        widths
+            .into_iter()
+            .enumerate()
+            .map(|(i, w)| {
+                let r = Rect { x, y: 0, w, h: 1 };
+                x += w + 1;
+                (r, i)
+            })
+            .collect()
+    }
+
+    /// 引いているタブの上・区切りの上では動かさない。隣のタブに入ったら動かす。
+    #[test]
+    fn tab_drop_target_moves_when_pointer_enters_neighbor() {
+        let rects = even_tabs();
+        assert_eq!(tab_drop_target(&rects, 1, 15), None, "自分の上");
+        assert_eq!(tab_drop_target(&rects, 1, 21), None, "右の区切り");
+        assert_eq!(tab_drop_target(&rects, 1, 22), Some(2), "右隣に入った");
+        assert_eq!(tab_drop_target(&rects, 1, 10), None, "左の区切り");
+        assert_eq!(tab_drop_target(&rects, 1, 9), Some(0), "左隣に入った");
+    }
+
+    /// 2 つ先まで一気に引いたら、その位置へ。
+    #[test]
+    fn tab_drop_target_skips_over_tabs() {
+        let rects = even_tabs();
+        assert_eq!(tab_drop_target(&rects, 0, 25), Some(2));
+        assert_eq!(tab_drop_target(&rects, 2, 3), Some(0));
+    }
+
+    /// 見えているタブの外まで引いたら、見えている範囲の先頭／末尾へ。
+    #[test]
+    fn tab_drop_target_clamps_outside_the_bar() {
+        let r = |x: i32, w: i32| Rect { x, y: 0, w, h: 1 };
+        // サイドバーの右 (x=20) から始まるタブバー。
+        let rects = vec![
+            (r(20, 10), 0usize),
+            (r(31, 10), 1usize),
+            (r(42, 10), 2usize),
+        ];
+        assert_eq!(tab_drop_target(&rects, 1, 5), Some(0), "左端より左");
+        assert_eq!(tab_drop_target(&rects, 1, 200), Some(2), "右端より右");
+        assert_eq!(
+            tab_drop_target(&rects, 0, 5),
+            None,
+            "先頭はそれ以上左へ行かない"
+        );
+        assert_eq!(
+            tab_drop_target(&rects, 2, 200),
+            None,
+            "末尾はそれ以上右へ行かない"
+        );
+    }
+
+    /// 狭いタブを広いタブの向こうへ: 広いタブに入っただけでは動かさない
+    /// (動かすとポインタが広いタブの上に残り、次の Drag で戻ってしまう)。
+    /// 動かしたあとの矩形で同じ位置を渡しても動かない = 往復しない。
+    #[test]
+    fn tab_drop_target_narrow_over_wide_does_not_oscillate() {
+        let r = |x: i32, w: i32| Rect { x, y: 0, w, h: 1 };
+        // 幅 4 (x=0..4) と 幅 20 (x=5..25)。
+        let rects = vec![(r(0, 4), 0usize), (r(5, 20), 1usize)];
+        assert_eq!(tab_drop_target(&rects, 0, 5), None, "入っただけ");
+        assert_eq!(tab_drop_target(&rects, 0, 20), None, "しきい値の手前");
+        assert_eq!(tab_drop_target(&rects, 0, 21), Some(1), "5 + 20 - 4 = 21");
+        let after = rects_after_move(&rects, 0, 1);
+        assert_eq!(after[1].0.x, 21, "動かしたタブはポインタの下に来る");
+        assert_eq!(tab_drop_target(&after, 1, 21), None, "同じ位置で戻らない");
+        // 逆向き (左へ) も同じ。
+        assert_eq!(tab_drop_target(&after, 1, 4), None, "しきい値の手前");
+        assert_eq!(tab_drop_target(&after, 1, 3), Some(0), "0 + 4 = 4 より左");
+        let back = rects_after_move(&after, 1, 0);
+        assert_eq!(tab_drop_target(&back, 0, 3), None, "同じ位置で戻らない");
+    }
+
+    /// 広いタブを狭いタブの向こうへ: 狭いタブに入ったら動かす。往復しない。
+    /// 広いタブの真ん中を押しただけ (ポインタは自分の上) では左右どちらにも動かない。
+    #[test]
+    fn tab_drop_target_wide_over_narrow_does_not_oscillate() {
+        let r = |x: i32, w: i32| Rect { x, y: 0, w, h: 1 };
+        // 幅 3 (x=0..3)・幅 20 (x=4..24)・幅 3 (x=25..28)。
+        let rects = vec![(r(0, 3), 0usize), (r(4, 20), 1usize), (r(25, 3), 2usize)];
+        for mx in 4..24 {
+            assert_eq!(tab_drop_target(&rects, 1, mx), None, "自分の上 mx={mx}");
+        }
+        assert_eq!(tab_drop_target(&rects, 1, 25), Some(2));
+        let after = rects_after_move(&rects, 1, 2);
+        assert_eq!(tab_drop_target(&after, 2, 25), None, "同じ位置で戻らない");
+        assert_eq!(tab_drop_target(&rects, 1, 2), Some(0));
+        let after = rects_after_move(&rects, 1, 0);
+        assert_eq!(tab_drop_target(&after, 0, 2), None, "同じ位置で戻らない");
+    }
+
+    /// 引いているタブが矩形に無い (右端に収まらず描かれていない) なら動かさない。
+    #[test]
+    fn tab_drop_target_none_when_dragged_not_drawn() {
+        let rects = even_tabs();
+        assert_eq!(tab_drop_target(&rects, 5, 3), None);
+        assert_eq!(tab_drop_target(&[], 0, 3), None);
+    }
+
     /// タブバー分類: Down(Left)→Switch、Down(Middle)→Close、リネーム中は両方 Ignore、
     /// タブ外は Ignore、Up/Drag/右/ホイールは Ignore。
     #[test]
@@ -4925,3 +5101,14 @@ mod tests {
 // ver0.19 - 2026-11-11 - The 2 s tick calls app.accept_remote_requests() before
 //                        spawn_next_resume(), so sessions requested with
 //                        `ccnest --add` open as tabs in this window.
+// ver0.20 - 2026-11-15 - Drag a tab to reorder: Down(Left) on a tab switches to
+//                        it and sets app.tab_drag; while it is set, Drag(Left)
+//                        is taken before try_forward_mouse (so a mouse-mode
+//                        child never sees a press-less drag) and pure
+//                        tab_drop_target() decides from the pointer column
+//                        alone where the tab goes: only once the pointer is on
+//                        the neighbour AND the moved tab would end up under
+//                        the pointer, so tabs of different widths do not flip
+//                        back and forth. tab_rects is cleared after each move.
+//                        Up(Left) ends the drag. CCNEST_INPUT_TRACE logs
+//                        "move_tab from=A to=B".

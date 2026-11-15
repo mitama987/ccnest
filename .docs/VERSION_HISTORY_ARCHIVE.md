@@ -5,6 +5,58 @@
 
 ---
 
+## 2026-11-15 — タブをドラッグで並べ替える（v0.1.37）
+
+ブランチ: `feature/tab-drag-reorder`
+
+### 背景
+
+ゆうさんの要望（2026-11-15）「ccnest のタブってドラッグで順番変えるようにできる？」。タブの並びは開いた順のままで、変えるには閉じて開き直すしかなかった。
+
+左ボタンの Down／Drag／Up はテキスト選択用にすでに届いていて、タブの当たり判定（`tab_rects`）もある。タブの実体は `App.tabs: Vec<Tab>` と `active_tab: usize` だけで、並びを変えても壊れる参照が無い（ペインは `PaneId` で引く・タブ番号は描くときに振り直す）。足りなかったのは、タブバーでの Drag を拾って入れ替える処理だけ。
+
+### 仕様
+
+- タブを左ボタンで押す → 今までどおりそのタブに切り替わる。そのまま左右に引くと、引いている最中にタブがついてくる（ブラウザと同じ。ドロップ位置の印は出さない）。離すと確定
+- 引いているタブは常に前面のタブ（色で分かる）
+- 見るのはポインタの横位置だけ。ペインの上まで下がっても並べ替えは続く
+- 見えているタブの左端より左／右端より右まで引くと、見えている範囲の先頭／末尾へ
+- リネーム中は始めない
+- 対象外: 画面の右に収まらず描かれていないタブへは引けない（タブバーにスクロールが無い）
+
+### 変更点
+
+| ファイル | 内容 |
+|---|---|
+| `src/app.rs` ver0.14 | `tab_drag: Option<usize>`（引いているタブの今の位置）・`move_tab(from, to)`・純粋関数 `move_in_vec`／`active_after_move`（前面のタブは同じタブを指し続ける）。`remove_tab`／`reopen_closed_tab` は位置がずれるので `tab_drag` を消す |
+| `src/event.rs` ver0.20 | タブ上の Down(Left) で `tab_drag` を立てる。立っている間の Drag(Left) は `try_forward_mouse` より前で取り、純粋関数 `tab_drop_target` が動かす先を決める。動かしたら `tab_rects.clear()`。Up(Left) で終わり。`CCNEST_INPUT_TRACE` に `move_tab from=A to=B` |
+| `scripts/e2e/drag-reorder-tab.ps1` | 新規。使い捨て conhost に `WriteConsoleInputW` でマウスを入れる |
+| `README.md`・`Cargo.toml` | キー表と Tabs 節・0.1.37 |
+
+### 動かす条件（`tab_drop_target`）
+
+2 つとも満たしたときだけ動かす。
+
+1. ポインタが動かす先のタブに入っている（自分の上・区切りの上では動かさない）
+2. 動かしたあと、引いているタブがポインタの下に来る
+
+式にすると、右へは `mx >= x_j + max(0, w_j - w)`、左へは `mx < x_j + min(w_j, w)`（`w` は引いているタブの幅）。
+
+- 1 だけだと: 狭いタブを広いタブの向こうへ引いたとき、入れ替えた直後もポインタが広いタブの上に残り、次の Drag で元へ戻る（往復してちらつく）
+- 2 だけだと: 広いタブの真ん中を押しただけで、両隣の狭いタブに対して条件が成り立ち、動かしていないのに入れ替わる（設計中に気づいてテスト `tab_drop_target_wide_over_narrow_does_not_oscillate` にした）
+
+### 検証
+
+- `cargo test`: 単体 395 件（うち今回の追加 9 件）
+- 実機 E2E `scripts/e2e/drag-reorder-tab.ps1`: 幅の違う 3 タブ（alpha／bravo-long-tab-name／cc）で 4 場面
+  - A. alpha を 1 桁ずつ右端まで引く → bravo, cc, alpha。`move_tab` は `from=0 to=1`／`from=1 to=2` の 2 行だけ（往復なし）
+  - B. alpha を 1 回の Drag で左端まで → alpha, bravo, cc。`from=2 to=0`
+  - C. bravo を押してペインの行（6 行目）まで下げ、その行のまま右端まで → alpha, cc, bravo
+  - D. クリックだけ → 並びは変わらない・`move_tab` なし・押したタブが前面
+- 前面のタブは、タブバーのセル属性が 1 枚だけ違うことで確かめた
+
+---
+
 ## 2026-11-14 — 裏で実行中のタブに 🔵（v0.1.36）
 
 ブランチ: `feature/background-marker`
