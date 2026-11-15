@@ -133,47 +133,120 @@ const BACKGROUND_NOUNS: &[&str] = &[
 /// 会話に残る文字で、裏の仕事が終わったあとも画面に残りうる (罫線より上にあり、
 /// 札の文言とも完全一致しないので当たらない)。
 pub fn has_background_work(screen_text: &str) -> bool {
-    const RULE: char = '─';
-    let Some(last) = screen_text.rfind(RULE) else {
+    let Some((_, end)) = last_rule(screen_text) else {
         return false;
     };
-    // 入力欄の上枠は右端にセッション名の札が付いて `── name ─` で終わることが
-    // あるが、最後の `─` は必ず下枠 (長い罫線) の側に来る。1〜2 個だけの `─` は
-    // 罫線ではない (本文中の記号) とみなす。
-    let run = 1 + screen_text[..last]
-        .chars()
-        .rev()
-        .take_while(|c| *c == RULE)
-        .count();
-    if run < 3 {
-        return false;
-    }
-    screen_text[last + RULE.len_utf8()..]
+    screen_text[end..]
         .lines()
         .flat_map(|line| line.split('·'))
         .flat_map(|piece| piece.split("  "))
         .any(|token| is_background_pill(token.trim()))
 }
 
+/// 画面で最後の罫線 (`─` が 3 個以上並んだ所) の (開始, 終了) バイト位置。
+/// Claude Code の画面では入力欄の下枠。1〜2 個だけの `─` は罫線ではない
+/// (本文やエージェント一覧に混ざった記号) とみなして読み飛ばす。
+///
+/// 入力欄の上枠は右端にセッション名の札が付いて `──── name ─` で終わることが
+/// あるが、長い並びのほうを取るので札の後ろの `─` 1 個には引っかからない。
+fn last_rule(text: &str) -> Option<(usize, usize)> {
+    const RULE: char = '─';
+    let mut found = None;
+    let mut run: Option<(usize, usize)> = None; // (開始位置, 個数)
+    for (i, c) in text.char_indices() {
+        if c != RULE {
+            run = None;
+            continue;
+        }
+        let (start, n) = run.map_or((i, 1), |(start, n)| (start, n + 1));
+        run = Some((start, n));
+        if n >= 3 {
+            found = Some((start, i + RULE.len_utf8()));
+        }
+    }
+    found
+}
+
 /// `1 shell` / `2 local agents` / `1 shell, 1 monitor` / `◇ 1 cloud session` の形か。
 /// 区切った 1 つ分と完全に一致するときだけ真 (`1 shell still running` は偽)。
 fn is_background_pill(token: &str) -> bool {
     // クラウド系の札は先頭に記号 1 つと空白が付く。
-    let mut chars = token.chars();
-    let body = match (chars.next(), chars.next()) {
-        (Some(glyph), Some(' ')) if !glyph.is_alphanumeric() => chars.as_str(),
-        _ => token,
-    };
-    !body.is_empty() && body.split(", ").all(is_count_and_noun)
+    let body = strip_leading_glyph(token);
+    !body.is_empty()
+        && body
+            .split(", ")
+            .all(|part| is_count_and_noun(part, BACKGROUND_NOUNS))
 }
 
-/// `<数字> <BACKGROUND_NOUNS のどれか>` か。
-fn is_count_and_noun(part: &str) -> bool {
+/// 先頭が「英数字でない 1 文字 + 空白」なら、それを外す (`◇ 1 cloud session` /
+/// `✻ Waiting for …`)。
+fn strip_leading_glyph(s: &str) -> &str {
+    let mut chars = s.chars();
+    match (chars.next(), chars.next()) {
+        (Some(glyph), Some(' ')) if !glyph.is_alphanumeric() => chars.as_str(),
+        _ => s,
+    }
+}
+
+/// `<数字> <nouns のどれか>` か。
+fn is_count_and_noun(part: &str, nouns: &[&str]) -> bool {
     let digits = part.chars().take_while(|c| c.is_ascii_digit()).count();
     digits > 0
         && part[digits..]
             .strip_prefix(' ')
-            .is_some_and(|noun| BACKGROUND_NOUNS.contains(&noun))
+            .is_some_and(|noun| nouns.contains(&noun))
+}
+
+/// 待ちの行 `Waiting for <n> <名詞> [and <n> <名詞>] to finish` に出る名詞
+/// (Claude Code v2.1.325 の本体で確認・2026-11-15)。
+const WAITING_NOUNS: &[&str] = &[
+    "background agent",
+    "background agents",
+    "dynamic workflow",
+    "dynamic workflows",
+];
+
+/// 返答は終わったが、裏のエージェント (または dynamic workflow) の終わりを待って
+/// いるか。入力欄のすぐ上の行 `✻ Waiting for 1 background agent to finish` を見る。
+///
+/// この場面はフッターに札 (`1 local agent`) が出ず、[`has_background_work`] では
+/// 拾えない (裏のエージェントはフッターの下の一覧 `◯ general-purpose …` に出る・
+/// 2026-11-15 のゆうさんのスクショと CCNEST_STATUS_TRACE の実物)。
+///
+/// 待ちの行はターン終了の行 (`✻ Worked for 9s · done 10:09` と同じ場所) の
+/// 差し替えで、会話に残る文字。エージェントが終わると通知で次のターンが始まり、
+/// 行の下に新しい内容が足されるので、「入力欄の上枠より前の、最後の空でない行」が
+/// この文言のときだけ真にする (古い行には当たらない)。
+/// 入力欄 (上枠と下枠の罫線 2 本) が無い画面は false。
+pub fn is_waiting_for_background(screen_text: &str) -> bool {
+    let Some((bottom, _)) = last_rule(screen_text) else {
+        return false;
+    };
+    let above_bottom = &screen_text[..bottom];
+    let Some((top, _)) = last_rule(above_bottom) else {
+        return false;
+    };
+    // 上枠の行より前だけを見る (行の途中で切らない)。
+    let transcript_end = above_bottom[..top].rfind('\n').map_or(0, |i| i + 1);
+    above_bottom[..transcript_end]
+        .lines()
+        .rev()
+        .map(str::trim)
+        .find(|line| !line.is_empty())
+        .is_some_and(is_waiting_line)
+}
+
+/// `[記号 ]Waiting for 1 background agent to finish` /
+/// `… 2 background agents and 1 dynamic workflow to finish` の形か (完全一致)。
+fn is_waiting_line(line: &str) -> bool {
+    strip_leading_glyph(line)
+        .strip_prefix("Waiting for ")
+        .and_then(|rest| rest.strip_suffix(" to finish"))
+        .is_some_and(|counts| {
+            counts
+                .split(" and ")
+                .all(|part| is_count_and_noun(part, WAITING_NOUNS))
+        })
 }
 
 /// 可視画面テキストから Claude の状態を判定する。
@@ -181,15 +254,16 @@ fn is_count_and_noun(part: &str) -> bool {
 /// - `screen_text`: 可視画面の全行テキスト (scrollback は含まない)
 ///
 /// スピナー行 (現行の経過秒つき、または旧 CLI の "esc to interrupt") が
-/// あれば Busy。無くて、フッターに裏の仕事の札があれば Background
-/// ([`has_background_work`])。どちらも無ければ NeedsAttention。
+/// あれば Busy。無くて、フッターに裏の仕事の札がある ([`has_background_work`])
+/// か、入力欄のすぐ上が裏のエージェント待ちの行 ([`is_waiting_for_background`])
+/// なら Background。どれも無ければ NeedsAttention。
 /// 質問文言の検出はしない (Claude の返答本文に "Would you like" が残っている
 /// だけで色が変わる誤検知があり、区別自体をやめた)。そのため、裏の仕事が
 /// 動いている間に Claude が文章で質問して返答を終えた場合も Background になる。
 pub fn detect_status(screen_text: &str) -> ClaudeStatus {
     if has_spinner_timer(screen_text) || BUSY_MARKERS.iter().any(|m| screen_text.contains(m)) {
         ClaudeStatus::Busy
-    } else if has_background_work(screen_text) {
+    } else if has_background_work(screen_text) || is_waiting_for_background(screen_text) {
         ClaudeStatus::Background
     } else {
         ClaudeStatus::NeedsAttention
@@ -554,6 +628,195 @@ mod tests {
         assert_eq!(detect_status(&text), ClaudeStatus::Background);
     }
 
+    // ---- is_waiting_for_background / 裏のエージェント待ち ----
+
+    // 2026-11-15 のゆうさんのスクショの形: フッターに札が無く、入力欄のすぐ上が
+    // 待ちの行。上枠の右端にセッション名の札、フッターの下にエージェントの一覧。
+    fn screen_waiting(last_lines: &str, footer: &str) -> String {
+        let rule = "─".repeat(72);
+        let top = format!("{} resume-p1-affilia-features ─", "─".repeat(44));
+        format!("● 続きを再開したよ。\n\n{last_lines}\n\n{top}\n❯ \n{rule}\n{footer}\n")
+    }
+
+    const AGENT_LIST_FOOTER: &str = "  ⏵⏵ bypass permissions on (shift+tab to cycle) · ← 8 agents          /rc\n\n  ● main\n  ○ general-purpose  Probing node:sqlite in probe.mjs      10m 31s · ↓ 137.1k tokens";
+
+    // 2026-11-15 に使い捨て ccnest の CCNEST_STATUS_TRACE で取った実物 (claude v2.1.325・
+    // 裏のエージェントに sleep 60 をさせて返答を終えた直後・幅 100 桁)。行末の空白だけ
+    // 落とした。プロンプトの後ろは NBSP、一覧の丸は ◯ (U+25EF)。フッターに札は無い。
+    const REAL_WAITING_AGENT_SCREEN: &str = "\
+❯ Use the Agent tool with run_in_background set to true to start one general-purpose agent. Its       only job is to run the shell command sleep 60 once and then answer done. Do not wait for it and
+  do not check on it. Then reply with only the word started.
+
+● Agent(Run sleep 60 once)
+  ⎿ \u{a0}Backgrounded agent (↓ to manage · ctrl+o to expand)
+
+● started
+
+✻ Waiting for 1 background agent to finish
+
+────────────────────────────────────────────────────────────────────────────────────────────────────
+❯\u{a0}
+────────────────────────────────────────────────────────────────────────────────────────────────────
+  ⏵⏵ bypass permissions on (shift+tab to cycle) · ← 8 agents
+                             You've used 94% of your Fable limit · resets Nov 17, 3am (Asia/Tokyo)
+                                                                                               /rc
+
+  ● main
+  ◯ general-purpose  Run sleep 60 once                                         2s · ↓ 48.6k tokens
+";
+
+    // 実物: 返答は終わり、裏のエージェントが動いている → 裏で実行中
+    #[test]
+    fn real_screen_waiting_for_background_agent_is_background() {
+        assert!(!has_background_work(REAL_WAITING_AGENT_SCREEN));
+        assert!(is_waiting_for_background(REAL_WAITING_AGENT_SCREEN));
+        assert_eq!(
+            detect_status(REAL_WAITING_AGENT_SCREEN),
+            ClaudeStatus::Background
+        );
+    }
+
+    // 同じ流れで、エージェントが終わって通知の返答も終わったあとの実物 (返答の
+    // 本文は途中を省いた)。古い待ちの行が画面の上に残っている。下枠はフッターの
+    // 行と改行なしでつながり、フッターに札は無い (`/tasks to see subagents` は案内)。
+    const REAL_AGENT_DONE_SCREEN: &str = "\
+✻ Waiting for 1 background agent to finish
+
+● Agent \"Run sleep 60 once\" finished · 4s
+
+● ゆうさん、さっきのエージェントから結果が返ってきたよ。
+
+✻ Churned for 15s · done 16:34
+
+────────────────────────────────────────────────────────────────────────────────────────────────────❯\u{a0}
+────────────────────────────────────────────────────────────────────────────────────────────────────  ⏵⏵ bypass permissions on (shift+tab to cycle) · /tasks to see subagents · ← 8 agents         /rc
+";
+
+    // 実物: エージェントが終わったら、古い待ちの行が残っていてもこちらの番に戻る
+    #[test]
+    fn real_screen_after_background_agent_finished_is_attention() {
+        assert!(REAL_AGENT_DONE_SCREEN.contains("Waiting for 1 background agent to finish"));
+        assert!(!is_waiting_for_background(REAL_AGENT_DONE_SCREEN));
+        assert!(!has_background_work(REAL_AGENT_DONE_SCREEN));
+        assert_eq!(
+            detect_status(REAL_AGENT_DONE_SCREEN),
+            ClaudeStatus::NeedsAttention
+        );
+    }
+
+    // 返答は終わり、入力欄のすぐ上が「Waiting for 1 background agent to finish」→ 裏で実行中
+    #[test]
+    fn waiting_line_above_the_input_box_is_background() {
+        let text = screen_waiting(
+            "✻ Waiting for 1 background agent to finish",
+            AGENT_LIST_FOOTER,
+        );
+        assert!(!has_background_work(&text));
+        assert!(is_waiting_for_background(&text));
+        assert_eq!(detect_status(&text), ClaudeStatus::Background);
+    }
+
+    // 文言の組み立て (本体 v2.1.325): エージェントだけ / workflow だけ / 両方 (and)。
+    // 先頭の記号は無くても、別の記号でもよい
+    #[test]
+    fn waiting_line_variants_are_background() {
+        for line in [
+            "✻ Waiting for 1 background agent to finish",
+            "✻ Waiting for 3 background agents to finish",
+            "✻ Waiting for 1 dynamic workflow to finish",
+            "✻ Waiting for 2 dynamic workflows to finish",
+            "✻ Waiting for 2 background agents and 1 dynamic workflow to finish",
+            "* Waiting for 12 background agents to finish",
+            "Waiting for 1 background agent to finish",
+            "   ✻ Waiting for 1 background agent to finish   ",
+        ] {
+            let text = screen_waiting(line, "  ⏵⏵ bypass permissions on · ← 8 agents");
+            assert!(is_waiting_for_background(&text), "{line}");
+            assert_eq!(detect_status(&text), ClaudeStatus::Background, "{line}");
+        }
+    }
+
+    // 古い待ちの行の下に別の内容が足されていれば (= エージェントは終わって次の
+    // ターンが済んだ)、こちらの番
+    #[test]
+    fn stale_waiting_line_followed_by_more_output_is_attention() {
+        let text = screen_waiting(
+            "✻ Waiting for 1 background agent to finish\n\n● 担当の作業が終わったよ。\n\n✻ Worked for 12s · done 15:02",
+            "  ⏵⏵ bypass permissions on (shift+tab to cycle) · ← 8 agents",
+        );
+        assert!(!is_waiting_for_background(&text));
+        assert_eq!(detect_status(&text), ClaudeStatus::NeedsAttention);
+    }
+
+    // 似た文は当たらない (完全に一致する形だけ)
+    #[test]
+    fn similar_lines_are_not_waiting() {
+        for line in [
+            "Waiting for the agent",
+            "✻ Waiting for 1 background agent to finish soon",
+            "✻ Waiting for background agent to finish",
+            "✻ Waiting for 1 background agent",
+            "✻ Waiting for 1 agent to finish",
+            "✻ Waiting for 1 shell to finish",
+            "✻ Waiting for 1 background agent and to finish",
+            "✻ Waiting for  to finish",
+            "● Waiting for 1 background agent to finish だよ",
+            "✻ Worked for 9s · done 10:09",
+        ] {
+            let text = screen_waiting(line, "  ⏵⏵ bypass permissions on · ← 8 agents");
+            assert!(!is_waiting_for_background(&text), "{line}");
+            assert_eq!(detect_status(&text), ClaudeStatus::NeedsAttention, "{line}");
+        }
+    }
+
+    // 返答中 (スピナー行あり) は実行中が勝つ
+    #[test]
+    fn spinner_beats_waiting_line() {
+        let text = screen_waiting(
+            "✻ Waiting for 1 background agent to finish\n\n❯ 進み具合は？\n\n✶ Boondoggling… (6s · ↓302 tokens)",
+            AGENT_LIST_FOOTER,
+        );
+        assert_eq!(detect_status(&text), ClaudeStatus::Busy);
+    }
+
+    // 入力欄が無い画面 (許可ダイアログなど) は見ない
+    #[test]
+    fn waiting_line_without_input_box_is_not_background() {
+        for text in [
+            "✻ Waiting for 1 background agent to finish\n\nDo you want to proceed?\n❯ 1. Yes\n  2. No",
+            "✻ Waiting for 1 background agent to finish",
+            // 罫線が 1 本だけ (上枠が無い)
+            "✻ Waiting for 1 background agent to finish\n────────\n  footer",
+        ] {
+            assert!(!is_waiting_for_background(text), "{text}");
+        }
+    }
+
+    // 上枠が幅いっぱいで、プロンプトの行と改行なしでつながっていても拾う
+    #[test]
+    fn waiting_line_with_rule_joined_to_prompt_is_background() {
+        let rule = "─".repeat(72);
+        let text = format!(
+            "● started\n\n✻ Waiting for 1 background agent to finish\n\n{rule}❯ \n{rule}  ⏵⏵ bypass permissions on · ← 8 agents\n"
+        );
+        assert_eq!(detect_status(&text), ClaudeStatus::Background);
+    }
+
+    // フッターの下の一覧に `─` が混ざっても、入力欄の枠を見失わない
+    #[test]
+    fn stray_rule_char_in_the_footer_does_not_hide_the_input_box() {
+        let text = screen_waiting(
+            "✻ Waiting for 1 background agent to finish",
+            "  ⏵⏵ bypass permissions on · ← 8 agents\n\n  ● main\n  ○ general-purpose  a ─ b      5s · ↓ 1k tokens",
+        );
+        assert_eq!(detect_status(&text), ClaudeStatus::Background);
+        let text = screen_with_footer(
+            "● started",
+            "⏵⏵ bypass permissions on · 1 shell\n\n  ○ general-purpose  a ─ b",
+        );
+        assert_eq!(detect_status(&text), ClaudeStatus::Background);
+    }
+
     // ---- aggregate_status ----
 
     // 裏で実行中は shell より上、実行中・対応待ちより下 (順序非依存)
@@ -714,6 +977,14 @@ mod tests {
 }
 
 // Version History
+// - ver1.7 (2026-11-15): 裏のエージェント待ちも Background (🔵) にする。この場面は
+//   フッターに札が出ず (裏のエージェントはフッターの下の一覧に出る)、返答が
+//   "✻ Waiting for 1 background agent to finish" で終わるのに 🟨 だった。
+//   is_waiting_for_background が「入力欄の上枠より前の、最後の空でない行」を見る
+//   (会話に残る文字なので、下に別の内容が足された古い行には当たらない)。
+//   罫線探しを last_rule に切り出し、「最後の `─`」ではなく「3 個以上並んだ最後の所」に
+//   した (フッターの下の一覧に `─` が混ざっても入力欄を見失わない)。
+//   テスト文字列は CCNEST_STATUS_TRACE で取った claude v2.1.325 の実物
 // - ver1.6 (2026-11-14): 3 つ目の状態 Background (🔵 裏で実行中) を追加 (ユーザー決定)。
 //   返答が終わるとスピナー行が消え、裏でシェルやエージェントが動いていても 🟨 に
 //   なっていた。has_background_work がフッター (最後の罫線より後ろ) の札

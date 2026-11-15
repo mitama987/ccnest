@@ -5,6 +5,46 @@
 
 ---
 
+## 2026-11-15 — 裏のエージェント待ちのタブも 🔵（v0.1.39）
+
+ブランチ: `feature/background-agent-wait-marker`
+
+### 背景
+
+ゆうさんのスクショ（2026-11-15）: 返答が `✻ Waiting for 1 background agent to finish` で終わり、裏のエージェント 1 つを待っているタブが 🟨 のままだった。「この画面でも青アイコンになってほしい」。
+
+v0.1.36 の 🔵 はフッターの札（`1 shell`・`1 local agent` など）だけを見ていた。裏のエージェントは札を出さず、フッターの下の一覧（`● main`／`◯ general-purpose … 2s · ↓ 48.6k tokens`）に出る。
+
+### 判定
+
+- 入力欄の上枠より前の、最後の空でない行が `[記号 ]Waiting for <n> background agent(s) [and <n> dynamic workflow(s)] to finish` と完全に一致したら Background（🔵）
+- 文言は Claude Code v2.1.325 の本体で確認。ターン終了の行（`✻ Worked for 9s · done 10:09` と同じ場所）の差し替えで、会話に残る文字
+- 古い行に当たらない理由: エージェントが終わると通知で Claude が次のターンを始め、行の下に新しい内容が足される（実物でも、完了後の画面の上に古い待ちの行が残っていた）
+- 入力欄（上枠と下枠の罫線 2 本）が無い画面は見ない（許可ダイアログは 🟨）
+
+### 変更点
+
+| ファイル | 内容 |
+|---|---|
+| `src/pane/status.rs` ver1.7 | `is_waiting_for_background`・`is_waiting_line`・`WAITING_NOUNS`。罫線探しを `last_rule`（3 個以上並んだ最後の所の開始・終了位置）に切り出して `has_background_work` と共用。`strip_leading_glyph` を切り出し、`is_count_and_noun` は名詞の表を引数に取る。`detect_status` はスピナー行 → Busy／札 **または** 待ちの行 → Background／それ以外 → NeedsAttention |
+| `scripts/e2e/background-marker.ps1` | `-Agent` スイッチ（裏のエージェントで同じ 4 場面）。完了待ちは、経過秒の無いスピナー行（`* Tinkering…`）も待ち、同じ条件が 6 秒あけて 2 回続いたら落ち着いたとみなす。シェル版の `'\b1 shell\b'` に紛れていた制御文字（0x08）を正規表現の `\b` に直した |
+| `README.md` | 🔵 の説明に待ちの行を追記・ver0.1.39 |
+| `Cargo.toml`／`Cargo.lock` | 0.1.39 |
+
+### 確認
+
+- `cargo test`: status.rs の新旧テスト（実物 2 画面を含む）
+- `scripts/e2e/background-marker.ps1 -Agent`: PASS。入力待ち NeedsAttention（🟨）→ 返答中 Busy（🟢）→ 返答が終わって待ちの行 Background（🔵）→ エージェントが終わって NeedsAttention（🟨・古い待ちの行は画面に残っている）。スクショで 🔵 を目視
+
+### 残る制限
+
+- フッターの下の一覧は判定に使っていない（終わったエージェントの行がどう残るかを確かめていない）
+- Claude Code の完了行の表示（showTurnDuration）を切っていると待ちの行が出ず、🟨 のまま
+- 裏のエージェントを手で止めた直後は、次の発話まで待ちの行が最後に残り 🔵 のまま
+- 返答の出だしのスピナー行は経過秒が付く前（`* Tinkering…`）があり、その 1〜2 秒は Busy にならない（以前から）
+
+---
+
 ## 2026-11-15 — 引いているタブを浮かせる（v0.1.38）
 
 ブランチ: `feature/tab-drag-float`
