@@ -219,21 +219,94 @@ const WAITING_NOUNS: &[&str] = &[
 /// この文言のときだけ真にする (古い行には当たらない)。
 /// 入力欄 (上枠と下枠の罫線 2 本) が無い画面は false。
 pub fn is_waiting_for_background(screen_text: &str) -> bool {
-    let Some((bottom, _)) = last_rule(screen_text) else {
-        return false;
-    };
+    transcript(screen_text).is_some_and(|t| {
+        t.lines()
+            .rev()
+            .map(str::trim)
+            .find(|line| !line.is_empty())
+            .is_some_and(is_waiting_line)
+    })
+}
+
+/// 画面のうち会話の部分 (入力欄の上枠の行より前)。入力欄 (上枠と下枠の罫線
+/// 2 本) が無い画面は None。行の途中では切らない。
+fn transcript(screen_text: &str) -> Option<&str> {
+    let (bottom, _) = last_rule(screen_text)?;
     let above_bottom = &screen_text[..bottom];
-    let Some((top, _)) = last_rule(above_bottom) else {
+    let (top, _) = last_rule(above_bottom)?;
+    let end = above_bottom[..top].rfind('\n').map_or(0, |i| i + 1);
+    Some(&above_bottom[..end])
+}
+
+/// 「判断待ち」の見出しの末尾に来る言葉。返答の最後に
+/// `▼ ゆうさんの判断待ち` の節を置き、無ければ `・今はなし` と書く報告の型を前提にする。
+const DECISION_HEADINGS: &[&str] = &["判断待ち"];
+/// 見出しとみなす行の長さの上限 (文字数)。これより長い行は文章。
+const DECISION_HEADING_MAX_CHARS: usize = 30;
+/// 「判断待ちは無い」と読む項目の出だし。
+const DECISION_NONE_WORDS: &[&str] = &["なし", "無し", "ありません", "none", "None", "NONE"];
+/// 「なし」の前に付く言葉 (`今はなし`・`特になし`)。
+const DECISION_NONE_LEADS: &[&str] = &[
+    "今のところ",
+    "今は",
+    "現時点では",
+    "現在は",
+    "特に",
+    "とくに",
+];
+/// 箇条書きの行頭に来る記号。
+const BULLETS: &[char] = &['・', '･', '-', '•', '*', '–', '—'];
+
+/// 返答が「ユーザーの判断待ち」で終わっているか。裏で何かが動いていても、
+/// これが真ならこちらの番 (🟨) にする (ユーザー決定 2026-11-15)。
+///
+/// 見るのは会話の部分 ([`transcript`]) にある最後の「判断待ち」の見出し:
+/// - 見出しのすぐ下の行 (最初の項目) が「なし」の類なら偽 (`・今はなし`)
+/// - 見出しのすぐ下が空行 (中身が無い)・見出しが画面に無いときも偽
+/// - 見出しより後ろにユーザーの発話 (`❯ …`) があれば偽 (もう答えている)
+///
+/// 質問文言 ("Would you like …") を探す方式は誤検知が多くてやめた経緯がある。
+/// ここは文言ではなく報告の型 (見出し + 項目) を見るので、本文に「判断待ち」と
+/// 書いてあるだけでは当たらない。型を使わない返答には効かない (今までどおり)。
+pub fn asks_for_decision(screen_text: &str) -> bool {
+    let Some(transcript) = transcript(screen_text) else {
         return false;
     };
-    // 上枠の行より前だけを見る (行の途中で切らない)。
-    let transcript_end = above_bottom[..top].rfind('\n').map_or(0, |i| i + 1);
-    above_bottom[..transcript_end]
-        .lines()
-        .rev()
-        .map(str::trim)
-        .find(|line| !line.is_empty())
-        .is_some_and(is_waiting_line)
+    let lines: Vec<&str> = transcript.lines().map(str::trim).collect();
+    let Some(heading) = lines.iter().rposition(|line| is_decision_heading(line)) else {
+        return false;
+    };
+    let after = &lines[heading + 1..];
+    if after.iter().any(|line| line.starts_with('❯')) {
+        return false;
+    }
+    after
+        .first()
+        .is_some_and(|item| !item.is_empty() && !is_none_item(item))
+}
+
+/// `▼ ゆうさんの判断待ち` / `■ 5. ゆうさんの判断待ち` / `判断待ち：` の形か。
+/// 短い行が「判断待ち」(+ コロン) で終わるときだけ真。箇条書きの行は見出しではない。
+fn is_decision_heading(line: &str) -> bool {
+    if line.starts_with(BULLETS) || line.chars().count() > DECISION_HEADING_MAX_CHARS {
+        return false;
+    }
+    let body = line.trim_end_matches([':', '：', ' ', '　']);
+    DECISION_HEADINGS.iter().any(|word| body.ends_with(word))
+}
+
+/// `・今はなし` / `なし` / `- 特になし` / `・None` のように、中身が無いと読む項目か。
+fn is_none_item(item: &str) -> bool {
+    let mut body = item.trim_start_matches(|c: char| BULLETS.contains(&c) || c.is_whitespace());
+    for lead in DECISION_NONE_LEADS {
+        if let Some(rest) = body.strip_prefix(lead) {
+            body = rest.trim_start();
+            break;
+        }
+    }
+    DECISION_NONE_WORDS
+        .iter()
+        .any(|word| body.starts_with(word))
 }
 
 /// `[記号 ]Waiting for 1 background agent to finish` /
@@ -249,21 +322,43 @@ fn is_waiting_line(line: &str) -> bool {
         })
 }
 
+/// 画面の各行 (vt100 の `Screen::rows`) を、判定用の 1 つの文字列にする。
+/// 行は必ず改行で区切り、行末の空白と末尾の空行を落とす。
+///
+/// vt100 の `Screen::contents()` は使わない: 最終列まで埋まった行 (wrapped) を
+/// 次の行と改行なしでつなぐので、Claude Code が行を空白で最終列まで埋めて書いた
+/// ときに、別々の行 (`▼ ゆうさんの判断待ち` と `・項目`) が 1 行になる
+/// (2026-11-15 に実物で確認。v0.1.41 までは contents() を渡していた)。
+pub fn screen_text(rows: impl IntoIterator<Item = String>) -> String {
+    let mut text = String::new();
+    for row in rows {
+        text.push_str(row.trim_end());
+        text.push('\n');
+    }
+    text.truncate(text.trim_end_matches('\n').len());
+    text
+}
+
 /// 可視画面テキストから Claude の状態を判定する。
 ///
-/// - `screen_text`: 可視画面の全行テキスト (scrollback は含まない)
+/// - `screen_text`: 可視画面の全行テキスト ([`screen_text`] で作る。scrollback は含まない)
 ///
 /// スピナー行 (現行の経過秒つき、または旧 CLI の "esc to interrupt") が
 /// あれば Busy。無くて、フッターに裏の仕事の札がある ([`has_background_work`])
 /// か、入力欄のすぐ上が裏のエージェント待ちの行 ([`is_waiting_for_background`])
 /// なら Background。どれも無ければ NeedsAttention。
+/// ただし裏の仕事があっても、返答が「判断待ち」の節 (中身あり) で終わって
+/// いれば NeedsAttention ([`asks_for_decision`])。
 /// 質問文言の検出はしない (Claude の返答本文に "Would you like" が残っている
 /// だけで色が変わる誤検知があり、区別自体をやめた)。そのため、裏の仕事が
-/// 動いている間に Claude が文章で質問して返答を終えた場合も Background になる。
+/// 動いている間に Claude が「判断待ち」の節を使わず文章だけで質問して返答を
+/// 終えた場合は Background のまま。
 pub fn detect_status(screen_text: &str) -> ClaudeStatus {
     if has_spinner_timer(screen_text) || BUSY_MARKERS.iter().any(|m| screen_text.contains(m)) {
         ClaudeStatus::Busy
-    } else if has_background_work(screen_text) || is_waiting_for_background(screen_text) {
+    } else if (has_background_work(screen_text) || is_waiting_for_background(screen_text))
+        && !asks_for_decision(screen_text)
+    {
         ClaudeStatus::Background
     } else {
         ClaudeStatus::NeedsAttention
@@ -818,6 +913,201 @@ mod tests {
         assert_eq!(detect_status(&text), ClaudeStatus::Background);
     }
 
+    // ---- screen_text / 行ごとに取った画面を判定用の文字にする ----
+
+    // 行は必ず改行で区切る。行末の空白と、末尾の空行は落とす
+    #[test]
+    fn screen_text_joins_rows_with_newlines_and_trims() {
+        let rows = ["● ▼ 見出し      ", "  ・項目", "", "❯ ", "   ", ""].map(String::from);
+        assert_eq!(screen_text(rows), "● ▼ 見出し\n  ・項目\n\n❯");
+        assert_eq!(screen_text(Vec::<String>::new()), "");
+    }
+
+    // vt100 の contents() は「最終列まで埋まった行」を次の行と改行なしでつなぐ。
+    // 2026-11-15 の実物: 見出しの行が空白で最終列まで埋まり、項目の行とつながって
+    // 1 行になった (判定が外れて Background のままだった)。行ごとに取れば分かれる
+    #[test]
+    fn rows_keep_heading_and_item_apart_where_contents_joined_them() {
+        let heading = format!("● ▼ ゆうさんの判断待ち{}", " ".repeat(78));
+        let rule = "─".repeat(100);
+        let footer = "  ⏵⏵ bypass permissions on · 1 shell · ← 9 agents      /rc";
+        // contents() の形 (つながっている) では見出しを見つけられない
+        let joined = format!(
+            "{heading}・マーク: A か B のどれにするか\n\n✻ Churned for 5s · done 17:06 · 1 shell still running\n\n{rule}\n❯\u{a0}\n{rule}\n{footer}"
+        );
+        assert!(!asks_for_decision(&joined));
+        // 行ごとの形
+        let rows = [
+            heading.as_str(),
+            "  ・マーク: A か B のどれにするか",
+            "",
+            "✻ Churned for 5s · done 17:06 · 1 shell still running",
+            "",
+            rule.as_str(),
+            "❯\u{a0}",
+            rule.as_str(),
+            footer,
+        ]
+        .map(String::from);
+        let text = screen_text(rows);
+        assert!(asks_for_decision(&text));
+        assert_eq!(detect_status(&text), ClaudeStatus::NeedsAttention);
+    }
+
+    // ---- asks_for_decision / 裏で動いていても判断待ちならこちらの番 ----
+
+    const SHELLS_FOOTER: &str = "  ⏵⏵ bypass permissions on · 2 shells · ← 8 agents          /rc\n\n  ● main\n  ◯ general-purpose  Scheduling final e2e-live.mjs run      1h 1m 46s · ↓ 440.5k tokens";
+
+    // 2026-11-15 のゆうさんの 2 枚目のスクショの形: 裏でシェル 2 つとエージェントが
+    // 動いているが、返答の最後の「ゆうさんの判断待ち」に中身がある → こちらの番
+    #[test]
+    fn decision_items_with_background_work_is_attention() {
+        let text = screen_waiting(
+            "▼ 裏で動いているもの\n・P1 の担当が 1 つ。最後の通し検査の途中（完了の知らせはまだ）\n\n▼ レイナの残り\n・ロゴが決まったら、P1 のあとにアプリへ表示\n・そのあと P2〜P10 を順番に\n\n▼ ゆうさんの判断待ち\n・マーク: A〜F のどれにするか\n・文字: 1／2／3 のどれにするか\n\n✻ Crunched for 1m 27s · done 16:59 · 2 shells still running",
+            SHELLS_FOOTER,
+        );
+        assert!(has_background_work(&text));
+        assert!(asks_for_decision(&text));
+        assert_eq!(detect_status(&text), ClaudeStatus::NeedsAttention);
+    }
+
+    // 2026-11-15 に使い捨て ccnest の CCNEST_STATUS_TRACE で取った実物 (claude v2.1.325・
+    // 行ごとに取った形)。裏で ping を走らせたまま、返答が判断待ちの節で終わっている。
+    // 見出しの前に返答の印 `● ` が付き、項目は 2 桁の字下げ。フッターに `1 shell` の札。
+    const REAL_DECISION_SCREEN: &str = "\
+● Bash(ping -n 150 127.0.0.1)
+  ⎿ \u{a0}Running in the background (↓ to manage)
+
+  Read 1 file (ctrl+o to expand)
+
+● ▼ ゆうさんの判断待ち
+  ・マーク: A か B のどれにするか
+
+✻ Baked for 5s · done 17:09 · 1 shell still running
+
+────────────────────────────────────────────────────────────────────────────────────────────────────
+❯
+────────────────────────────────────────────────────────────────────────────────────────────────────
+  ⏵⏵ bypass permissions on · 1 shell · ← 8 agents                                              /rc";
+
+    // 実物: 裏のシェルが動いていても、判断待ちに中身があればこちらの番
+    #[test]
+    fn real_screen_decision_pending_with_background_shell_is_attention() {
+        assert!(has_background_work(REAL_DECISION_SCREEN));
+        assert!(asks_for_decision(REAL_DECISION_SCREEN));
+        assert_eq!(
+            detect_status(REAL_DECISION_SCREEN),
+            ClaudeStatus::NeedsAttention
+        );
+        // 同じ画面で項目だけ「今はなし」なら裏で実行中 (実機の 2 つ目の返答と同じ形)
+        let none = REAL_DECISION_SCREEN.replace("マーク: A か B のどれにするか", "今はなし");
+        assert_eq!(detect_status(&none), ClaudeStatus::Background);
+    }
+
+    // 1 枚目のスクショの形: 判断待ちが「今はなし」→ 裏で実行中のまま
+    #[test]
+    fn decision_none_with_background_work_stays_background() {
+        let text = screen_waiting(
+            "▼ レイナの残り\n・P1 の結果を確かめて、P2〜P10 を順番に進める\n\n▼ ゆうさんの判断待ち\n・今はなし\n\n※裏の担当は、このセッションを閉じると一緒に止まる。\n\n✻ Waiting for 1 background agent to finish",
+            AGENT_LIST_FOOTER,
+        );
+        assert!(!asks_for_decision(&text));
+        assert_eq!(detect_status(&text), ClaudeStatus::Background);
+    }
+
+    // 「なし」の書き方いろいろ。長い「なし」が折り返して 2 行になっても中身なし
+    #[test]
+    fn decision_none_wordings_are_not_a_decision() {
+        for body in [
+            "・なし",
+            "なし",
+            "・今のところなし",
+            "・特になし",
+            "- 無し",
+            "・ありません",
+            "・None",
+            "・今はなし（裏の担当が終わったら\n  レイナが続きを進める）",
+        ] {
+            let text = screen_waiting(
+                &format!("▼ ゆうさんの判断待ち\n{body}\n\n✻ Cooked for 3s · done 18:08"),
+                SHELLS_FOOTER,
+            );
+            assert!(!asks_for_decision(&text), "{body}");
+            assert_eq!(detect_status(&text), ClaudeStatus::Background, "{body}");
+        }
+    }
+
+    // 見出しの書き方いろいろ (記号・通し番号・末尾のコロン・記号なし)
+    #[test]
+    fn decision_heading_variants_are_attention() {
+        for heading in [
+            "▼ ゆうさんの判断待ち",
+            "■ 5. ゆうさんの判断待ち",
+            "ゆうさんの判断待ち",
+            "▼ ゆうさんの判断待ち：",
+            "▼ 判断待ち:",
+        ] {
+            let text = screen_waiting(
+                &format!("{heading}\n・A と B のどちらにするか\n\n✻ Cooked for 3s · done 18:08"),
+                SHELLS_FOOTER,
+            );
+            assert!(asks_for_decision(&text), "{heading}");
+            assert_eq!(
+                detect_status(&text),
+                ClaudeStatus::NeedsAttention,
+                "{heading}"
+            );
+        }
+    }
+
+    // 判断待ちのあとにユーザーの発話 (❯ …) があれば、もう答えている
+    #[test]
+    fn decision_answered_by_the_user_is_not_a_decision() {
+        let text = screen_waiting(
+            "▼ ゆうさんの判断待ち\n・マーク: A〜F のどれにするか\n\n✻ Crunched for 1m 27s · done 16:59 · 2 shells still running\n\n❯ D と 3 で\n\n● 了解、D と 3 で進めるね。\n\n✻ Cooked for 3s · done 17:02 · 2 shells still running",
+            SHELLS_FOOTER,
+        );
+        assert!(!asks_for_decision(&text));
+        assert_eq!(detect_status(&text), ClaudeStatus::Background);
+    }
+
+    // 見出しでないものは当たらない: 中身の無い見出し・箇条書きの中の言葉・長い文
+    #[test]
+    fn non_headings_and_empty_sections_are_not_a_decision() {
+        for body in [
+            "▼ ゆうさんの判断待ち\n\n・これは別の段落",
+            "▼ ゆうさんの判断待ち",
+            "▼ レイナの残り\n・ロゴの反映はゆうさんの判断待ち\n・P2 を進める",
+            "ここまでの作業は全部終わっていて、ロゴをどれにするかだけがゆうさんの判断待ち\n・A\n・B",
+            "▼ 判断待ちの一覧は次のとおり\n・A",
+        ] {
+            let text = screen_waiting(
+                &format!("{body}\n\n✻ Cooked for 3s · done 18:08"),
+                SHELLS_FOOTER,
+            );
+            assert!(!asks_for_decision(&text), "{body}");
+            assert_eq!(detect_status(&text), ClaudeStatus::Background, "{body}");
+        }
+    }
+
+    // 返答中 (スピナー行あり) は、判断待ちが画面に残っていても実行中
+    #[test]
+    fn spinner_beats_decision_section() {
+        let text = screen_waiting(
+            "▼ ゆうさんの判断待ち\n・マーク: A〜F のどれにするか\n\n● Agent \"P1\" finished · 1h 2m\n\n✶ Boondoggling… (6s · ↓302 tokens)",
+            SHELLS_FOOTER,
+        );
+        assert_eq!(detect_status(&text), ClaudeStatus::Busy);
+    }
+
+    // 入力欄が無い画面は見ない (どのみち NeedsAttention)
+    #[test]
+    fn decision_without_input_box_is_not_checked() {
+        let text = "▼ ゆうさんの判断待ち\n・A か B か\n\nDo you want to proceed?\n❯ 1. Yes";
+        assert!(!asks_for_decision(text));
+        assert_eq!(detect_status(text), ClaudeStatus::NeedsAttention);
+    }
+
     // ---- aggregate_status ----
 
     // 裏で実行中は shell より上、実行中・対応待ちより下 (順序非依存)
@@ -981,6 +1271,14 @@ mod tests {
 }
 
 // Version History
+// - ver1.9 (2026-11-15): 裏の仕事が動いていても、返答が「判断待ち」の節 (中身あり) で
+//   終わっていれば NeedsAttention (ユーザー決定「ゆうさんの判断待ちがあるときはオレンジ
+//   アイコンが良い」)。asks_for_decision が会話の部分にある最後の見出し
+//   (`▼ ゆうさんの判断待ち`) のすぐ下の行を見る: 「今はなし」の類・空行・見出しより
+//   後ろのユーザー発話 (❯ …) は偽。会話の部分の切り出しを transcript に共用化。
+//   screen_text を追加: 判定に渡す文字は vt100 の行を改行でつないで作る
+//   (contents() は最終列まで埋まった行を次の行とつなぎ、見出しと項目が 1 行に
+//   なって実機で判定が外れた)
 // - ver1.8 (2026-11-15): 裏で実行中 (Background) のマーカーを 🔵 → 🟢 に (ユーザー決定
 //   「やっぱり、青の判定時も緑アイコンにして欲しい」)。status_marker だけの変更で、
 //   判定と畳み込みの順位 (NeedsAttention > Busy > Background > Idle) はそのまま

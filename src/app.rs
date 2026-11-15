@@ -10,7 +10,7 @@ use crate::claude::launcher::SessionStart;
 use crate::claude::usage::{UsageCell, UsageLabel, UsageSnapshot};
 use crate::cli::ResumeSpec;
 use crate::pane::grid::{Direction, Layout};
-use crate::pane::status::{detect_status, sanitize_task, ClaudeStatus};
+use crate::pane::status::{detect_status, sanitize_task, screen_text, ClaudeStatus};
 use crate::pane::{Pane, PaneId};
 use crate::remote::{self, Inbox, Reply};
 use crate::sidebar::SidebarState;
@@ -462,11 +462,13 @@ impl App {
                 continue;
             };
             let screen = p.screen();
-            // スクロールバック閲覧中は contents() が過去の画面を返すため
-            // 判定しない (前回の状態を据え置き、最下部へ戻った次の tick で
-            // 回復する)。
+            // スクロールバック閲覧中は過去の画面が返るため判定しない (前回の
+            // 状態を据え置き、最下部へ戻った次の tick で回復する)。
+            // 画面の文字は行ごとに取る (contents() は最終列まで埋まった行を
+            // 次の行とつなぐ。status::screen_text 参照)。
             if screen.scrollback() == 0 {
-                let text = screen.contents();
+                let (_, cols) = screen.size();
+                let text = screen_text(screen.rows(0, cols));
                 pane.status = detect_status(&text);
                 if let Some(t) = trace.as_mut() {
                     t.push_str(&format!(
@@ -875,7 +877,8 @@ fn direction_score(from: &Rect, to: &Rect, dir: Direction) -> Option<i64> {
 /// 重複 cwd は 1 回だけ再探索する。`App` 非依存 (実 PTY spawn なし) で単体テスト
 /// 可能にするため探索そのもの (`git::branch_of`) は呼び出し側で行う。
 /// 開発用: `CCNEST_STATUS_TRACE=<path>` のとき、2 秒 tick ごとに Claude ペインの
-/// 判定結果と、判定に使った画面テキスト (vt100 の contents) を `<path>` に書く。
+/// 判定結果と、判定に使った画面テキスト (vt100 の行を status::screen_text で
+/// つないだもの) を `<path>` に書く。
 /// 状態判定のテスト文字列を実物から起こすため (v0.1.31〜33 は conhost 越しに
 /// 読んで空白が潰れた文字列でテストを書き、実物に一度も当たらなかった)。
 /// 未設定なら OnceLock の判定だけ。
@@ -1353,3 +1356,8 @@ mod tests {
 //                        float_in_strip() gives the floating tab's column for
 //                        both the draw and the drop. CCNEST_TAB_ANIM=off
 //                        disables it (tab_anim_enabled).
+// ver0.16 - 2026-11-15 - refresh_pane_state judges the status from the screen
+//                        taken row by row (Screen::rows via status::screen_text)
+//                        instead of Screen::contents(), which glues a row that
+//                        is filled to the last column onto the next one (a
+//                        heading and its first item became one line).
