@@ -143,6 +143,10 @@ function Waiting-Is-Last($t) {
   }
   return $false
 }
+# 返答中か: 経過秒つきのスピナー行・経過秒の無いスピナー行・フッターの "esc to interrupt"。
+# claude v2.1.327 は返答中フッターに "esc to interrupt" を出し (ccnest も Busy と読む)、
+# 返答の終わりぎわは「スピナー行は消えたが、これはまだ残っている」瞬間がある。
+function Replying($t) { ($t -match $SPIN) -or ($t -match $BARE_SPIN) -or ((Footer $t) -match 'to interrupt') }
 $cc = $null; $hwnd = [IntPtr]::Zero; $sessionId = $null
 try {
   Start-Process wt.exe -ArgumentList @('-w', 'new', '--size', '110,26', '-d', "`"$work`"", 'cmd.exe', '/c', "`"$runCmd`"")
@@ -178,7 +182,7 @@ try {
   $NONE = '今はなし'
   [IO.File]::WriteAllText((Join-Path $work 'reply1.txt'), "▼ $HEAD`n・$ITEM`n", $utf8)
   [IO.File]::WriteAllText((Join-Path $work 'reply2.txt'), "▼ $HEAD`n・$NONE`n", $utf8)
-  $quiet = { param($t) ($t -notmatch $SPIN) -and ($t -notmatch $BARE_SPIN) -and $t.Contains($PROMPT) }
+  $quiet = { param($t) (-not (Replying $t)) -and $t.Contains($PROMPT) }
 
   # 2. 裏のシェルを動かしたまま、返答が「判断待ち (中身あり)」で終わる → こちらの番
   Type-Line $cc.Id "Use a shell tool with run_in_background set to true to run the command ping -n $SleepSec 127.0.0.1. Do not wait for it and do not check its output. Then read the file reply1.txt in the current folder and reply with exactly its contents and nothing else."
@@ -215,7 +219,7 @@ try {
   } else { "  (reply was too short to catch Busy on a 2 s tick; skipped)" }
 
   # 3. 返答は終わり、裏のエージェントが動いている: スピナー行が無く、入力欄のすぐ上が待ちの行
-  $t = Wait-Trace { param($t) ($t -notmatch $SPIN) -and (Waiting-Is-Last $t) } 120
+  $t = Wait-Trace { param($t) (-not (Replying $t)) -and (Waiting-Is-Last $t) } 120
   #    待っている間の見た目を先に撮る (エージェントが早く終わると次のターンが写る)。
   Shot $hwnd 'background-marker-3-background.png'
   Save $t 'trace-3-background.txt'
@@ -254,13 +258,17 @@ try {
   if ($t -and (Status $t) -eq 'Busy') {
     Save $t 'trace-2-busy.txt'
     "  status (replying): Busy"
-    "  spinner: " + ((($t -split "`n") | Where-Object { $_ -match $SPIN } | Select-Object -First 1)).Trim()
+    # claude v2.1.327 は返答中フッターに "esc to interrupt" を出すので、経過秒つきの
+    # スピナー行がまだ無くても Busy になる (その場合は行が見つからない)。
+    # (変数名は $SPIN と別にする: PowerShell の変数は大文字小文字を区別しない)
+    $timerLine = ($t -split "`n") | Where-Object { $_ -match $SPIN } | Select-Object -First 1
+    if ($timerLine) { "  spinner: " + $timerLine.Trim() } else { "  spinner: (no timer yet; Busy came from the footer's 'esc to interrupt')" }
     Start-Sleep -Milliseconds 500
     Shot $hwnd 'background-marker-2-busy.png'
   } else { "  (reply was too short to catch Busy on a 2 s tick; skipped)" }
 
   # 3. 返答は終わり、裏のシェルが動いている: スピナー行が無く、フッターに "1 shell" の札
-  $t = Wait-Trace { param($t) ($t -notmatch $SPIN) -and ((Footer $t) -match '\b1 shell\b') } 90
+  $t = Wait-Trace { param($t) (-not (Replying $t)) -and ((Footer $t) -match '\b1 shell\b') } 90
   Save $t 'trace-3-background.txt'
   Check ([bool]$t) "reply ended with '1 shell' in the footer (background shell is running)"
   if ($t) {
@@ -272,7 +280,7 @@ try {
   Shot $hwnd 'background-marker-3-background.png'
 
   # 4. 裏のシェルが終わり、通知を受けた返答も終わる: スピナー行もフッターの札も無い
-  $t = Wait-Trace { param($t) ($t -notmatch $SPIN) -and ((Footer $t) -notmatch '\bshells?\b') } ($SleepSec + 150)
+  $t = Wait-Trace { param($t) (-not (Replying $t)) -and ((Footer $t) -notmatch '\bshells?\b') } ($SleepSec + 150)
   Check ([bool]$t) 'background shell finished (no spinner, no shell pill in the footer)'
   Start-Sleep -Seconds 3
   $t = Trace; Save $t 'trace-4-done.txt'

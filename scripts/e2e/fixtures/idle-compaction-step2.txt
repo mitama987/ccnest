@@ -1,0 +1,17 @@
+✻ Waiting for 1 dynamic workflow to finish
+  ⎿  Referenced file ..\28_Affilia\CLAUDE.md
+  ⎿  Skills restored (deep-plan, workflow-authoring)
+
+● Compacted while idle, before the prompt cache expired · turn off with
+  "idleCompaction": false in settings.json
+
+● Dynamic workflow "affilia-xboard-gap" completed
+
+● 調査が終わったよ。
+
+✻ Churned for 15s · done 16:34
+
+{RULE}
+❯
+{RULE}
+  ⏸ plan mode on (shift+tab to cycle) · ← 8 agents

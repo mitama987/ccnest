@@ -215,17 +215,48 @@ const WAITING_NOUNS: &[&str] = &[
 ///
 /// 待ちの行はターン終了の行 (`✻ Worked for 9s · done 10:09` と同じ場所) の
 /// 差し替えで、会話に残る文字。エージェントが終わると通知で次のターンが始まり、
-/// 行の下に新しい内容が足されるので、「入力欄の上枠より前の、最後の空でない行」が
+/// 行の下に新しい内容が足されるので、「入力欄の上枠より前の、最後の区切りの行」が
 /// この文言のときだけ真にする (古い行には当たらない)。
 /// 入力欄 (上枠と下枠の罫線 2 本) が無い画面は false。
+///
+/// 「区切りの行」は 0 桁目から始まる行 ([`starts_at_column_zero`])。Claude Code は
+/// ターンの区切り (`●` / `✻` / `❯`) を必ず 0 桁目から書き、子の行 (`  ⎿ …`) と
+/// 折り返しの続きは字下げする。待ちの行の下に足されるのが字下げの行だけなら、
+/// まだ待っている。
+/// 放置中のまとめ (idle compaction) は、ターンを始めずに待ちの行の下へ子の行
+/// (`  ⎿  Referenced file …`) とお知らせ (`● Compacted while idle, …`) を足す
+/// (2026-11-18 のゆうさんのスクショ: workflow が動いているのに 🟨 だった)。
+/// 最後の区切りの行がこのお知らせなら、その手前の区切りの行を見る。
 pub fn is_waiting_for_background(screen_text: &str) -> bool {
     transcript(screen_text).is_some_and(|t| {
         t.lines()
             .rev()
-            .map(str::trim)
-            .find(|line| !line.is_empty())
-            .is_some_and(is_waiting_line)
+            .filter(|line| starts_at_column_zero(line))
+            .find(|line| !is_idle_compaction_notice(line))
+            .is_some_and(|line| is_waiting_line(line.trim_end()))
     })
+}
+
+/// 行が 0 桁目から始まるか (空行・字下げされた行は偽)。
+fn starts_at_column_zero(line: &str) -> bool {
+    line.chars().next().is_some_and(|c| !c.is_whitespace())
+}
+
+/// 放置中のまとめ (idle compaction) のお知らせの出だし (Claude Code v2.1.327 の本体で
+/// 確認・2026-11-18)。後ろに ` · turn off with "idleCompaction": false in settings.json`
+/// が続き、狭いペインでは折り返す (続きは字下げ) ので、出だしだけを見る。
+/// 手で打つ `/compact` の `Conversation compacted` はターンの区切りなので入れない。
+const IDLE_COMPACTION_NOTICES: &[&str] = &[
+    "Compacted while idle, before the prompt cache expired",
+    "Compacted using a summary written while you were away",
+];
+
+/// `● Compacted while idle, before the prompt cache expired · turn off with …` の形か。
+fn is_idle_compaction_notice(line: &str) -> bool {
+    let body = strip_leading_glyph(line);
+    IDLE_COMPACTION_NOTICES
+        .iter()
+        .any(|notice| body.starts_with(notice))
 }
 
 /// 画面のうち会話の部分 (入力欄の上枠の行より前)。入力欄 (上枠と下枠の罫線
@@ -824,7 +855,7 @@ mod tests {
             "✻ Waiting for 2 background agents and 1 dynamic workflow to finish",
             "* Waiting for 12 background agents to finish",
             "Waiting for 1 background agent to finish",
-            "   ✻ Waiting for 1 background agent to finish   ",
+            "✻ Waiting for 1 background agent to finish   ",
         ] {
             let text = screen_waiting(line, "  ⏵⏵ bypass permissions on · ← 8 agents");
             assert!(is_waiting_for_background(&text), "{line}");
@@ -911,6 +942,122 @@ mod tests {
             "⏵⏵ bypass permissions on · 1 shell\n\n  ○ general-purpose  a ─ b",
         );
         assert_eq!(detect_status(&text), ClaudeStatus::Background);
+    }
+
+    // ---- 放置中のまとめ (idle compaction) が待ちの行の下に足した行 ----
+
+    const IDLE_NOTICE: &str = "● Compacted while idle, before the prompt cache expired · turn off with \"idleCompaction\": false in settings.json";
+
+    // 待ちの行と、その子の行 (まとめのあとに読み直した物の一覧)。
+    const WAITING_WORKFLOW_WITH_CHILDREN: &str = "\
+✻ Waiting for 1 dynamic workflow to finish
+  ⎿  Referenced file ..\\28_Affilia\\CLAUDE.md
+  ⎿  Read ..\\..\\..\\.claude\\projects\\C--Users-mitam-Desktop-work-10-ClaudeCompany\\memory\\project_affilia.md (39 lines)
+  ⎿  Read ..\\28_Affilia\\apps\\renderer\\src\\menu.tsx (65 lines)
+  ⎿  Read ..\\..\\..\\.claude\\skills\\chrome-browser-testing\\SKILL.md (195 lines)
+  ⎿  Referenced file outputs\\20_xtp3\\2026-10-23_xboard_research\\report.md
+  ⎿  Plan file referenced (~\\.claude\\plans\\affilia-xboard-ui-ux-ultracode-zesty-sloth.md)
+  ⎿  Skills restored (deep-plan, workflow-authoring)";
+
+    /// 2026-11-18 のゆうさんのスクショの形 (claude v2.1.327): 返答の終わりのあとに
+    /// `tail` (待ちの行・お知らせなど) が続き、フッターの下に動いている workflow の行。
+    /// フッターに札は無い。**スクショからの書き起こし**で、CCNEST_STATUS_TRACE の実物ではない
+    /// (workflow を動かしたまま 1 時間放置しないと出ない画面)。
+    fn screen_idle_compacted(tail: &str) -> String {
+        let rule = "─".repeat(120);
+        format!(
+            "■ 2. 残りの作業\n\n  ・レイナの残り: 調査（裏で実行中）が終わったら、差分表を出して計画に書く\n  ・ゆうさんの判断待ち: 今は無し\n\n  effort: max（deep-plan）\n\n{tail}\n\n{rule}\n❯\u{a0}\n{rule}\n  ⏸ plan mode on (shift+tab to cycle) · ← 8 agents                    ✔Update installed · Restart to update\n{:>118}\n\n  ◯ affilia-xboard-gap  ▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▭▭▭  8/9 · 2h05m · ↓ 1.6m tokens · ⚠Large workflow · /workflows to stop\n",
+            "/rc"
+        )
+    }
+
+    // スクショの画面: 待ちの行の下に子の行とお知らせが足されていても、裏で実行中
+    #[test]
+    fn waiting_line_followed_by_idle_compaction_notice_is_background() {
+        let text = screen_idle_compacted(&format!(
+            "{WAITING_WORKFLOW_WITH_CHILDREN}\n\n{IDLE_NOTICE}"
+        ));
+        assert!(!has_background_work(&text));
+        assert!(!asks_for_decision(&text));
+        assert!(is_waiting_for_background(&text));
+        assert_eq!(detect_status(&text), ClaudeStatus::Background);
+    }
+
+    // お知らせが無く、子の行だけが足されていても同じ
+    #[test]
+    fn waiting_line_followed_only_by_child_lines_is_background() {
+        let text = screen_idle_compacted(WAITING_WORKFLOW_WITH_CHILDREN);
+        assert!(is_waiting_for_background(&text));
+        assert_eq!(detect_status(&text), ClaudeStatus::Background);
+    }
+
+    // 狭いペイン: お知らせも子の行も折り返す (続きの行は字下げされる)
+    #[test]
+    fn wrapped_notice_and_wrapped_child_lines_are_background() {
+        let text = screen_idle_compacted(
+            "✻ Waiting for 1 dynamic workflow to finish\n  ⎿  Read ..\\..\\..\\.claude\\projects\\C--Users-mitam-Desktop-work-10-ClaudeCompany\\memory\\\n     project_affilia.md (39 lines)\n  ⎿  Skills restored (deep-plan, workflow-authoring)\n\n● Compacted while idle, before the prompt cache expired · turn off with\n  \"idleCompaction\": false in settings.json",
+        );
+        assert!(is_waiting_for_background(&text));
+        assert_eq!(detect_status(&text), ClaudeStatus::Background);
+    }
+
+    // お知らせのもう 1 つの文言 (本体 v2.1.327)・エージェント待ち・お知らせが 2 つ続く形
+    #[test]
+    fn idle_compaction_notice_variants_are_background() {
+        for tail in [
+            "✻ Waiting for 1 dynamic workflow to finish\n\n● Compacted using a summary written while you were away · turn off with \"idleCompaction\": false in settings.json".to_string(),
+            format!("✻ Waiting for 2 background agents to finish\n  ⎿  Read a.md (3 lines)\n\n{IDLE_NOTICE}"),
+            format!("✻ Waiting for 1 dynamic workflow to finish\n\n{IDLE_NOTICE}\n\n{IDLE_NOTICE}"),
+            "✻ Waiting for 1 dynamic workflow to finish\n\n* Compacted while idle, before the prompt cache expired".to_string(),
+        ] {
+            let text = screen_idle_compacted(&tail);
+            assert!(is_waiting_for_background(&text), "{tail}");
+            assert_eq!(detect_status(&text), ClaudeStatus::Background, "{tail}");
+        }
+    }
+
+    // お知らせの下に次のターンが足されていれば (= もう待っていない)、こちらの番
+    #[test]
+    fn new_turn_below_the_idle_compaction_notice_is_attention() {
+        for after in [
+            "❯ 進み具合は？",
+            "● Dynamic workflow \"affilia-xboard-gap\" completed\n\n● 調査が終わったよ。\n\n✻ Churned for 15s · done 16:34",
+            "✻ Worked for 12s · done 15:02",
+        ] {
+            let text = screen_idle_compacted(&format!(
+                "{WAITING_WORKFLOW_WITH_CHILDREN}\n\n{IDLE_NOTICE}\n\n{after}"
+            ));
+            assert!(!is_waiting_for_background(&text), "{after}");
+            assert_eq!(detect_status(&text), ClaudeStatus::NeedsAttention, "{after}");
+        }
+    }
+
+    // 待ちの行が無い (ふつうに終わった返答のあとのまとめ)・お知らせに似ているだけの行・
+    // お知らせと待ちの行のあいだに別の行、はこちらの番
+    #[test]
+    fn idle_compaction_notice_without_waiting_line_is_attention() {
+        for tail in [
+            format!("● 終わったよ。\n\n✻ Worked for 12s · done 15:02\n\n{IDLE_NOTICE}"),
+            IDLE_NOTICE.to_string(),
+            "✻ Waiting for 1 dynamic workflow to finish\n\n● Compacted だよ".to_string(),
+            "✻ Waiting for 1 dynamic workflow to finish\n\n● Conversation compacted (ctrl+o for history)".to_string(),
+            format!("✻ Waiting for 1 dynamic workflow to finish\n\n● 途中の知らせ\n\n{IDLE_NOTICE}"),
+        ] {
+            let text = screen_idle_compacted(&tail);
+            assert!(!is_waiting_for_background(&text), "{tail}");
+            assert_eq!(detect_status(&text), ClaudeStatus::NeedsAttention, "{tail}");
+        }
+    }
+
+    // 判断待ちに中身があれば、待ちの行とお知らせで終わっていてもこちらの番 (v0.1.42 のまま)
+    #[test]
+    fn decision_items_before_idle_compaction_notice_is_attention() {
+        let text = screen_idle_compacted(&format!(
+            "▼ ゆうさんの判断待ち\n・A と B のどちらにするか\n\n{WAITING_WORKFLOW_WITH_CHILDREN}\n\n{IDLE_NOTICE}"
+        ));
+        assert!(is_waiting_for_background(&text));
+        assert!(asks_for_decision(&text));
+        assert_eq!(detect_status(&text), ClaudeStatus::NeedsAttention);
     }
 
     // ---- screen_text / 行ごとに取った画面を判定用の文字にする ----
@@ -1271,6 +1418,13 @@ mod tests {
 }
 
 // Version History
+// - ver1.10 (2026-11-18): 放置中のまとめ (idle compaction) のあとも、裏の workflow /
+//   エージェント待ちを Background のままにする。まとめはターンを始めずに、待ちの行の下へ
+//   子の行 (`  ⎿  Referenced file …`) とお知らせ (`● Compacted while idle, …`) を足すので、
+//   「最後の空でない行」が待ちの行でなくなり 🟨 に落ちていた (ゆうさんのスクショ)。
+//   is_waiting_for_background は「0 桁目から始まる最後の行」を見て (子の行と折り返しの
+//   続きは字下げされている)、お知らせ (IDLE_COMPACTION_NOTICES・claude v2.1.327 の本体で
+//   確認) は読み飛ばす。テストの画面はスクショからの書き起こし
 // - ver1.9 (2026-11-15): 裏の仕事が動いていても、返答が「判断待ち」の節 (中身あり) で
 //   終わっていれば NeedsAttention (ユーザー決定「ゆうさんの判断待ちがあるときはオレンジ
 //   アイコンが良い」)。asks_for_decision が会話の部分にある最後の見出し
