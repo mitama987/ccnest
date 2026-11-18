@@ -5,6 +5,69 @@
 
 ---
 
+## 2026-11-18 — クリックした所まで選択を伸ばす（Alt+クリック／Shift+クリック・v0.1.44）
+
+ブランチ: `feature/click-extend-selection`
+
+### 背景
+
+ゆうさん「CC の回答をコピーする際に、Shift+マウス左クリックで、元位置からクリック位置全部反転出来たりする？一般的なブラウザ等々でできるやつ」。
+
+それまではできなかった。理由は 2 つ。
+
+- ccnest に機能が無かった。左クリックは毎回そこから新しい選択を始め、引かずに離すと選択は消える
+- Windows Terminal は Shift 付きのマウス入力をアプリへ渡さない。WT の `ControlInteractivity::_canSendVTMouseInput` は Shift が押されていると false を返し、WT 自身の選択に回す（設定では変えられない）
+
+そこで **WT の中では Alt+クリック**を合図にした（Ctrl+クリックは URL を開くのに使用中）。Shift を渡す端末（conhost 直など）では Shift+クリックでも同じ動き。
+
+### 動き
+
+- 選択が残っている → クリックが選択の中なら、始点はそのままで終点がクリック位置に動く。選択の外なら、遠い側の端を始点にして選択を丸ごと含むように伸びる（下へ引いた選択の先をクリック＝始点はそのまま。ダブルクリックの行選択から上へ伸ばしても、その行が欠けない）
+- 選択が無い → 直前に普通にクリックした位置から、クリック位置まで
+- 押したまま引けば終点がついてくる
+- 始点が無い／別のペイン／alt 画面の出入り／RIS／ペインの大きさが変わった → 普通のクリックと同じ
+- コピーは今までどおり（Ctrl+C・右クリックメニュー）
+
+長い回答は「頭をクリック → ホイールで下へ → 終わりを Alt+クリック」で選べる。始点はバッファの絶対行で控えるので、履歴を動かしても同じ文字を指し続ける。
+
+### 実装
+
+- `src/app.rs`: `ClickAnchor { pane_id, pos, alt, grid_gen, size }` と `App::click_anchor`
+- `src/event.rs`
+  - `is_extend_click(mods)`: Alt か Shift で、Ctrl なし（AltGr = Ctrl+Alt は対象外）
+  - `extended_selection(existing, anchor, pid, click, alt, grid_gen, size)`: 純粋関数。伸ばせないときは None
+  - `mouse_forced_local(kind, mods)`: マウスモードのペインで ccnest 側が処理する入力。Shift／Ctrl は今までどおり全部、Alt は左ボタン（押す・引く・離す）だけ
+  - 普通のクリックで `click_anchor` を控える所は 2 つ: 通常ペインの新規選択と、マウスモードのペインの保留クリック
+  - alt 画面の子へホイールを流すときは `click_anchor` も捨てる（選択と同じ理由。子が中身を動かすので追えない）
+  - `fmt_event`: マウスの修飾キーを付いているときだけ出す（`Mouse(Down(Left)@31,7,KeyModifiers(ALT))`）。伸ばしたときは `extend_selection pane=N anchor=.. cursor=..`
+
+計画では「始点はそのまま＋ダブルクリックの行選択から上へのときだけ行末を始点に」だったが、選択の外をクリックしたときは一律に「遠い側の端を始点にする」1 本の決まりにした。ダブルクリックかどうかを覚える状態が要らず、どの向きでも選んだ文字が欠けない。ブラウザ（Windows）と違うのは「上へ引いた選択の下をクリック」「下へ引いた選択の上をクリック」の 2 つだけで、そこはブラウザだと元の選択が外れる。
+
+### 制限
+
+- 全画面表示（alt 画面）のアプリは、ホイールで動かすと選択も始点も消える（今までの選択と同じ）。見えている範囲の中だけ
+- WT の中の Shift+クリックは WT 自身の選択のまま
+
+### 確認
+
+- `cargo test`: 442 件（新規 9 件: `extend_*` 6 件・`extend_click_needs_alt_or_shift_without_ctrl`・`alt_left_button_stays_local_in_a_mouse_mode_pane`・`trace_shows_mouse_modifiers_only_when_present`）。`cargo fmt --all --check`・`cargo clippy --all-targets` 警告なし
+- E2E `scripts/e2e/click-extend-selection.ps1`: **PASS**（通常ペイン）。使い捨て conhost に `WriteConsoleInputW` で「クリック → Alt+クリック → Shift+クリック → 中を Alt+クリック → 手前を Alt+クリック → クリック」を入れ、反転したセルを読み戻す（20 項目）
+- 同 `-MouseMode`: **PASS**（マウスモードのペイン）。押したままのセルが反転しない＝保留クリックの経路に入っていることを先に確かめる
+- E2E `scripts/e2e/click-extend-selection-wt.ps1`: **PASS**（実物の Windows Terminal・本物のマウス入力）
+  - `Mouse(Down(Left)@31,7,KeyModifiers(ALT))` → `extend_selection pane=1 anchor=(14, 2) cursor=(30, 5)`
+  - Shift+クリックのマウス入力は 1 件も届かない
+  - スクショで LN09 の途中から LN12 の途中まで反転
+- 既存 E2E `url-click-wrap.ps1`（Ctrl+クリック 4/4）・`drag-reorder-tab.ps1` は PASS のまま
+
+### 分かったこと
+
+- ConPTY は、子アプリが VT 入力（stdin に `ENABLE_VIRTUAL_TERMINAL_INPUT` 0x200）を使っているときだけ、マウスモードの要求（`ESC[?1000h` など）を端末（ccnest）へ渡す。偽アプリが出力に書くだけでは ConPTY の中で止まり、ccnest はマウスモードを見ない。偽アプリでマウスモードのペインを作るときは、先に stdin の mode に 0x200 を足す（`click-extend-selection-shim.ps1`）
+- WT の窓を起こすクリック（非アクティブな窓への 1 回目）もアプリへ届く
+- 本物のマウス入力（`SetCursorPos`＋`mouse_event`＋`keybd_event`）を使うのは WT の実物確認だけ。`GetLastInputInfo` でゆうさんが 4 秒操作していないのを待ち、窓を最前面にして `WindowFromPoint` でクリック先がその窓だと確かめてから入れる。ポインタの位置と前面の窓は戻す
+- E2E の出力を `Select-Object -First N` で切ると、スクリプトが finally の前に止められて使い捨ての ccnest が残る（`target\release\ccnest.exe` を掴んだままになり、次の `cargo build --release` が「アクセスが拒否されました」で失敗する）。出力は切らずに全部受ける
+
+---
+
 ## 2026-11-18 — 放置中のまとめのあとも、裏の workflow 待ちは 🟢（v0.1.43）
 
 ブランチ: `fix/waiting-line-after-idle-compaction`
