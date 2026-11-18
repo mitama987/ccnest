@@ -444,6 +444,12 @@ fn pending_arrow_expired(deferred_at: Instant, pair_window: Duration, now: Insta
 fn fmt_event(ev: &Event) -> String {
     match ev {
         Event::Key(k) => format!("Key({:?},{:?},{:?})", k.code, k.kind, k.modifiers),
+        // 修飾キーは付いているときだけ出す (`Mouse(Down(Left)@10,5,KeyModifiers(ALT))`)。
+        // ホスト端末が Alt / Shift 付きのクリックを渡してくるかの実測に使う。
+        Event::Mouse(m) if !m.modifiers.is_empty() => format!(
+            "Mouse({:?}@{},{},{:?})",
+            m.kind, m.column, m.row, m.modifiers
+        ),
         Event::Mouse(m) => format!("Mouse({:?}@{},{})", m.kind, m.column, m.row),
         Event::Paste(s) => format!("Paste(len={})", s.len()),
         Event::Resize(w, h) => format!("Resize({w}x{h})"),
@@ -1493,6 +1499,36 @@ fn handle_mouse(
             if let Some((pid, rect)) = find_pane_at(pane_rects, mx, my) {
                 let lx = (mx - rect.x).clamp(0, rect.w.saturating_sub(1)) as u16;
                 let ly = (my - rect.y).clamp(0, rect.h.saturating_sub(1)) as u16;
+                // Alt / Shift + クリック: 残っている選択 (無ければ直前の普通の
+                // クリック位置) からここまでを選ぶ。伸ばせる始点が無ければ下の
+                // 普通のクリックへ落ちる。
+                if is_extend_click(me.modifiers) {
+                    let extended = pane_view_state(app, pid).and_then(|(top, alt, grid_gen)| {
+                        extended_selection(
+                            app.selection,
+                            app.click_anchor,
+                            pid,
+                            (lx, top + ly as i64),
+                            alt,
+                            grid_gen,
+                            (rect.w, rect.h),
+                        )
+                    });
+                    if let Some(sel) = extended {
+                        if input_trace_enabled() {
+                            trace_append_line(&format!(
+                                "extend_selection pane={pid} anchor={:?} cursor={:?}",
+                                sel.anchor, sel.cursor
+                            ));
+                        }
+                        app.selection = Some(sel);
+                        // マウスモードのペインでも、続きの Drag / Up を子へ流さず
+                        // ローカルの選択アームで受ける (Alt を先に離しても同じ)。
+                        app.mouse_local_drag = true;
+                        app.last_left_click = None;
+                        return;
+                    }
+                }
                 let now = Instant::now();
                 let is_double = matches!(
                     app.last_left_click,
@@ -1546,6 +1582,14 @@ fn handle_mouse(
                         grid_gen,
                     });
                     app.last_left_click = Some((now, pid, ly));
+                    // 離すと選択は消えるが、次の Alt / Shift + クリックの始点に使う。
+                    app.click_anchor = Some(crate::app::ClickAnchor {
+                        pane_id: pid,
+                        pos: (lx, top + ly as i64),
+                        alt,
+                        grid_gen,
+                        size: (rect.w, rect.h),
+                    });
                 } else {
                     app.selection = None;
                     app.last_left_click = None;
@@ -1658,11 +1702,8 @@ fn try_forward_mouse(app: &mut App, me: &MouseEvent, pane_rects: &HashMap<PaneId
     // (6) ペインローカル座標 (既存クランプイディオムを踏襲)。
     let lx = (mx - rect.x).clamp(0, rect.w.saturating_sub(1)) as u16;
     let ly = (my - rect.y).clamp(0, rect.h.saturating_sub(1)) as u16;
-    // (7) Shift / Ctrl は強制ローカル。
-    if me
-        .modifiers
-        .intersects(KeyModifiers::SHIFT | KeyModifiers::CONTROL)
-    {
+    // (7) Shift / Ctrl は強制ローカル。Alt は左ボタンだけ (選択を伸ばすクリック)。
+    if mouse_forced_local(me.kind, me.modifiers) {
         return false;
     }
 
@@ -1683,6 +1724,12 @@ fn try_forward_mouse(app: &mut App, me: &MouseEvent, pane_rects: &HashMap<PaneId
     {
         app.selection = None;
     }
+    // 控えてあるクリック位置 (選択を伸ばすときの始点) も同じ理由で捨てる。
+    if mouse_event_reserved_for_local_scrollback(me)
+        && app.click_anchor.is_some_and(|a| a.pane_id == pid)
+    {
+        app.click_anchor = None;
+    }
 
     // (8) ジェスチャ判定。
     match me.kind {
@@ -1696,6 +1743,14 @@ fn try_forward_mouse(app: &mut App, me: &MouseEvent, pane_rects: &HashMap<PaneId
                 lx,
                 ly,
                 at: Instant::now(),
+            });
+            // 子へ渡るクリックでも、次の Alt / Shift + クリックの始点に使う。
+            app.click_anchor = Some(crate::app::ClickAnchor {
+                pane_id: pid,
+                pos: (lx, top + ly as i64),
+                alt,
+                grid_gen,
+                size: (rect.w, rect.h),
             });
             true
         }
@@ -2964,6 +3019,86 @@ fn mouse_event_reserved_for_local_scrollback(me: &MouseEvent) -> bool {
     )
 }
 
+/// マウスモードの子がいても ccnest 側で処理する修飾キーか。Shift / Ctrl は
+/// どのマウス入力でもローカル (テキスト選択 / Ctrl+wheel リサイズ / Ctrl+クリック
+/// URL)。Alt は左ボタン (押す・引く・離す) だけローカル = 選択を伸ばすクリック。
+/// Windows Terminal は Shift 付きのマウス入力を自分の選択に使い、アプリへ
+/// 渡さないので、WT の中で届く合図は Alt になる。
+fn mouse_forced_local(kind: crossterm::event::MouseEventKind, mods: KeyModifiers) -> bool {
+    use crossterm::event::{MouseButton, MouseEventKind};
+    if mods.intersects(KeyModifiers::SHIFT | KeyModifiers::CONTROL) {
+        return true;
+    }
+    mods.contains(KeyModifiers::ALT)
+        && matches!(
+            kind,
+            MouseEventKind::Down(MouseButton::Left)
+                | MouseEventKind::Drag(MouseButton::Left)
+                | MouseEventKind::Up(MouseButton::Left)
+        )
+}
+
+/// 左クリックが「選択をここまで伸ばす」合図か (Alt か Shift。Ctrl 付きは
+/// URL を開く側・AltGr = Ctrl+Alt も対象外)。
+fn is_extend_click(mods: KeyModifiers) -> bool {
+    mods.intersects(KeyModifiers::ALT | KeyModifiers::SHIFT)
+        && !mods.contains(KeyModifiers::CONTROL)
+}
+
+/// Alt / Shift + 左クリックで作る選択。伸ばせないときは None (呼び出し側は
+/// 普通のクリックとして扱う)。`App` 非依存の純粋関数。
+///
+/// - 同じペイン・同じグリッドの選択が残っている: クリックが選択の中なら始点
+///   (anchor) はそのままで終点だけ動かす。選択の外なら、遠い側の端を始点に
+///   して選択を丸ごと含むように伸ばす (下へ引いた選択の先をクリック = 始点は
+///   そのまま。ダブルクリックの行選択から上へ伸ばしても、その行が欠けない)。
+/// - 選択が無い: 直前の普通のクリック位置 (`anchor`) からクリック位置まで。
+/// - どちらも使えない (別ペイン / alt 画面の出入り / RIS / ペインの大きさが
+///   変わった): None。
+fn extended_selection(
+    existing: Option<crate::app::Selection>,
+    anchor: Option<crate::app::ClickAnchor>,
+    pid: PaneId,
+    click: (u16, i64),
+    alt: bool,
+    grid_gen: u64,
+    size: (i32, i32),
+) -> Option<crate::app::Selection> {
+    // (row, col) の辞書順 = 読む順。
+    let key = |p: (u16, i64)| (p.1, p.0);
+    let start = match existing {
+        Some(s) => {
+            if s.pane_id != pid || s.alt != alt || s.grid_gen != grid_gen {
+                return None;
+            }
+            let (first, last) = crate::ui::normalize_selection(s.anchor, s.cursor);
+            if key(click) < key(first) {
+                last
+            } else if key(click) > key(last) {
+                first
+            } else {
+                s.anchor
+            }
+        }
+        None => {
+            let a = anchor?;
+            if a.pane_id != pid || a.alt != alt || a.grid_gen != grid_gen || a.size != size {
+                return None;
+            }
+            a.pos
+        }
+    };
+    Some(crate::app::Selection {
+        pane_id: pid,
+        anchor: start,
+        cursor: click,
+        dragging: true,
+        auto_scroll: 0,
+        alt,
+        grid_gen,
+    })
+}
+
 /// 縦ホイールを子 PTY へ転送すべき (true) か ccnest ローカル scrollback に
 /// 留める (false) かの純粋判定。ALTERNATE 画面の mouse-mode アプリ
 /// (Claude Code 等。alt grid は scrollback 容量 0 でローカルスクロール不可) 上で、
@@ -3797,6 +3932,152 @@ mod tests {
             extract_selected_text_from_parser(&mut parser, sel_old_gen),
             ""
         );
+    }
+
+    // -- クリックした所まで選択を伸ばす (Alt / Shift + 左クリック) --
+
+    const PANE_SIZE: (i32, i32) = (80, 24);
+
+    fn click_anchor_at(pos: (u16, i64)) -> crate::app::ClickAnchor {
+        crate::app::ClickAnchor {
+            pane_id: 1,
+            pos,
+            alt: false,
+            grid_gen: 0,
+            size: PANE_SIZE,
+        }
+    }
+
+    /// (anchor, cursor) を行優先で並べ直した選択範囲。
+    fn span(sel: Option<crate::app::Selection>) -> Option<((u16, i64), (u16, i64))> {
+        sel.map(|s| crate::ui::normalize_selection(s.anchor, s.cursor))
+    }
+
+    #[test]
+    fn trace_shows_mouse_modifiers_only_when_present() {
+        let click = |modifiers| {
+            Event::Mouse(crossterm::event::MouseEvent {
+                kind: MouseEventKind::Down(crossterm::event::MouseButton::Left),
+                column: 10,
+                row: 5,
+                modifiers,
+            })
+        };
+        assert_eq!(
+            fmt_event(&click(KeyModifiers::NONE)),
+            "Mouse(Down(Left)@10,5)"
+        );
+        let alt = fmt_event(&click(KeyModifiers::ALT));
+        assert!(alt.starts_with("Mouse(Down(Left)@10,5,"), "got: {alt}");
+        assert!(alt.contains("ALT"), "got: {alt}");
+    }
+
+    #[test]
+    fn extend_click_needs_alt_or_shift_without_ctrl() {
+        assert!(is_extend_click(KeyModifiers::ALT));
+        assert!(is_extend_click(KeyModifiers::SHIFT));
+        assert!(is_extend_click(KeyModifiers::ALT | KeyModifiers::SHIFT));
+        // 普通のクリックは今までどおり (新しい選択の始まり / 選択の解除)。
+        assert!(!is_extend_click(KeyModifiers::NONE));
+        // Ctrl+クリックは URL を開く。AltGr (Ctrl+Alt) も伸ばす合図にしない。
+        assert!(!is_extend_click(KeyModifiers::CONTROL));
+        assert!(!is_extend_click(KeyModifiers::CONTROL | KeyModifiers::ALT));
+    }
+
+    #[test]
+    fn extend_moves_the_end_of_an_existing_selection() {
+        // (5,10) から (20,12) へ引いた選択。その先 (30,40) をクリック。
+        let sel = sel_range((5, 10), (20, 12));
+        let out = extended_selection(Some(sel), None, 1, (30, 40), false, 0, PANE_SIZE);
+        let out = out.expect("選択が伸びる");
+        assert_eq!(out.anchor, (5, 10), "始点はそのまま");
+        assert_eq!(out.cursor, (30, 40), "終点がクリック位置");
+        assert!(out.dragging, "そのまま引けば終点がついてくる");
+        assert_eq!(out.pane_id, 1);
+    }
+
+    #[test]
+    fn extend_inside_an_existing_selection_shrinks_it() {
+        let sel = sel_range((5, 10), (30, 40));
+        let out = extended_selection(Some(sel), None, 1, (8, 20), false, 0, PANE_SIZE);
+        assert_eq!(span(out), Some(((5, 10), (8, 20))));
+    }
+
+    #[test]
+    fn extend_from_the_last_plain_click_when_nothing_is_selected() {
+        // 頭をクリック (選択は残らない) → 終わりを Alt+クリック。
+        let anchor = click_anchor_at((3, 100));
+        let out = extended_selection(None, Some(anchor), 1, (40, 180), false, 0, PANE_SIZE);
+        assert_eq!(span(out), Some(((3, 100), (40, 180))));
+        // 上へ向かっても同じ (クリックした 2 点の間)。
+        let out = extended_selection(None, Some(anchor), 1, (7, 60), false, 0, PANE_SIZE);
+        assert_eq!(span(out), Some(((7, 60), (3, 100))));
+        assert_eq!(out.unwrap().anchor, (3, 100));
+    }
+
+    #[test]
+    fn extend_prefers_the_selection_over_the_older_click() {
+        let sel = sel_range((5, 10), (20, 12));
+        let anchor = click_anchor_at((0, 0));
+        let out = extended_selection(Some(sel), Some(anchor), 1, (30, 40), false, 0, PANE_SIZE);
+        assert_eq!(span(out), Some(((5, 10), (30, 40))));
+    }
+
+    #[test]
+    fn extend_keeps_the_whole_selection_when_clicking_outside_it() {
+        // ダブルクリックの行選択 (anchor = 行頭, cursor = 行末) から上へ:
+        // 選んだ行が欠けないよう、行末側を始点にする。
+        let line = sel_range((4, 50), (60, 50));
+        let out = extended_selection(Some(line), None, 1, (10, 30), false, 0, PANE_SIZE);
+        assert_eq!(span(out), Some(((10, 30), (60, 50))));
+        // 下から上へ引いた選択 (anchor が後ろ) の、さらに下をクリックしても同じ。
+        let upward = sel_range((60, 50), (4, 48));
+        let out = extended_selection(Some(upward), None, 1, (10, 70), false, 0, PANE_SIZE);
+        assert_eq!(span(out), Some(((4, 48), (10, 70))));
+    }
+
+    #[test]
+    fn extend_refuses_a_start_from_another_pane_or_grid() {
+        let anchor = click_anchor_at((3, 100));
+        let click = (40, 180);
+        // 別のペイン。
+        assert!(extended_selection(None, Some(anchor), 2, click, false, 0, PANE_SIZE).is_none());
+        // alt 画面に入れ替わった / RIS で作り直された。
+        assert!(extended_selection(None, Some(anchor), 1, click, true, 0, PANE_SIZE).is_none());
+        assert!(extended_selection(None, Some(anchor), 1, click, false, 1, PANE_SIZE).is_none());
+        // ペインの大きさが変わった (行の折り返しが変わり、控えた行がずれる)。
+        assert!(extended_selection(None, Some(anchor), 1, click, false, 0, (60, 24)).is_none());
+        // 選択も同じ: 別ペインの選択からは伸ばさない。
+        let sel = sel_range((5, 10), (20, 12));
+        assert!(extended_selection(Some(sel), None, 2, click, false, 0, PANE_SIZE).is_none());
+        assert!(extended_selection(Some(sel), None, 1, click, true, 0, PANE_SIZE).is_none());
+        // 始点が何も無い。
+        assert!(extended_selection(None, None, 1, click, false, 0, PANE_SIZE).is_none());
+    }
+
+    #[test]
+    fn alt_left_button_stays_local_in_a_mouse_mode_pane() {
+        use crossterm::event::MouseButton as B;
+        let left = [
+            MouseEventKind::Down(B::Left),
+            MouseEventKind::Drag(B::Left),
+            MouseEventKind::Up(B::Left),
+        ];
+        for kind in left {
+            assert!(mouse_forced_local(kind, KeyModifiers::ALT), "{kind:?}");
+            assert!(mouse_forced_local(kind, KeyModifiers::SHIFT), "{kind:?}");
+            assert!(mouse_forced_local(kind, KeyModifiers::CONTROL), "{kind:?}");
+            assert!(!mouse_forced_local(kind, KeyModifiers::NONE), "{kind:?}");
+        }
+        // Alt 付きでも、左ボタン以外は今までどおり子へ流す。
+        for kind in [
+            MouseEventKind::Down(B::Middle),
+            MouseEventKind::ScrollUp,
+            MouseEventKind::Moved,
+        ] {
+            assert!(!mouse_forced_local(kind, KeyModifiers::ALT), "{kind:?}");
+            assert!(mouse_forced_local(kind, KeyModifiers::SHIFT), "{kind:?}");
+        }
     }
 
     /// アプリ折り返しテスト用の選択 (anchor から cursor まで)。
@@ -5169,3 +5450,14 @@ mod tests {
 //                        Up(Left) starts the drop from the floating column
 //                        (float_in_strip -> App::settle_tab). The loop redraws
 //                        about every 16 ms only while a tab is sliding.
+// ver0.22 - 2026-11-18 - Extend the selection to the click: Alt / Shift +
+//                        Down(Left) in a pane (is_extend_click) builds the
+//                        selection with the pure extended_selection() from the
+//                        existing selection or, when there is none, from
+//                        App::click_anchor (the last plain left click, also
+//                        recorded for a press held back in a mouse-mode pane).
+//                        mouse_forced_local() keeps Alt + left button local in
+//                        a mouse-mode pane (Shift / Ctrl as before). The anchor
+//                        is dropped when the wheel is forwarded to an
+//                        alternate-screen child. fmt_event shows mouse
+//                        modifiers; the trace logs "extend_selection ...".

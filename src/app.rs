@@ -118,6 +118,9 @@ pub struct App {
     /// 直近の左クリックの (押下時刻, ペイン, ペイン内 row)。閾値内に同じペインの
     /// 同じ行で再クリックされたらダブルクリックと判定し、その行を全選択する。
     pub last_left_click: Option<(Instant, PaneId, u16)>,
+    /// 直近に修飾キーなしで左クリックした位置。選択が無いときに Alt / Shift +
+    /// 左クリックすると、ここからクリック位置までを選ぶ (ブラウザの Shift+クリック)。
+    pub click_anchor: Option<ClickAnchor>,
     /// 直近のマウスホイールイベント時刻。Windows ConPTY がホイール 1 回転を
     /// Mouse(ScrollUp/Down) と plain な Up/Down KeyEvent の両方として
     /// (順不同・別バッチで) 配信するため、後者「ファントム矢印」を相殺する
@@ -239,6 +242,23 @@ pub struct Selection {
     pub grid_gen: u64,
 }
 
+/// 修飾キーなしの左クリックで控える「選択を伸ばすときの始点」。
+///
+/// `pos` は `Selection` と同じ (col, バッファ絶対 row) なので、クリックのあとに
+/// ホイールで履歴を動かしても同じ内容を指し続ける。指す内容が変わり得る場面
+/// では使わない: 別のペイン、alternate screen の出入り (`alt`)、RIS
+/// (`grid_gen`)、ペインの大きさの変化 (`size` = クリック時の (幅, 高さ)。
+/// 幅が変わると行の折り返しが変わる)。alt 画面の子へホイールを流したときは
+/// 子が中身を動かすので、その場で捨てる。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ClickAnchor {
+    pub pane_id: PaneId,
+    pub pos: (u16, i64),
+    pub alt: bool,
+    pub grid_gen: u64,
+    pub size: (i32, i32),
+}
+
 /// 右クリックで開くコンテキストメニュー。
 #[derive(Debug, Clone)]
 pub struct ContextMenu {
@@ -316,6 +336,7 @@ impl App {
             last_ctrl_c: None,
             selection: None,
             last_left_click: None,
+            click_anchor: None,
             last_wheel_at: None,
             pending_arrow: None,
             pending_mouse: None,
@@ -1361,3 +1382,8 @@ mod tests {
 //                        instead of Screen::contents(), which glues a row that
 //                        is filled to the last column onto the next one (a
 //                        heading and its first item became one line).
+// ver0.17 - 2026-11-18 - App::click_anchor (ClickAnchor): the last plain left
+//                        click in a pane, in buffer coordinates, with the
+//                        pane's alt-screen flag, reset generation and size at
+//                        that moment. It is the start point when Alt / Shift +
+//                        click extends a selection and nothing is selected.
