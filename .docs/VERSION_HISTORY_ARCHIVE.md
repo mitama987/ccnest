@@ -5,6 +5,80 @@
 
 ---
 
+## 2026-11-18 — 放置中のまとめのあとも、裏の workflow 待ちは 🟢（v0.1.43）
+
+ブランチ: `fix/waiting-line-after-idle-compaction`
+
+### 背景
+
+ゆうさんのスクショ（2026-11-18）: 裏で dynamic workflow（8/9・2h05m）が動いていて、判断待ちは「今は無し」のタブが 🟨 だった。
+
+入力欄の上はこうなっていた（claude v2.1.327）:
+
+```
+✻ Waiting for 1 dynamic workflow to finish
+  ⎿  Referenced file ..\28_Affilia\CLAUDE.md
+  ⎿  Read ..\..\..\.claude\projects\…\memory\project_affilia.md (39 lines)
+  ⎿  Plan file referenced (~\.claude\plans\….md)
+  ⎿  Skills restored (deep-plan, workflow-authoring)
+
+● Compacted while idle, before the prompt cache expired · turn off with "idleCompaction": false in settings.json
+```
+
+放置中のまとめ（idle compaction）は、ターンを始めずに、待ちの行の下へ子の行とお知らせを足す。v0.1.39 の判定は「最後の空でない行が待ちの行」だったので、最後がお知らせになって偽 → フッターに札も無い → NeedsAttention。
+
+あわせて聞かれた「🔵 は廃止したはず」は、その窓が古い版だっただけ（11/15 15:51 起動＝v0.1.38。🔵 をやめた v0.1.40 は 16:53。exe を差し替えても、開いたままの窓は古い版で動き続ける）。
+
+### 判定
+
+`is_waiting_for_background`:
+
+- 見るのは **0 桁目から始まる行**だけ（`starts_at_column_zero`）。Claude Code はターンの区切り（`●`／`✻`／`❯`）を必ず 0 桁目から書き、子の行（`  ⎿ …`）と折り返しの続きは字下げする
+- 下から見て、放置中のまとめのお知らせ（`IDLE_COMPACTION_NOTICES`）は読み飛ばす。出だしだけを見る（後ろの `· turn off with …` は狭いペインで折り返す）
+  - `Compacted while idle, before the prompt cache expired`
+  - `Compacted using a summary written while you were away`
+  - 文言は claude v2.1.327 の本体で確認。手で打つ `/compact` の `Conversation compacted` は入れない
+- 残った行が待ちの行（完全一致・今までどおり）なら真
+- お知らせの下に次のターン（`❯ …`／`● …`／`✻ Worked for …`）があれば偽（今までどおり）
+
+フッターの `/workflows to stop` は目印にしていない（本体では「Large workflow」の警告のときだけ出る文字）。
+
+### 変更点
+
+| ファイル | 内容 |
+|---|---|
+| `src/pane/status.rs` ver1.10 | `is_waiting_for_background` を上のとおりに。`starts_at_column_zero`・`is_idle_compaction_notice`・`IDLE_COMPACTION_NOTICES`。テスト 7 件（スクショの画面・子の行だけ・折り返し・文言の別形・次のターン・待ちの行なし・判断待ちあり）。既存の字下げつきの待ちの行（実物に無い形）は例から外した |
+| `scripts/e2e/idle-compaction-waiting.ps1`・`idle-compaction-shim.ps1`・`fixtures/idle-compaction-step*.txt` | 使い捨て ccnest に偽 claude で同じ画面を出させ、`CCNEST_STATUS_TRACE` の判定を見る（ConPTY → vt100 → `Screen::rows` の通り道）。ps1 は ASCII だけ、画面の文字は UTF-8 の fixtures |
+| `scripts/e2e/background-marker.ps1` | claude v2.1.327 に合わせた（下の「本体 2.1.327 での E2E」）。`Replying`（経過秒つきのスピナー行・経過秒の無いスピナー行・フッターの `esc to interrupt`）で「返答が終わった」を見る。スピナー行が無いときに `.Trim()` で落ちていた表示を直した |
+| `README.md`・`Cargo.toml`／`Cargo.lock` | 説明・0.1.43 |
+
+### 本体 2.1.327 での E2E
+
+claude v2.1.327 は、返答中のフッターに `esc to interrupt` をまた出す（`⏵⏵ bypass permissions on (shift+tab to cycle) · esc to interrupt · ← 8 agents`）。返答の出だしは経過秒の無いスピナー行（`✶ Bootstrapping…`）だけで、ccnest は `BUSY_MARKERS` で Busy と読む（判定は正しい）。
+
+`background-marker.ps1` は「スピナー行（経過秒つき）が無い＝返答が終わった」と見ていたので 2 か所で外れた:
+
+- Busy の画面に経過秒つきの行が無く、表示用の `.Trim()` が null で落ちた
+- 「スピナー行は消えたが `esc to interrupt` は残っている」瞬間を「返答が終わった」と読み、その時点の判定（Busy）を Background と比べて FAIL
+
+ccnest 側の判定は Busy → Background → NeedsAttention と正しく移っていた（2 秒ごとの trace を全部控えて確認）。スクリプトだけ直した。
+
+PowerShell の変数は大文字小文字を区別しない: 直す途中で足した `$spin` が既存の `$SPIN`（正規表現）を上書きし、後ろの待ちが全部外れた。
+
+### 確認
+
+- `cargo test`: 全 442 件（status.rs 63 件。新しい 7 件のうち 5 件が実装前に赤）
+- `scripts/e2e/idle-compaction-waiting.ps1`: PASS（待ちの行＋子の行＋お知らせ → Background／お知らせの下に次のターン → NeedsAttention）
+- `scripts/e2e/background-marker.ps1`（なし／`-Agent`／`-Decision -SleepSec 150`）: 3 本とも PASS（claude v2.1.327・sonnet）
+
+### 残る制限
+
+- テストと E2E の画面は**スクショからの書き起こし**（本物は workflow を動かしたまま 1 時間ほど放置しないと出ない）。0 桁目・字下げの形が実物と違っていたら効かない → 次に同じ場面で 🟨 だったら `CCNEST_STATUS_TRACE` で実物を取る
+- 放置中のまとめ以外のお知らせが待ちの行の下に 0 桁目から出たら、また 🟨（`IDLE_COMPACTION_NOTICES` に足す）
+- フッターの下の一覧（`◯ <名前> … 8/9 · 2h05m`）は今回も判定に使っていない
+
+---
+
 ## 2026-11-15 — 判断待ちがあるときは、裏で動いていても 🟨（v0.1.42）
 
 ブランチ: `feature/decision-wait-attention`

@@ -1,0 +1,21 @@
+● 見た目もそっくりで進めるね。
+
+  ・レイナの残り: 調査（裏で実行中）が終わったら計画に書く
+  ・ゆうさんの判断待ち: 今は無し
+
+✻ Waiting for 1 dynamic workflow to finish
+  ⎿  Referenced file ..\28_Affilia\CLAUDE.md
+  ⎿  Read ..\..\..\.claude\projects\C--Users-mitam-Desktop-work\memory\
+     project_affilia.md (39 lines)
+  ⎿  Plan file referenced (~\.claude\plans\affilia-xboard-ui-ux.md)
+  ⎿  Skills restored (deep-plan, workflow-authoring)
+
+● Compacted while idle, before the prompt cache expired · turn off with
+  "idleCompaction": false in settings.json
+
+{RULE}
+❯
+{RULE}
+  ⏸ plan mode on (shift+tab to cycle) · ← 8 agents
+
+  ◯ affilia-xboard-gap  ▬▬▬▬▬▬▭▭▭  8/9 · 2h05m · ↓ 1.6m tokens · /workflows to stop
