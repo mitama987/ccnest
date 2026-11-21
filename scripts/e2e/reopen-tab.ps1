@@ -104,17 +104,18 @@ function Send($ccId, $what) {
 }
 
 $before = @(Get-Process ccnest -ErrorAction SilentlyContinue).Count
-# Hidden start; on-desktop2.ps1 moves the window to virtual desktop 2 before showing it.
-$p = Start-Process -FilePath "conhost.exe" -ArgumentList "powershell.exe -NoProfile -ExecutionPolicy Bypass -File `"$PSScriptRoot\on-desktop2.ps1`" `"$exe`"" -WorkingDirectory $work -WindowStyle Hidden -PassThru
+# No console window at all (CREATE_NO_WINDOW): nothing shows up and nothing takes the keyboard
+# focus from the user. (A hidden conhost window still becomes the foreground window.) The
+# screen is read and input is sent through the console API, which needs no window.
+$si = New-Object Diagnostics.ProcessStartInfo 'cmd.exe', "/c `"$exe`""
+$si.UseShellExecute = $false; $si.CreateNoWindow = $true; $si.WorkingDirectory = $work
+$p = [Diagnostics.Process]::Start($si)
 $fake = $null
 $fails = 0
 function Check($ok, $msg) { if ($ok) { "  ok   $msg" } else { "  FAIL $msg"; $script:fails++ } }
 try {
   Start-Sleep -Seconds 6
-  # ccnest is a grandchild now: conhost -> powershell (on-desktop2.ps1) -> ccnest.
-  $procs = @(Get-CimInstance Win32_Process)
-  $launcher = @($procs | Where-Object { $_.ParentProcessId -eq $p.Id } | ForEach-Object { $_.ProcessId })
-  $cc = ($procs | Where-Object { $launcher -contains $_.ParentProcessId -and $_.Name -eq 'ccnest.exe' } | Select-Object -First 1).ProcessId
+  $cc = (Get-CimInstance Win32_Process | Where-Object { $_.ParentProcessId -eq $p.Id -and $_.Name -eq 'ccnest.exe' } | Select-Object -First 1).ProcessId
   if (-not $cc) { throw "no ccnest.exe under conhost $($p.Id)" }
   $id1 = @(Shims $cc '--session-id')[0]
   "tab1 session: $id1"

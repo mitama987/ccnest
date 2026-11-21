@@ -216,8 +216,12 @@ function Store { if (Test-Path $store) { Get-Content $store -Raw -Encoding UTF8 
 function StoreKeys { $o = Store; if ($o) { @($o.PSObject.Properties | ForEach-Object { $_.Name }) } else { @() } }
 function Start-Cc($runFile) {
   $before = @(Get-Process ccnest -ErrorAction SilentlyContinue | ForEach-Object { $_.Id })
-  # Hidden start; on-desktop2.ps1 moves the window to virtual desktop 2 before showing it.
-  $proc = Start-Process -FilePath "conhost.exe" -ArgumentList "powershell.exe -NoProfile -ExecutionPolicy Bypass -File `"$PSScriptRoot\on-desktop2.ps1`" `"$runFile`"" -WorkingDirectory $work -WindowStyle Hidden -PassThru
+  # No console window at all (CREATE_NO_WINDOW): nothing shows up and nothing takes the keyboard
+  # focus from the user. (A hidden conhost window still becomes the foreground window.) The
+  # screen is read and input is sent through the console API, which needs no window.
+  $si = New-Object Diagnostics.ProcessStartInfo 'cmd.exe', "/c `"$runFile`""
+  $si.UseShellExecute = $false; $si.CreateNoWindow = $true; $si.WorkingDirectory = $work
+  $proc = [Diagnostics.Process]::Start($si)
   $deadline = (Get-Date).AddSeconds(20); $id = $null
   do {
     Start-Sleep -Milliseconds 500

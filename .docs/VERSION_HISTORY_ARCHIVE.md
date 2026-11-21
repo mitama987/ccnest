@@ -68,17 +68,20 @@
 - 同 `-Wt`: **PASS**。実物の Windows Terminal のスクショで `●1 ●4` が 1 桁ずつ・灰色で出ることを確認
 - 既存 E2E `park-working-tabs.ps1`（21 項目）・`drag-reorder-tab.ps1`・`dblclick-rename-tab.ps1`・`reopen-tab.ps1` は PASS のまま
 
-### E2E の窓は仮想デスクトップ 2 に出す（`scripts/e2e/on-desktop2.ps1`）
+### E2E は窓を作らずに回す（CREATE_NO_WINDOW）
 
-ゆうさん「テストはデスクトップ 2 でやって」。テストの窓が今の画面に出て、打っている文字が 2 文字そちらへ入った。
+ゆうさん「テストはデスクトップ 2 でやって」。テストの窓が今の画面に出て、打っている文字（「もて」）がそちらへ入っていた。3 つ試して、最後の形に落ち着いた。
 
-- 別プロセスの窓を仮想デスクトップ間で移す公開 API は無い。ただし `IVirtualDesktopManager.MoveWindowToDesktop` は呼んだプロセス自身の窓なら通り、conhost の窓は「コンソールに最初に付いたプロセス」の持ち物として扱われる（実測: `move_hr=0`）
-- そこで conhost を **隠して** 起こし（`-WindowStyle Hidden`）、最初のプロセスにした `on-desktop2.ps1` が自分の窓をデスクトップ 2 へ移してから、アクティブにせずに出す（`SW_SHOWNOACTIVATE`）。そのあと本来のコマンドを走らせる
-- 外から確かめた結果: 窓の所属 = デスクトップ 2 の GUID・見えている・前面の窓は変わらない
-- デスクトップが 1 つしか無い／移せなかったときは隠れたまま走る（画面の読み取りと入力はコンソール API なので隠れていても動く）。見たいときは `CCNEST_E2E_DESKTOP=current`
-- 入れたのはタブ系の 5 本（`hold-tab`・`park-working-tabs`・`drag-reorder-tab`・`dblclick-rename-tab`・`reopen-tab`）。ほかの E2E は次に回すときに同じ 1 行へ替える
-- プロセスの親子が `conhost → powershell → ccnest` に変わる（`reopen-tab.ps1` は conhost の直下を探していたので孫を探す形に直した）
-- **Windows Terminal の窓（`-Wt`・`*-wt.ps1`）は移せない**（持ち主が WindowsTerminal.exe）。スクショが要るときだけ使う
+1. **別のデスクトップへ移して見せる（取り下げ）**: conhost を隠して起こし、最初のプロセスにしたスクリプトが自分の窓を `IVirtualDesktopManager.MoveWindowToDesktop` で移してから出す形（`on-desktop2.ps1`→`on-other-desktop.ps1`）。移すこと自体はできた（`move_hr=0`）。しかし
+   - この日、ゆうさんの窓は全部 Win+Tab の並びで 2 番目のデスクトップにあった。「デスクトップ 2」へ移すと目の前に出る
+   - 「今いない方」へ移す形に変えて試したら、その窓が前面になり、**Windows が表示ごとそのデスクトップへ切り替えた**。ゆうさんから見ると窓が全部消えた（実害: 作業が止まり、別のセッションで原因を調べてもらうことになった。何も閉じてはいない）
+2. **隠したまま回す（不採用）**: `Start-Process conhost.exe -WindowStyle Hidden`。窓は 1 度も見えないが、計測すると**隠れた ConsoleWindowClass の窓が前面の窓になる**（5 本を回す間のサンプル 1,055 回のうち 770 回）。ゆうさんのキー入力が見えない窓へ吸われる
+3. **窓を作らない（採用）**: `ProcessStartInfo.CreateNoWindow = true`（`CREATE_NO_WINDOW`）で `cmd.exe /c <run.cmd>` を起こす。コンソールはあるが窓が無いので、出るものも前面になるものも無い。画面の読み取り（`ReadConsoleOutputW`）と入力（`WriteConsoleInputW`）は窓が無くても通る
+   - 計測: 5 本を回す間のサンプル 1,046 回で、見えるテストの窓 0 回・テストの窓が前面 0 回。5 本とも PASS
+
+- 入れたのはタブ系の 5 本（`hold-tab`・`park-working-tabs`・`drag-reorder-tab`・`dblclick-rename-tab`・`reopen-tab`）。ほかの E2E は、次に回す前に起こす行を同じ形へ替える
+- **Windows Terminal の窓（`-Wt`・`*-wt.ps1`）はこの形にできない**（実物の窓を撮るのが目的）。今の画面に出て前面を取る。絵文字や色の見た目を撮るときだけ、回数を最小にして使う
+- 窓が見える形（1 のとき）は、ゆうさんの本物のマウスがテストの窓の上を通ると本物のマウス入力が混ざり、ドラッグの手順が途中で切れた（`park-working-tabs.ps1` が 5 回中 2 回落ちた）。窓を作らない形では起きていない
 
 ### 残る制限
 
