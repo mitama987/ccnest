@@ -111,6 +111,7 @@ folders of dead pids are removed the next time a ccnest starts.
 | `Ctrl` + Mouse wheel | Resize the focused split — the pane under the cursor grows on scroll-up, shrinks on scroll-down (5% per tick, clamped to 10–90%) |
 | `Alt` + Left-click in a pane (`Shift` + Left-click outside Windows Terminal) | Extend the selection to the click, like Shift+click in a browser: with a selection, its end moves to the click; with none, everything from your last plain click to this click is selected. Scroll with the wheel between the two clicks to select a long reply, then `Ctrl+C` to copy. Windows Terminal keeps `Shift` + click for its own selection and never passes it to ccnest, so use `Alt` there |
 | Left-click on a tab | Switch to that tab |
+| Double-click on a tab (or `Alt+F` for the active tab) | Rename the tab. The current name starts out selected (blue band): type to replace it, `Backspace` clears it, `Enter` or a click anywhere else commits, `Esc` cancels. `Enter` without typing changes nothing; committing an empty name removes your name and brings the automatic one back. `Ctrl+V` and terminal paste go into the name (first line only) |
 | Drag a tab left / right (left button) | Reorder the tabs — the tab floats under the pointer while you drag and the others slide aside, release to drop |
 | Middle-click (wheel click) on a tab | Close that tab and every pane in it (no confirmation — same as `Ctrl+W` per pane; closing the last tab quits) |
 | `Shift+PageUp` / `Shift+PageDown` | Scroll the focused pane one screen of history |
@@ -135,9 +136,32 @@ through to `claude` so the CLI's own paging keeps working.
 ## Tabs
 
 Each tab's title is initialized from the pane's current folder name
-(e.g. `ccnest` when launched from the repo root). Press `F2` to rename
-the active tab — type the new title, then `Enter` to commit or `Esc` to
-cancel. The cursor (`▎`) is shown inline while editing.
+(e.g. `ccnest` when launched from the repo root).
+
+Double-click a tab to rename it (`Alt+F` does the same for the active
+tab). The tab turns into an input that holds the current name, selected
+as a whole (white on a blue band) with the cursor (`▎`) after it, as in
+Explorer: the first character you type replaces the name, `Backspace`
+clears it, and from then on keys append and `Backspace` deletes one
+character. `Enter` commits, and so does a left click anywhere outside
+the tab being edited (that click does nothing else); `Esc` cancels.
+`Enter` without typing anything changes nothing, so the automatic name
+is not frozen by accident. Committing an empty name removes the name
+you gave and the automatic one comes back. `Ctrl+V` and a paste from
+the terminal go into the name (first non-empty line, control
+characters dropped) instead of the pane behind it. Tabs cannot be
+switched, closed or reordered with the mouse while one is being
+renamed.
+
+A name you give this way is shown as `N:<name>` and wins over every
+automatic name below. ccnest remembers it per Claude session in
+`%APPDATA%\ccnest\tab-names.json` (for every pane of the tab; at most
+500 sessions, oldest dropped first), so the same session shows the same
+name after `Ctrl+Shift+T`, after closing the window, and when it is
+opened again with `ccnest --resume <id>` or `ccnest --add`. It is a
+ccnest-only name: Claude Code's own session name (`/rename`, the
+`/resume` picker) is not changed. `CCNEST_TAB_NAMES=<path>` moves the
+file.
 
 Left-click a tab in the tab bar to switch to it. Middle-click (wheel
 click) a tab to close it together with every pane it holds — browser
@@ -353,3 +377,4 @@ ver0.1.41 - 2026-11-15 - Shorter tab names that say what the tab is about. The t
 ver0.1.42 - 2026-11-15 - 🟨 when a decision is pending, even with background work. A reply that ends with a "waiting for your decision" section — a short heading line ending in `判断待ち` (`▼ ゆうさんの判断待ち`) directly followed by an item — now marks the tab 🟨 although a background shell or agent is still running (it used to stay 🟢, so a tab that needed an answer looked busy). The section's first item decides: `・今はなし` / `なし` / `特になし` / `None` means nothing to decide and the tab stays 🟢; an empty section, a bullet line that merely mentions the word, or a user message after the section (already answered) do not count. This reads the shape of the report, not question wording, so replies that do not use such a section behave as before. The status is now judged from the screen taken row by row instead of vt100's `contents()`, which glues a row that is filled to the last column onto the next one (a heading and its first item arrived as one line). E2E `scripts/e2e/background-marker.ps1 -Decision`.
 ver0.1.43 - 2026-11-18 - 🟢 stays on after an idle compaction. When a session is left idle, Claude Code compacts it without starting a turn and adds lines below the `✻ Waiting for 1 dynamic workflow to finish` line: indented child lines (`  ⎿  Referenced file …`, `  ⎿  Skills restored …`) and the notice `● Compacted while idle, before the prompt cache expired · turn off with "idleCompaction": false in settings.json`. The waiting line was no longer the last line above the prompt box, so a tab whose workflow was still running fell back to 🟨. ccnest now looks at the last line that starts at column 0 (turn markers `●` / `✻` / `❯` always do; child lines and wrapped continuations are indented) and steps over the idle-compaction notice (also `Compacted using a summary written while you were away`). A new turn below the notice still gives 🟨. E2E `scripts/e2e/idle-compaction-waiting.ps1` (a fake claude draws the screen; transcribed from a screenshot).
 ver0.1.44 - 2026-11-18 - Extend the selection to the click. `Alt` + left-click (or `Shift` + left-click in terminals that pass it on) selects from the existing selection, or from your last plain click when nothing is selected, to the clicked cell, so a long Claude Code reply can be selected with click, wheel scroll, Alt+click instead of dragging through it. Clicking inside a selection moves its end; clicking outside grows it without dropping what was selected; keep the button down to drag the end. The start point is stored in buffer coordinates, so it stays on the same text while the history scrolls, and it is dropped when the pane is resized, the app enters or leaves the alternate screen, or a fullscreen (alternate-screen) app is scrolled with the wheel. Windows Terminal keeps Shift+click for its own selection and does not send it to the app (checked with real pointer input: Alt+click arrives with the ALT modifier, Shift+click does not arrive), which is why Alt is the trigger there. In a pane whose app turned mouse reporting on, Alt + left button is handled by ccnest and not forwarded. `CCNEST_INPUT_TRACE` now shows mouse modifiers (`Mouse(Down(Left)@31,7,KeyModifiers(ALT))`) and logs `extend_selection pane=N anchor=.. cursor=..`. E2E `scripts/e2e/click-extend-selection.ps1` (`-MouseMode` for a mouse-reporting pane) and `scripts/e2e/click-extend-selection-wt.ps1` (real Windows Terminal).
+ver0.1.45 - 2026-11-21 - Double-click a tab to rename it. Two left presses on the same tab within 500 ms (with no reorder in between) open the name input on that tab; the first press still switches to the tab at once. The input works like Explorer's rename: the current name starts out selected (white on a blue band), the first key replaces it, `Backspace` clears it, `Enter` or a left click outside the tab commits, `Esc` cancels, `Enter` without typing changes nothing, and committing an empty name removes the name and brings the automatic one back. `Ctrl+V` and terminal paste now go into the name (first line) instead of the pane behind it. Fixes `Alt+F` rename, which until now only changed the folder-name title and so was invisible on any tab running Claude: a name given by hand is now shown as `N:<name>` ahead of the `/rename` name, the Japanese name, the OSC title and the last message. The name is stored per session id in `%APPDATA%\ccnest\tab-names.json` (all panes of the tab; 500 entries max) and comes back after Ctrl+Shift+T, after the window is closed, and with `--resume` / `--add`; Claude Code's own session name is not touched. `CCNEST_TAB_NAMES` overrides the path. The README said `F2` renames a tab; it is `Alt+F`. CCNEST_INPUT_TRACE logs `begin_rename_tab idx=N` and `rename_tab idx=N name=...`. E2E `scripts/e2e/dblclick-rename-tab.ps1` (console input) and `dblclick-rename-tab-wt.ps1` (real pointer on Windows Terminal).

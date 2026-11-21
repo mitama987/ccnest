@@ -5,6 +5,85 @@
 
 ---
 
+## 2026-11-21 — タブをダブルクリックして名前を変える（v0.1.45）
+
+ブランチ: `feature/tab-dblclick-rename`
+
+### 背景
+
+ゆうさん「ccnest でタブをダブルクリックするとセッション名を変えられるようにして」。
+
+読んで分かったこと:
+
+- 名前変更の入口は `Alt+F` だけで、マウスの入口が無かった
+- **`Alt+F` で付けた名前は、Claude のタブでは表示に出ていなかった**。付けた名前は `Tab.title`（フォルダ名の所）に入るが、タブの表示は Claude のタスク名（`/rename` > 日本語名 > 英語タイトル > 最後の発話）があればそちらを出す。ほぼ全部のタブが Claude なので、名前変更は実質効いていなかった
+- 名前の入力中の貼り付け（端末の貼り付け・Enter を含むかたまり）は、名前ではなく裏のペインへ流れていた
+- 付けた名前はメモリの中だけで、窓を閉じると消える
+
+入口だけ足しても名前が変わって見えないので、入口・表示・貼り付け・保存をそろえた。
+
+### 動き
+
+- タブをダブルクリック（同じタブを 500 ms 以内に 2 回・間に並べ替えなし）→ そのタブが名前の入力になる。1 回目のクリックは今までどおり即タブ切替
+- 入力は Explorer の名前変更と同じ型
+  - 今の名前が丸ごと選ばれた状態（青い帯に白文字）で始まる。最初の 1 文字で丸ごと置き換え、Backspace で全部消える
+  - Enter で確定、Esc で取り消し。入力中のタブ以外を左クリックしても確定（そのクリックは飲む＝タブは切り替わらず、選択も始まらない）
+  - 何も打たずに Enter → 何も変えない（今出ている自動の名前を、手で付けた名前として固めない）
+  - 空にして Enter → 手で付けた名前を外し、自動の名前に戻る
+  - Ctrl+V と端末の貼り付けは名前の欄へ（最初の空でない 1 行・制御文字は落とす）
+  - 入力中はマウスでタブを切り替え・閉じる・並べ替えできない
+- 手で付けた名前は、自動の名前より優先して `N:名前` で出る（16 セルで切るのは今までどおり）
+- `Alt+F` も同じ入力に入る
+- 名前は `%APPDATA%\ccnest\tab-names.json`（セッション id → 名前）に覚える。Ctrl+Shift+T の開き直し・窓を閉じたあと・`--resume <id>`・`--add` で同じ名前が出る
+
+### 決めたこと
+
+- **名前は ccnest の中だけ**。Claude 本体の `/rename`（`/resume` の一覧に出る名前）には書かない。動いている claude の会話ログへ外から行を足す・入力欄へ `/rename` を打ち込む、はどちらも返答中に壊す恐れがある
+- 分割しているタブは、全ペインのセッション id に同じ名前を覚えさせる（どのペインにフォーカスがあっても、どのペインのセッションを後で開いても消えない）
+- 配布（v タグ）は今回しない
+
+### 実装
+
+- `src/tab_names.rs`（新規）: `load`／`set`／`remove`／`lookup`。書く前に読み直す（複数の窓が同じファイルを使う）・一時ファイル → rename・500 件を超えたら付けた時刻の古い順に落とす・`CCNEST_TAB_NAMES=<path>` で置き場所を変える
+- `src/app.rs`
+  - `Tab.user_title`／`ClosedTab.user_title`、`App::rename_fresh`（まだ何も打っていない）、`App::last_tab_click`（直前のタブクリック）
+  - `shown_tab_name(user_title, task)`（描画と入力の初期値で共用）、`tab_display_name`／`begin_rename_tab`／`end_rename_tab`／`set_tab_user_title`
+  - `--resume`／`--add` でタブを作るとき `saved_tab_name` で保存した名前を引く
+  - タブの並びが変わる所（`move_tab`／`remove_tab`／`reopen_closed_tab`）で `last_tab_click` を捨てる。`remove_tab` は名前の入力も取り消す（前面のタブがずれて別のタブに名前が付くのを防ぐ）
+- `src/event.rs`
+  - `is_tab_double_click(last, now, hit)`（純粋）と `TabMouseAction::Rename`。`classify_tab_mouse` に「2 回目か」を渡す
+  - `RenameOutcome`・`rename_key`・`rename_finish`・`rename_paste`（純粋）。確定の反映は `apply_rename_outcome` 1 つで、Enter と外クリックが共用
+  - `handle_mouse` (0.7): 入力中の左 Down は `try_forward_mouse` より先に取る（マウスモードの子へ流さない）。対の Up は `mouse_local_drag` でローカルに消化（コンテキストメニューと同じ型）
+  - `process_batch`: 入力中は貼り付けのかたまりを名前の欄へ
+  - トレース: `begin_rename_tab idx=N`・`rename_tab idx=N name=Some("…")`／`name=None`
+- `src/ui/mod.rs`・`src/ui/theme.rs`: `user_title` をタスク名より先に出す。まだ何も打っていない入力は `tab_rename_selected`（青い帯に白文字）
+
+計画から変えた点: 計画には「入力中に日本語を打つと Claude の入力欄に入る見立て（未実測）」と書いたが、読み違いだった。貼り付け扱いになるのは Enter を含むかたまり（`classify_run`）と `Event::Paste` だけで、IME の確定（Enter なしの複数文字）は 1 文字ずつ名前の欄に入る。直したのは貼り付けの行き先だけ。
+
+### 確認
+
+- `cargo test`: 459 件（新規 17 件: `tab_names` 8 件・`is_tab_double_click_needs_same_tab_within_500ms`・`rename_*` 7 件・`user_title_wins_over_the_task_name`。`classify_tab_mouse_table` は Rename の行を追加）。`cargo fmt --all --check`・`cargo clippy --all-targets -- -D warnings` 警告なし
+- E2E `scripts/e2e/dblclick-rename-tab.ps1`: **PASS**（27 項目）。使い捨て conhost に `WriteConsoleInputW` でマウスとキーを入れ、タブバーの文字・トレース・`tab-names.json` を読む
+  - ダブルクリック → 入力（今の名前＋カーソル・選択色）→ `pay` + Enter → `2:pay`・2 秒 tick 2 回のあとも同じ・保存 1 件
+  - 日本語 2 文字を 1 かたまりで → 名前の欄に入り `2:決済`
+  - 何も打たずに Enter → 変わらない／700 ms 空けた 2 回 → 入力は開かない
+  - 外（ペイン）をクリック → 確定／入力中にタブを引く → `move_tab` なし／別のタブをクリック → 入力は閉じ、前面は変わらない
+  - 文字＋Enter を 1 かたまり（貼り付け扱い）→ 名前の欄に入り、入力は開いたまま
+  - Backspace + Enter → 自動の名前に戻り、保存からも消える
+  - 中クリックで閉じる → Ctrl+Shift+T → 名前が残る／終了 → `--resume <id>` で開き直す → 同じ名前
+- E2E `scripts/e2e/dblclick-rename-tab-wt.ps1`: **PASS**（実物の Windows Terminal・本物のマウス入力）。ダブルクリックの 2 回とも `Mouse(Down(Left)@5,0)` で届き `begin_rename_tab idx=0`。スクショで「名前が青い帯で選ばれた状態」と確定後の `🟨 1:pay` を確認
+- 既存 E2E `drag-reorder-tab.ps1` は PASS のまま（19 項目）。`mmb-close-tab.ps1` は SendInput 方式（ゆうさんの操作とぶつかる）なので回していない。中クリックで閉じる動きは新しい E2E の J で見ている
+
+### 分かったこと
+
+- WT はダブルクリックの 2 回目の押下もアプリへ渡す（マウスモードの間は WT 自身の単語選択にならない）
+- WT の画面の桁・行とピクセルの対応は、ペインの中を 2 か所クリックして `CCNEST_INPUT_TRACE` に出たセルから割り出せる（タイトルバーの高さやフォントを当て推量しない）。`dblclick-rename-tab-wt.ps1` の probe
+- PowerShell の関数が 1 要素の配列を返すと文字列に展開され、`[0]` が先頭の 1 文字になる。`@(関数)` で受ける
+- トレースの照合で `rename_tab idx=` は `begin_rename_tab idx=` にも当たる。`[^_]rename_tab` で区別する
+- conhost の読み取りでは、入力カーソル `▎`（U+258E）も全角の文字も 1 セル目に文字・2 セル目は属性 0x200。名前とカーソルは「名前の直後にカーソル」で照合する
+
+---
+
 ## 2026-11-18 — クリックした所まで選択を伸ばす（Alt+クリック／Shift+クリック・v0.1.44）
 
 ブランチ: `feature/click-extend-selection`
