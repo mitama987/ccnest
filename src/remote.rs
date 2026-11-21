@@ -368,6 +368,8 @@ mod tests {
         ResumeSpec {
             session_id: id(s),
             title: title.map(str::to_string),
+            prompt: None,
+            permission_mode: None,
         }
     }
 

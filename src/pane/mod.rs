@@ -9,7 +9,7 @@ use std::time::Instant;
 use anyhow::Result;
 use uuid::Uuid;
 
-use crate::claude::launcher::{spawn_claude, spawn_shell, SessionStart};
+use crate::claude::launcher::{spawn_claude, spawn_shell, ResumeExtras, SessionStart};
 use crate::claude::session::{session_path, SessionTailer};
 use crate::pane::pty::ReaderHooks;
 use crate::pane::status::ClaudeStatus;
@@ -73,14 +73,32 @@ impl Pane {
         start: SessionStart,
         wake: WakeTx,
     ) -> Result<Self> {
+        Self::spawn_with(id, cwd, session_id, start, &ResumeExtras::default(), wake)
+    }
+
+    /// [`Pane::spawn`] に、再開セッション個別の指定 (最初の一言・開始モード) を付けたもの。
+    pub fn spawn_with(
+        id: PaneId,
+        cwd: &Path,
+        session_id: Uuid,
+        start: SessionStart,
+        extras: &ResumeExtras,
+        wake: WakeTx,
+    ) -> Result<Self> {
         let parser = Arc::new(Mutex::new(vt100::Parser::new(24, 80, 2000)));
         let waker = OutputWaker::new(wake, id);
         let hooks = ReaderHooks {
             stamp: OutputStamp::new(),
             waker: Some(waker.clone()),
         };
-        let (pty, command, claude_running) =
-            spawn_claude(cwd, session_id, start, Arc::clone(&parser), hooks.clone())?;
+        let (pty, command, claude_running) = spawn_claude(
+            cwd,
+            session_id,
+            start,
+            extras,
+            Arc::clone(&parser),
+            hooks.clone(),
+        )?;
         // claude が起動できなかった (shell フォールバック) ペインは追跡しない。
         let session = if claude_running {
             SessionTailer::new(session_path(cwd, &session_id.to_string()))
@@ -212,6 +230,8 @@ mod tests {
 }
 
 // Version History
+// ver0.3 - 2026-11-21 - Pane::spawn_with: spawn with ResumeExtras (first prompt /
+//                       per-session permission mode); Pane::spawn delegates.
 // ver0.2 - 2026-10-19 - Pane::spawn takes a SessionStart so a pane can resume an
 //                       existing Claude session (`--resume <id>`).
 // ver0.1 - 2026-09-06 - Pane owns an OutputWaker (reader → event loop
