@@ -250,6 +250,9 @@ pub fn run_event_loop<B: Backend>(term: &mut Terminal<B>, mut app: App) -> Resul
                 app.sidebar.refresh();
             }
             app.refresh_pane_state();
+            // 緑が続いているタブを右へ小さく寄せ、🟨 に変わったタブを左へ戻す
+            // (タブの位置が動くのはこの tick だけ)。
+            app.refresh_tab_parking(Instant::now());
             // `ccnest --add` で外から届いた依頼を開き待ちに積む (下で 1 つ開く)。
             app.accept_remote_requests();
             // `--resume` の残りを 1 tick 1 タブずつ開く。失敗はステータス行に
@@ -1305,7 +1308,13 @@ fn handle_mouse(
                     drag.floating = true;
                 }
                 let from = drag.idx;
-                if let Some(to) = tab_drop_target(tab_rects, from, mx) {
+                // 動かせるのは同じ組の中だけ (名前つきの組 / 右へ小さく寄せた組)。
+                // 組は状態で決まるので、引いても組は越えられない。組の中では
+                // タブバーの並び = タブ番号の順なので、判定は今までと同じ。
+                let group = same_group_rects(tab_rects, from, |i| {
+                    app.tabs.get(i).is_some_and(|t| t.parked)
+                });
+                if let Some(to) = tab_drop_target(&group, from, mx) {
                     // 押しのけられるタブが動く桁数 = 引いているタブの幅 + 区切り 1。
                     let shift = tab_rects
                         .iter()
@@ -1314,6 +1323,8 @@ fn handle_mouse(
                     if app.move_tab(from, to) {
                         if drag.floating {
                             app.slide_displaced(from, to, shift, Instant::now());
+                            // 間にいた別の組のタブは、タブバーの上では動いていない。
+                            app.cancel_slides_outside_group(to);
                         }
                         drag.idx = to;
                         if input_trace_enabled() {
@@ -1936,6 +1947,21 @@ fn tab_at(tab_rects: &[(Rect, usize)], mx: i32, my: i32) -> Option<usize> {
         .iter()
         .find(|(r, _)| mx >= r.x && mx < r.x + r.w && my >= r.y && my < r.y + r.h)
         .map(|(_, idx)| *idx)
+}
+
+/// 純粋関数: `tab_rects` のうち、タブ `dragged` と同じ組 (`parked(i)` が同じ) の
+/// 矩形だけを返す。並べ替えの行き先を同じ組の中に限るために使う。
+fn same_group_rects(
+    tab_rects: &[(Rect, usize)],
+    dragged: usize,
+    parked: impl Fn(usize) -> bool,
+) -> Vec<(Rect, usize)> {
+    let group = parked(dragged);
+    tab_rects
+        .iter()
+        .copied()
+        .filter(|(_, i)| parked(*i) == group)
+        .collect()
 }
 
 /// タブを引いている最中、ポインタの横位置 `mx` から「引いているタブ `dragged` を
@@ -4830,6 +4856,38 @@ mod tests {
         vec![(r(0, 10), 0usize), (r(11, 10), 1usize), (r(22, 10), 2usize)]
     }
 
+    /// 並べ替えの行き先は同じ組の中だけ。タブ 1・3 が右へ小さく寄せてあるとき
+    /// (タブバーの並び: 0, 2, 4 │ 1, 3)、0 を右へ引いても寄せた組へは入らない。
+    #[test]
+    fn drag_targets_stay_inside_the_dragged_tabs_group() {
+        let r = |x: i32, w: i32| Rect { x, y: 0, w, h: 1 };
+        // 左の組 (幅 10): タブ 0, 2, 4。仕切りのあと右の組 (幅 5): タブ 1, 3。
+        let rects = vec![
+            (r(0, 10), 0usize),
+            (r(11, 10), 2),
+            (r(22, 10), 4),
+            (r(35, 5), 1),
+            (r(41, 5), 3),
+        ];
+        let parked = |i: usize| i == 1 || i == 3;
+        let ids = |v: &[(Rect, usize)]| v.iter().map(|(_, i)| *i).collect::<Vec<_>>();
+        let left = same_group_rects(&rects, 0, parked);
+        assert_eq!(ids(&left), [0, 2, 4]);
+        let right = same_group_rects(&rects, 3, parked);
+        assert_eq!(ids(&right), [1, 3]);
+        // タブ 0 をタブ 2 の上まで引く → 2 の位置へ (間のタブ 1 は別の組なので関係ない)。
+        assert_eq!(tab_drop_target(&left, 0, 15), Some(2));
+        // 寄せた組の上 (桁 38・43) まで引いても、行き先は左の組の右端 (タブ 4) まで。
+        assert_eq!(tab_drop_target(&left, 0, 38), Some(4));
+        assert_eq!(tab_drop_target(&left, 0, 43), Some(4));
+        // 組を見ないと、寄せたタブが行き先になってしまう。
+        assert_eq!(tab_drop_target(&rects, 0, 38), Some(4));
+        assert_eq!(tab_drop_target(&rects, 2, 43), Some(4));
+        // 寄せた組の中では並べ替えられる (3 を 1 の上へ)。左の組へは出ない。
+        assert_eq!(tab_drop_target(&right, 3, 36), Some(1));
+        assert_eq!(tab_drop_target(&right, 3, 5), Some(1));
+    }
+
     /// `rects` の並びで `from` を `to` へ動かしたあとの矩形 (index は 0 から振り直し)。
     fn rects_after_move(rects: &[(Rect, usize)], from: usize, to: usize) -> Vec<(Rect, usize)> {
         let mut widths: Vec<i32> = rects.iter().map(|(r, _)| r.w).collect();
@@ -5792,3 +5850,9 @@ mod tests {
 //                        swallowed (taken before try_forward_mouse). Paste
 //                        and Ctrl+V go into the name while renaming. The
 //                        trace logs begin_rename_tab / rename_tab.
+// ver0.24 - 2026-11-21 - Working tabs are parked on the right: the 2 s tick calls
+//                        app.refresh_tab_parking() right after
+//                        refresh_pane_state(). A tab drag only reorders
+//                        within the dragged tab's group (same_group_rects
+//                        feeds tab_drop_target), and slides of tabs in the
+//                        other group are cancelled after a move.

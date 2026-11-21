@@ -137,6 +137,9 @@ public static class K {
       # Ctrl+<letter>: uChar is the control char (Ctrl+T = 0x14). 0x8 = LEFT_CTRL, 0x10 = SHIFT.
       'ctrl' { $u = [char]::ToUpper($arg[0]); [K]::Key([int16]$u, [char]([int]$u - 64), 0x8) }
       'ctrlshift' { $u = [char]::ToUpper($arg[0]); [K]::Key([int16]$u, [char]([int]$u - 64), 0x18) }
+      # Alt+Right / Alt+Left (next / previous tab). 0x2 = LEFT_ALT, 0x100 = ENHANCED_KEY.
+      'altright' { [K]::Key(0x27, [char]0, 0x102) }
+      'altleft' { [K]::Key(0x25, [char]0, 0x102) }
       'sleep' { Start-Sleep -Milliseconds $n[0] }
     }
     Start-Sleep -Milliseconds 150

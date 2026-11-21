@@ -11,10 +11,12 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Clear, Paragraph, Widget};
 use ratatui::Frame;
 
-use crate::app::{float_in_strip, folder_title, shown_tab_name, App, Rect as AppRect};
+use crate::app::{
+    float_in_strip, folder_title, shown_tab_name, tab_group_enabled, App, Rect as AppRect,
+};
 use crate::claude::usage::{UsageLabel, UsageLevel};
 use crate::pane::grid::{Layout, SplitDir};
-use crate::pane::status::{aggregate_status, status_marker};
+use crate::pane::status::status_marker;
 use crate::pane::PaneId;
 use crate::sidebar::{claude_ctx, filetree, panelist, Section};
 
@@ -191,29 +193,34 @@ fn draw_tabbar(
     tab_rects.clear();
     let now = std::time::Instant::now();
     let mut items: Vec<TabItem> = Vec::with_capacity(app.tabs.len());
+    // items の何枚目がどのタブか (浮かせるタブを items の位置に直すため)。
+    let mut item_tabs: Vec<usize> = Vec::with_capacity(app.tabs.len());
     let mut x_offset: u16 = 0;
     let area_end = area.x.saturating_add(area.width);
-    for (i, tab) in app.tabs.iter().enumerate() {
+    let grouping = tab_group_enabled();
+    // 緑が続いているタブは右へ小さく寄せる (並べる順 = App::tab_order)。
+    // 左の組 (名前つき) と右の組 (小さい) の境に仕切りを 1 本入れる。
+    let mut divider_x: Option<u16> = None;
+    let mut seen_left = false;
+    for i in app.tab_order() {
+        let tab = &app.tabs[i];
         let active = i == app.active_tab;
+        let parked = grouping && tab.parked;
+        if !parked {
+            seen_left = true;
+        } else if seen_left && divider_x.is_none() {
+            divider_x = Some(area.x.saturating_add(x_offset));
+            x_offset = x_offset.saturating_add(TAB_GROUP_DIVIDER_W);
+        }
         let base = if active {
             theme.tab_active
         } else {
             theme.tab_inactive
         };
         // タブの状態色 = 配下全ペインの畳み込み。タスク名はフォーカスペインのもの。
-        let leaves = tab.layout.leaves();
-        let status = aggregate_status(
-            leaves
-                .iter()
-                .filter_map(|pid| app.panes.get(pid))
-                .map(|p| p.status),
-        );
         // マーカー絵文字は claude ペインを含むタブだけに出す
         // (shell のみのタブに 🟨 が付くと紛らわしい)。
-        let has_claude = leaves
-            .iter()
-            .filter_map(|pid| app.panes.get(pid))
-            .any(|p| p.claude_running);
+        let (has_claude, status) = app.tab_status(tab);
         let marker = has_claude.then(|| status_marker(status));
         // 手で付けた名前 (ダブルクリック / Alt+F) があれば、タスク名より優先。
         let task = shown_tab_name(
@@ -232,6 +239,10 @@ fn draw_tabbar(
         };
         let label = if renaming {
             format!(" {}\u{258e} ", app.renaming_tab.as_deref().unwrap_or(""))
+        } else if parked && !active {
+            // 右へ寄せたタブは「マーカー + 番号」だけ。前面のタブは寄せた位置の
+            // まま名前つきで出す (クリックした瞬間に位置を動かさない)。
+            format!(" {} ", tab_label_small(marker, i + 1))
         } else {
             format!(
                 " {} ",
@@ -260,13 +271,25 @@ fn draw_tabbar(
             // ずらして描く (時間とともに 0 へ)。当たり判定の矩形は定位置のまま。
             offset: tab.slide.map_or(0, |s| s.offset_at(now)),
         });
+        item_tabs.push(i);
         x_offset = x_offset.saturating_add(width).saturating_add(1);
     }
+    if let Some(x) = divider_x {
+        put_tab_label(
+            frame.buffer_mut(),
+            area,
+            x as i32,
+            TAB_GROUP_DIVIDER,
+            theme.hint,
+        );
+    }
     // 引いているタブはポインタの位置に浮かせて最後に重ねる (定位置は空けておく)。
+    // items は並べる順なので、タブ番号を items の位置に直す。
     let floating = app
         .tab_drag
         .filter(|d| d.floating)
-        .and_then(|d| float_in_strip(tab_rects, &d).map(|(fx, _)| (d.idx, fx)));
+        .and_then(|d| float_in_strip(tab_rects, &d).map(|(fx, _)| (d.idx, fx)))
+        .and_then(|(idx, fx)| item_tabs.iter().position(|t| *t == idx).map(|p| (p, fx)));
     render_tab_items(
         frame.buffer_mut(),
         area,
@@ -550,6 +573,18 @@ fn tab_label(number: usize, title: &str, task: Option<&str>, max: usize) -> Stri
         None => title.to_string(),
     };
     ellipsize_right(&raw, max)
+}
+
+/// 左の組 (名前つき) と右の組 (小さく寄せた緑) の境の仕切り。`│` はステータス
+/// バーの区切りと同じ字 (Windows Terminal で 1 桁)。
+const TAB_GROUP_DIVIDER: &str = "│";
+/// 仕切りが取る桁数 (仕切り 1 桁 + 空き 1 桁)。
+const TAB_GROUP_DIVIDER_W: u16 = 2;
+
+/// 右へ小さく寄せたタブのラベル: 「マーカー + 番号」だけ (`🟢3`)。名前は出さない。
+/// マーカーの無いタブ (起こらないはず: 寄せるのは claude の緑だけ) は番号だけ。
+fn tab_label_small(marker: Option<&str>, number: usize) -> String {
+    format!("{}{number}", marker.unwrap_or(""))
 }
 
 /// マーカー絵文字付きのタブラベル。マーカーは claude ペインを含むタブのみ
@@ -1671,6 +1706,16 @@ mod tests {
         assert!(l.ends_with('…') && width_of(&l) <= TAB_LABEL_MAX, "{l:?}");
     }
 
+    // 右へ小さく寄せたタブは「マーカー + 番号」だけ (4〜5 桁)
+    #[test]
+    fn tab_label_small_is_marker_and_number_only() {
+        assert_eq!(tab_label_small(Some("🟢"), 3), "🟢3");
+        assert_eq!(tab_label_small(Some("🟢"), 12), "🟢12");
+        assert_eq!(tab_label_small(None, 7), "7");
+        assert_eq!(width_of(&tab_label_small(Some("🟢"), 3)), 3);
+        assert_eq!(width_of(TAB_GROUP_DIVIDER), 1);
+    }
+
     // マーカー None (shell のみのタブ) は従来ラベルそのまま
     #[test]
     fn tab_label_marked_none_is_plain() {
@@ -1890,3 +1935,8 @@ mod tests {
 //                        edited and nothing has been typed yet, the tab is
 //                        drawn in theme.tab_rename_selected (the name is
 //                        selected as a whole).
+// ver0.22 - 2026-11-21 - draw_tabbar draws in App::tab_order(): named tabs on
+//                        the left, a divider (TAB_GROUP_DIVIDER), then parked
+//                        working tabs as marker + number (tab_label_small).
+//                        The active tab keeps its name where it is. The
+//                        floating tab index is mapped to its item position.
