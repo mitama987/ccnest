@@ -115,7 +115,7 @@ public static class K {
   foreach ($op in @($Ops -split '\|' | Where-Object { $_ })) {
     $name, $arg = $op -split ':', 2
     $n = @()
-    if ($arg -and $name -notin 'type', 'typeu', 'burstu', 'pasteu', 'ctrl', 'ctrlshift') { $n = @($arg -split ',' | ForEach-Object { [int]$_ }) }
+    if ($arg -and $name -notin 'type', 'typeu', 'burstu', 'pasteu', 'ctrl', 'ctrlshift', 'alt') { $n = @($arg -split ',' | ForEach-Object { [int]$_ }) }
     switch ($name) {
       'click' { Click $n[0] $n[1] }
       'dbl' { Click $n[0] $n[1]; Start-Sleep -Milliseconds 120; Click $n[0] $n[1] }
@@ -137,6 +137,8 @@ public static class K {
       # Ctrl+<letter>: uChar is the control char (Ctrl+T = 0x14). 0x8 = LEFT_CTRL, 0x10 = SHIFT.
       'ctrl' { $u = [char]::ToUpper($arg[0]); [K]::Key([int16]$u, [char]([int]$u - 64), 0x8) }
       'ctrlshift' { $u = [char]::ToUpper($arg[0]); [K]::Key([int16]$u, [char]([int]$u - 64), 0x18) }
+      # Alt+<letter> (Alt+C = hold): uChar is the plain letter, 0x2 = LEFT_ALT.
+      'alt' { $u = [char]::ToUpper($arg[0]); [K]::Key([int16]$u, [char]::ToLower($arg[0]), 0x2) }
       # Alt+Right / Alt+Left (next / previous tab). 0x2 = LEFT_ALT, 0x100 = ENHANCED_KEY.
       'altright' { [K]::Key(0x27, [char]0, 0x102) }
       'altleft' { [K]::Key(0x25, [char]0, 0x102) }
@@ -214,7 +216,12 @@ function Store { if (Test-Path $store) { Get-Content $store -Raw -Encoding UTF8 
 function StoreKeys { $o = Store; if ($o) { @($o.PSObject.Properties | ForEach-Object { $_.Name }) } else { @() } }
 function Start-Cc($runFile) {
   $before = @(Get-Process ccnest -ErrorAction SilentlyContinue | ForEach-Object { $_.Id })
-  $proc = Start-Process -FilePath "conhost.exe" -ArgumentList "cmd.exe /c `"$runFile`"" -WorkingDirectory $work -PassThru
+  # No console window at all (CREATE_NO_WINDOW): nothing shows up and nothing takes the keyboard
+  # focus from the user. (A hidden conhost window still becomes the foreground window.) The
+  # screen is read and input is sent through the console API, which needs no window.
+  $si = New-Object Diagnostics.ProcessStartInfo 'cmd.exe', "/c `"$runFile`""
+  $si.UseShellExecute = $false; $si.CreateNoWindow = $true; $si.WorkingDirectory = $work
+  $proc = [Diagnostics.Process]::Start($si)
   $deadline = (Get-Date).AddSeconds(20); $id = $null
   do {
     Start-Sleep -Milliseconds 500

@@ -31,11 +31,45 @@ pub struct Tab {
     pub parked: bool,
     /// 緑が続いている起点。[`PARK_AFTER`] 続いたら `parked` にする。
     pub working_since: Option<Instant>,
+    /// 保留 (Alt+C)。タブバーのいちばん右に、灰色のマーカー + 番号だけで出す。
+    /// 状態 (🟢／🟨) が変わっても、もう一度 Alt+C を押すまで保留のまま。
+    /// `tab_holds` にセッション id ごとに保存する。`parked` は裏で更新し続ける
+    /// (保留を外した瞬間に正しい組へ入るように)。
+    pub held: bool,
     pub layout: Layout,
     pub focused: PaneId,
     /// タブバーでの「すべり」の途中 (ドラッグで押しのけられた／離されて収まる)。
     /// 描画は定位置からこのずれだけ離して描く。終わったら None。
     pub slide: Option<TabSlide>,
+}
+
+impl Tab {
+    /// タブバーでの組 ([`tab_group`])。
+    pub fn group(&self) -> TabGroup {
+        tab_group(self.held, self.parked)
+    }
+}
+
+/// タブバーでの組。並べる順でもある (左 → 右)。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum TabGroup {
+    /// 名前つきで左に並ぶ (対応が必要 🟨・緑になったばかり・shell だけのタブ)。
+    Left,
+    /// 緑が続いていて、右へ小さく寄せてある (`🟢番号`)。
+    Working,
+    /// 保留。いちばん右に、灰色のマーカー + 番号だけ。
+    Held,
+}
+
+/// 純粋関数: タブの組。保留は状態より優先 (緑が続いていても保留の組)。
+pub fn tab_group(held: bool, parked: bool) -> TabGroup {
+    if held {
+        TabGroup::Held
+    } else if parked {
+        TabGroup::Working
+    } else {
+        TabGroup::Left
+    }
 }
 
 /// タブがすべる時間。
@@ -121,13 +155,40 @@ pub fn park_step(prev: Option<Instant>, working: bool, now: Instant) -> (Option<
     )
 }
 
-/// 純粋関数: タブバーに並べる順 (タブ番号の列)。寄せていないタブを並び順どおり
-/// 左に、寄せたタブを並び順どおり右に。どちらの組の中でも元の順は変えない
-/// (🟨 に戻ったタブは、元いた並びの位置に戻る)。
-pub fn display_order(parked: &[bool]) -> Vec<usize> {
-    let left = (0..parked.len()).filter(|i| !parked[*i]);
-    let right = (0..parked.len()).filter(|i| parked[*i]);
-    left.chain(right).collect()
+/// 純粋関数: タブバーに並べる順 (タブ番号の列)。組の順 (名前つき → 緑で小さく
+/// 寄せた → 保留) に並べ、どの組の中でも元の順は変えない (🟨 に戻ったタブ・
+/// 保留を外したタブは、元いた並びの位置に戻る)。
+pub fn display_order(groups: &[TabGroup]) -> Vec<usize> {
+    let mut order: Vec<usize> = (0..groups.len()).collect();
+    // sort_by_key は安定 = 同じ組の中の順は変わらない。
+    order.sort_by_key(|i| groups[*i]);
+    order
+}
+
+/// 純粋関数: タブ `idx` を保留にしたあと前面に出すタブ (メールのアーカイブと
+/// 同じで、保留にしたら次へ進む)。`order`・`groups` は保留にする前のタブバーの
+/// 並びと組。同じ組の右隣 → 同じ組の左隣 → 保留でない右のタブ → 保留でない
+/// 左のタブ。どれも無ければ (ほかが全部保留) そのまま。
+pub fn active_after_hold(order: &[usize], groups: &[TabGroup], idx: usize) -> usize {
+    let Some(pos) = order.iter().position(|i| *i == idx) else {
+        return idx;
+    };
+    let Some(own) = groups.get(idx).copied() else {
+        return idx;
+    };
+    let group_of = |i: &usize| groups.get(*i).copied();
+    let right = &order[pos + 1..];
+    let left = &order[..pos];
+    let same = |i: &&usize| group_of(i) == Some(own);
+    let open = |i: &&usize| group_of(i).is_some_and(|g| g != TabGroup::Held);
+    right
+        .iter()
+        .find(same)
+        .or_else(|| left.iter().rev().find(same))
+        .or_else(|| right.iter().find(open))
+        .or_else(|| left.iter().rev().find(open))
+        .copied()
+        .unwrap_or(idx)
 }
 
 /// 純粋関数: `order` (タブバーの並び) の上で、`active` の隣 (`dir` = +1 右 / -1 左)。
@@ -145,6 +206,8 @@ pub struct ClosedTab {
     pub title: String,
     /// 手で付けた名前 (開き直したタブに戻す)。
     pub user_title: Option<String>,
+    /// 保留だったか (開き直したタブも保留のまま)。
+    pub held: bool,
     /// 閉じる前のタブの位置。
     pub index: usize,
     /// 閉じる前のペイン ID のままの分割の形。
@@ -374,6 +437,12 @@ fn saved_tab_name(session_id: &Uuid) -> Option<String> {
     crate::tab_names::lookup(&path, &session_id.to_string())
 }
 
+/// セッション `id` が保留として保存してあるか (`tab_holds`)。
+fn saved_tab_hold(session_id: &Uuid) -> bool {
+    crate::tab_holds::store_path()
+        .is_some_and(|path| crate::tab_holds::is_held(&path, &session_id.to_string()))
+}
+
 /// Derive a tab title from the pane cwd (final path component).
 pub fn folder_title(cwd: &Path) -> String {
     cwd.file_name()
@@ -415,6 +484,7 @@ impl App {
             user_title: saved_tab_name(&session_id),
             parked: false,
             working_since: None,
+            held: saved_tab_hold(&session_id),
             layout: Layout::Leaf(first_id),
             focused: first_id,
             slide: None,
@@ -484,6 +554,7 @@ impl App {
             user_title: saved_tab_name(&spec.session_id),
             parked: false,
             working_since: None,
+            held: saved_tab_hold(&spec.session_id),
             layout: Layout::Leaf(new_id),
             focused: new_id,
             slide: None,
@@ -732,6 +803,7 @@ impl App {
             user_title: None,
             parked: false,
             working_since: None,
+            held: false,
             layout: Layout::Leaf(new_id),
             focused: new_id,
             slide: None,
@@ -804,6 +876,7 @@ impl App {
         ClosedTab {
             title: tab.title.clone(),
             user_title: tab.user_title.clone(),
+            held: tab.held,
             index: idx,
             layout: tab.layout.clone(),
             focused: tab.focused,
@@ -861,6 +934,7 @@ impl App {
                 user_title: closed.user_title,
                 parked: false,
                 working_since: None,
+                held: closed.held,
                 layout,
                 focused,
                 slide: None,
@@ -1025,8 +1099,54 @@ impl App {
         if !tab_group_enabled() {
             return (0..self.tabs.len()).collect();
         }
-        let parked: Vec<bool> = self.tabs.iter().map(|t| t.parked).collect();
-        display_order(&parked)
+        display_order(&self.tab_groups())
+    }
+
+    /// 各タブの組 (タブ番号の順)。
+    fn tab_groups(&self) -> Vec<TabGroup> {
+        self.tabs.iter().map(Tab::group).collect()
+    }
+
+    /// タブ `idx` の保留を切り替える (Alt+C)。保留にしたタブはタブバーの右端へ
+    /// 行き、灰色のマーカー + 番号だけになる。もう一度呼ぶと元の組へ戻る。
+    /// 保留にしたときだけ前面を隣のタブへ移す ([`active_after_hold`])。
+    /// そのタブの全ペインのセッション id で保存する。戻り値は切り替えたあとの
+    /// 保留かどうか (タブが無ければ None)。
+    ///
+    /// 緑のタブを寄せるとき ([`App::refresh_tab_parking`]) と違い、押した瞬間に
+    /// 位置を変える: 自分で押したキーなので、動くことが返事になる。
+    pub fn toggle_hold_tab(&mut self, idx: usize) -> Option<bool> {
+        let held = !self.tabs.get(idx)?.held;
+        // 隣は保留にする前の並びで決める。CCNEST_TAB_GROUP=off では位置が
+        // 変わらないので、並び順の隣になる。
+        let next = held.then(|| active_after_hold(&self.tab_order(), &self.tab_groups(), idx));
+        let tab = &mut self.tabs[idx];
+        tab.held = held;
+        // 組が変わる = 定位置が変わるので、途中のすべりは捨てる。
+        tab.slide = None;
+        let ids: Vec<String> = tab
+            .layout
+            .leaves()
+            .into_iter()
+            .filter_map(|pid| self.panes.get(&pid))
+            .map(|p| p.session_id.to_string())
+            .collect();
+        // 位置がずれるので、引いている最中の並べ替えとダブルクリックの 1 回目は捨てる。
+        self.tab_drag = None;
+        self.last_tab_click = None;
+        if let Some(next) = next {
+            if idx == self.active_tab {
+                self.active_tab = next;
+            }
+        }
+        if let Some(path) = crate::tab_holds::store_path() {
+            if held {
+                crate::tab_holds::set(&path, &ids, chrono::Utc::now().timestamp());
+            } else {
+                crate::tab_holds::remove(&path, &ids);
+            }
+        }
+        Some(held)
     }
 
     /// 緑 (実行中／裏で実行中) が続いているタブを右へ小さく寄せ、🟨 に変わった
@@ -1064,15 +1184,15 @@ impl App {
         }
     }
 
-    /// `move_tab` の直後に呼ぶ: 引いたタブ `moved` と違う組 (寄せた／寄せていない)
+    /// `move_tab` の直後に呼ぶ: 引いたタブ `moved` と違う組 (名前つき／寄せた緑／保留)
     /// のタブのすべりを取り消す。`slide_displaced` はタブ番号の範囲で動かすが、
     /// 違う組のタブはタブバーの上では動いていない。
     pub fn cancel_slides_outside_group(&mut self, moved: usize) {
-        let Some(group) = self.tabs.get(moved).map(|t| t.parked) else {
+        let Some(group) = self.tabs.get(moved).map(Tab::group) else {
             return;
         };
         for t in &mut self.tabs {
-            if t.parked != group {
+            if t.group() != group {
                 t.slide = None;
             }
         }
@@ -1303,6 +1423,7 @@ mod tests {
         ClosedTab {
             title: title.to_string(),
             user_title: None,
+            held: false,
             index: 0,
             layout: Layout::Leaf(1),
             focused: 1,
@@ -1420,16 +1541,82 @@ mod tests {
         );
     }
 
+    const L: TabGroup = TabGroup::Left;
+    const W: TabGroup = TabGroup::Working;
+    const H: TabGroup = TabGroup::Held;
+
     /// 寄せていないタブが左・寄せたタブが右。どちらも元の並びの順。
     #[test]
     fn display_order_keeps_each_group_in_tab_order() {
-        assert_eq!(
-            display_order(&[true, false, true, true, false]),
-            [1, 4, 0, 2, 3]
-        );
-        assert_eq!(display_order(&[false, false, false]), [0, 1, 2]);
-        assert_eq!(display_order(&[true, true]), [0, 1]);
+        assert_eq!(display_order(&[W, L, W, W, L]), [1, 4, 0, 2, 3]);
+        assert_eq!(display_order(&[L, L, L]), [0, 1, 2]);
+        assert_eq!(display_order(&[W, W]), [0, 1]);
         assert!(display_order(&[]).is_empty());
+    }
+
+    /// 保留はいちばん右 (緑で寄せた組よりも右)。組の中は元の並びの順。
+    #[test]
+    fn display_order_puts_held_tabs_last() {
+        assert_eq!(display_order(&[H, L, W, H, L, W]), [1, 4, 2, 5, 0, 3]);
+        assert_eq!(display_order(&[H, L]), [1, 0]);
+        assert_eq!(display_order(&[H, H]), [0, 1]);
+    }
+
+    /// 保留は状態より優先: 緑が続いて寄せてあっても保留の組。
+    #[test]
+    fn tab_group_held_wins_over_parked() {
+        assert_eq!(tab_group(false, false), L);
+        assert_eq!(tab_group(false, true), W);
+        assert_eq!(tab_group(true, false), H);
+        assert_eq!(tab_group(true, true), H);
+    }
+
+    /// 保留にしたら次へ進む: 同じ組の右隣 → 左隣 → 保留でないタブ → そのまま。
+    #[test]
+    fn active_after_hold_moves_to_the_neighbour() {
+        // タブバーの並び: 0, 1, 2 (名前つき) │ 3 (緑) │ 4 (保留)。
+        let groups = [L, L, L, W, H];
+        let order = display_order(&groups);
+        assert_eq!(active_after_hold(&order, &groups, 0), 1, "同じ組の右隣");
+        assert_eq!(active_after_hold(&order, &groups, 1), 2);
+        assert_eq!(
+            active_after_hold(&order, &groups, 2),
+            1,
+            "組の右端なら左隣 (緑の組へは行かない)"
+        );
+        assert_eq!(
+            active_after_hold(&order, &groups, 3),
+            2,
+            "緑の組に 1 枚だけなら、名前つきの組のいちばん近いタブ"
+        );
+        // 名前つきが 1 枚だけ: 右の緑へ。
+        let groups = [W, L, H];
+        let order = display_order(&groups);
+        assert_eq!(order, [1, 0, 2]);
+        assert_eq!(active_after_hold(&order, &groups, 1), 0);
+        // ほかが全部保留: そのまま。
+        let groups = [H, L, H];
+        let order = display_order(&groups);
+        assert_eq!(active_after_hold(&order, &groups, 1), 1);
+        assert_eq!(active_after_hold(&[0], &[L], 0), 0, "1 枚だけ");
+        assert_eq!(
+            active_after_hold(&order, &groups, 9),
+            9,
+            "無いタブは動かさない"
+        );
+    }
+
+    /// 並びを変えない設定 (CCNEST_TAB_GROUP=off) では、並び順の隣へ進む。
+    #[test]
+    fn active_after_hold_in_plain_tab_order() {
+        let groups = [L, H, L, L];
+        let order = [0, 1, 2, 3];
+        assert_eq!(
+            active_after_hold(&order, &groups, 0),
+            2,
+            "保留を飛ばして右へ"
+        );
+        assert_eq!(active_after_hold(&order, &groups, 3), 2, "右端なら左へ");
     }
 
     /// 隣のタブ = タブバーに見えている並びの隣。端は回る。
@@ -1722,3 +1909,13 @@ mod tests {
 //                        2 s tick and never during a tab drag, a rename or
 //                        within 600 ms of a tab click. tab_status() is
 //                        shared with the tab marker. CCNEST_TAB_GROUP=off.
+// ver0.21 - 2026-11-21 - Tab.held (Alt+C): a tab on hold sits at the far right
+//                        of the tab bar as a grey marker + number until Alt+C
+//                        is pressed again, whatever its status. TabGroup
+//                        { Left, Working, Held } / pure tab_group (held wins
+//                        over parked); display_order takes the groups.
+//                        toggle_hold_tab() flips it at once, moves the front
+//                        to the neighbour when a tab is put on hold (pure
+//                        active_after_hold) and saves it per session id
+//                        through tab_holds; ClosedTab keeps it and tabs opened
+//                        with --resume / --add look it up.

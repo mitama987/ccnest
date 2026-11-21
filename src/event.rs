@@ -947,6 +947,19 @@ fn handle_key(app: &mut App, key: KeyEvent, pane_rects: &HashMap<PaneId, Rect>) 
         Action::BeginRenameTab => {
             app.begin_rename_tab();
         }
+        Action::ToggleHoldTab => {
+            let idx = app.active_tab;
+            if let Some(held) = app.toggle_hold_tab(idx) {
+                // 前面が隣のタブへ移るので、前のタブの選択は残さない。
+                app.selection = None;
+                if input_trace_enabled() {
+                    trace_append_line(&format!(
+                        "hold_tab idx={idx} held={held} active={}",
+                        app.active_tab
+                    ));
+                }
+            }
+        }
         Action::SidebarSection(idx) => {
             app.sidebar.visible = true;
             app.sidebar_focused = true;
@@ -1308,11 +1321,11 @@ fn handle_mouse(
                     drag.floating = true;
                 }
                 let from = drag.idx;
-                // 動かせるのは同じ組の中だけ (名前つきの組 / 右へ小さく寄せた組)。
-                // 組は状態で決まるので、引いても組は越えられない。組の中では
-                // タブバーの並び = タブ番号の順なので、判定は今までと同じ。
+                // 動かせるのは同じ組の中だけ (名前つきの組 / 右へ小さく寄せた組 /
+                // 保留の組)。組は状態と保留で決まるので、引いても組は越えられない。
+                // 組の中ではタブバーの並び = タブ番号の順なので、判定は今までと同じ。
                 let group = same_group_rects(tab_rects, from, |i| {
-                    app.tabs.get(i).is_some_and(|t| t.parked)
+                    app.tabs.get(i).map(crate::app::Tab::group)
                 });
                 if let Some(to) = tab_drop_target(&group, from, mx) {
                     // 押しのけられるタブが動く桁数 = 引いているタブの幅 + 区切り 1。
@@ -1949,18 +1962,18 @@ fn tab_at(tab_rects: &[(Rect, usize)], mx: i32, my: i32) -> Option<usize> {
         .map(|(_, idx)| *idx)
 }
 
-/// 純粋関数: `tab_rects` のうち、タブ `dragged` と同じ組 (`parked(i)` が同じ) の
+/// 純粋関数: `tab_rects` のうち、タブ `dragged` と同じ組 (`group_of(i)` が同じ) の
 /// 矩形だけを返す。並べ替えの行き先を同じ組の中に限るために使う。
-fn same_group_rects(
+fn same_group_rects<G: PartialEq>(
     tab_rects: &[(Rect, usize)],
     dragged: usize,
-    parked: impl Fn(usize) -> bool,
+    group_of: impl Fn(usize) -> G,
 ) -> Vec<(Rect, usize)> {
-    let group = parked(dragged);
+    let group = group_of(dragged);
     tab_rects
         .iter()
         .copied()
-        .filter(|(_, i)| parked(*i) == group)
+        .filter(|(_, i)| group_of(*i) == group)
         .collect()
 }
 
@@ -5856,3 +5869,9 @@ mod tests {
 //                        within the dragged tab's group (same_group_rects
 //                        feeds tab_drop_target), and slides of tabs in the
 //                        other group are cancelled after a move.
+// ver0.25 - 2026-11-21 - Alt+C (Action::ToggleHoldTab) puts the front tab on
+//                        hold / takes it off hold (app.toggle_hold_tab) and
+//                        clears the selection. same_group_rects is generic
+//                        over the group key (now Tab::group: named / parked
+//                        green / on hold). The trace logs
+//                        `hold_tab idx=N held=.. active=M`.

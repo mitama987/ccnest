@@ -164,7 +164,12 @@ try {
     $prevFg = [W]::GetForegroundWindow()
     Start-Process wt.exe -ArgumentList @('-w', 'new', '--size', '100,14', '-d', "`"$work`"", 'cmd.exe', '/c', "`"$run`"")
   } else {
-    $p = Start-Process -FilePath "conhost.exe" -ArgumentList "cmd.exe /c `"$run`"" -WorkingDirectory $work -PassThru
+    # No console window at all (CREATE_NO_WINDOW): nothing shows up and nothing takes the keyboard
+    # focus from the user. (A hidden conhost window still becomes the foreground window.) The
+    # screen is read and input is sent through the console API, which needs no window.
+    $si = New-Object Diagnostics.ProcessStartInfo 'cmd.exe', "/c `"$run`""
+    $si.UseShellExecute = $false; $si.CreateNoWindow = $true; $si.WorkingDirectory = $work
+    $p = [Diagnostics.Process]::Start($si)
   }
   $deadline = (Get-Date).AddSeconds(20)
   do {

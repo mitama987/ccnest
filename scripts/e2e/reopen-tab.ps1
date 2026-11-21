@@ -104,7 +104,12 @@ function Send($ccId, $what) {
 }
 
 $before = @(Get-Process ccnest -ErrorAction SilentlyContinue).Count
-$p = Start-Process -FilePath "conhost.exe" -ArgumentList "`"$exe`"" -WorkingDirectory $work -PassThru
+# No console window at all (CREATE_NO_WINDOW): nothing shows up and nothing takes the keyboard
+# focus from the user. (A hidden conhost window still becomes the foreground window.) The
+# screen is read and input is sent through the console API, which needs no window.
+$si = New-Object Diagnostics.ProcessStartInfo 'cmd.exe', "/c `"$exe`""
+$si.UseShellExecute = $false; $si.CreateNoWindow = $true; $si.WorkingDirectory = $work
+$p = [Diagnostics.Process]::Start($si)
 $fake = $null
 $fails = 0
 function Check($ok, $msg) { if ($ok) { "  ok   $msg" } else { "  FAIL $msg"; $script:fails++ } }

@@ -12,11 +12,12 @@ use ratatui::widgets::{Block, Borders, Clear, Paragraph, Widget};
 use ratatui::Frame;
 
 use crate::app::{
-    float_in_strip, folder_title, shown_tab_name, tab_group_enabled, App, Rect as AppRect,
+    float_in_strip, folder_title, shown_tab_name, tab_group, tab_group_enabled, App,
+    Rect as AppRect, TabGroup,
 };
 use crate::claude::usage::{UsageLabel, UsageLevel};
 use crate::pane::grid::{Layout, SplitDir};
-use crate::pane::status::status_marker;
+use crate::pane::status::{status_marker, ClaudeStatus};
 use crate::pane::PaneId;
 use crate::sidebar::{claude_ctx, filetree, panelist, Section};
 
@@ -198,30 +199,34 @@ fn draw_tabbar(
     let mut x_offset: u16 = 0;
     let area_end = area.x.saturating_add(area.width);
     let grouping = tab_group_enabled();
-    // 緑が続いているタブは右へ小さく寄せる (並べる順 = App::tab_order)。
-    // 左の組 (名前つき) と右の組 (小さい) の境に仕切りを 1 本入れる。
-    let mut divider_x: Option<u16> = None;
-    let mut seen_left = false;
+    // 緑が続いているタブは右へ小さく寄せ、保留 (Alt+C) のタブはさらに右へ
+    // 小さく置く (並べる順 = App::tab_order)。組の境ごとに仕切りを 1 本入れる。
+    let mut divider_xs: Vec<u16> = Vec::new();
+    let mut prev_group: Option<TabGroup> = None;
     for i in app.tab_order() {
         let tab = &app.tabs[i];
         let active = i == app.active_tab;
-        let parked = grouping && tab.parked;
-        if !parked {
-            seen_left = true;
-        } else if seen_left && divider_x.is_none() {
-            divider_x = Some(area.x.saturating_add(x_offset));
+        // 並びを変えない設定 (CCNEST_TAB_GROUP=off) では緑のタブを寄せない。
+        // 保留はその場で小さく出す (仕切りは入れない)。
+        let group = tab_group(tab.held, grouping && tab.parked);
+        if grouping && prev_group.is_some_and(|g| g != group) {
+            divider_xs.push(area.x.saturating_add(x_offset));
             x_offset = x_offset.saturating_add(TAB_GROUP_DIVIDER_W);
         }
+        prev_group = Some(group);
         let base = if active {
             theme.tab_active
+        } else if tab.held {
+            theme.tab_held
         } else {
             theme.tab_inactive
         };
         // タブの状態色 = 配下全ペインの畳み込み。タスク名はフォーカスペインのもの。
         // マーカー絵文字は claude ペインを含むタブだけに出す
         // (shell のみのタブに 🟨 が付くと紛らわしい)。
+        // 保留のタブは状態を出さず、保留のマーカーに固定する。
         let (has_claude, status) = app.tab_status(tab);
-        let marker = has_claude.then(|| status_marker(status));
+        let marker = tab_marker(tab.held, has_claude, status);
         // 手で付けた名前 (ダブルクリック / Alt+F) があれば、タスク名より優先。
         let task = shown_tab_name(
             tab.user_title.as_deref(),
@@ -239,9 +244,9 @@ fn draw_tabbar(
         };
         let label = if renaming {
             format!(" {}\u{258e} ", app.renaming_tab.as_deref().unwrap_or(""))
-        } else if parked && !active {
-            // 右へ寄せたタブは「マーカー + 番号」だけ。前面のタブは寄せた位置の
-            // まま名前つきで出す (クリックした瞬間に位置を動かさない)。
+        } else if group != TabGroup::Left && !active {
+            // 右へ寄せたタブ・保留のタブは「マーカー + 番号」だけ。前面のタブは
+            // 寄せた位置のまま名前つきで出す (クリックした瞬間に位置を動かさない)。
             format!(" {} ", tab_label_small(marker, i + 1))
         } else {
             format!(
@@ -274,7 +279,7 @@ fn draw_tabbar(
         item_tabs.push(i);
         x_offset = x_offset.saturating_add(width).saturating_add(1);
     }
-    if let Some(x) = divider_x {
+    for x in divider_xs {
         put_tab_label(
             frame.buffer_mut(),
             area,
@@ -575,14 +580,31 @@ fn tab_label(number: usize, title: &str, task: Option<&str>, max: usize) -> Stri
     ellipsize_right(&raw, max)
 }
 
-/// 左の組 (名前つき) と右の組 (小さく寄せた緑) の境の仕切り。`│` はステータス
+/// 保留 (Alt+C) のタブのマーカー。絵文字ではなく文字の黒丸: 丸の絵文字に灰色は
+/// 無く (⚪ 白 / ⚫ 黒)、文字なら `theme.tab_held` の灰色で塗れる。
+/// Windows Terminal で 1 桁。
+pub const HELD_MARKER: &str = "\u{25cf}";
+
+/// 純粋関数: タブに出すマーカー。保留のタブは状態にかかわらず [`HELD_MARKER`]
+/// (もう一度 Alt+C を押すまで灰色のまま)。それ以外は claude ペインを含むタブ
+/// だけに状態のマーカーを出す。
+fn tab_marker(held: bool, has_claude: bool, status: ClaudeStatus) -> Option<&'static str> {
+    if held {
+        Some(HELD_MARKER)
+    } else {
+        has_claude.then(|| status_marker(status))
+    }
+}
+
+/// 組の境の仕切り (名前つき │ 小さく寄せた緑 │ 保留)。`│` はステータス
 /// バーの区切りと同じ字 (Windows Terminal で 1 桁)。
 const TAB_GROUP_DIVIDER: &str = "│";
 /// 仕切りが取る桁数 (仕切り 1 桁 + 空き 1 桁)。
 const TAB_GROUP_DIVIDER_W: u16 = 2;
 
-/// 右へ小さく寄せたタブのラベル: 「マーカー + 番号」だけ (`🟢3`)。名前は出さない。
-/// マーカーの無いタブ (起こらないはず: 寄せるのは claude の緑だけ) は番号だけ。
+/// 右へ小さく寄せたタブ・保留のタブのラベル: 「マーカー + 番号」だけ
+/// (`🟢3`・`●5`)。名前は出さない。
+/// マーカーの無いタブ (起こらないはず: 寄せるのは claude の緑と保留だけ) は番号だけ。
 fn tab_label_small(marker: Option<&str>, number: usize) -> String {
     format!("{}{number}", marker.unwrap_or(""))
 }
@@ -605,7 +627,7 @@ fn tab_label_marked(
 
 fn draw_statusbar(app: &App, frame: &mut Frame<'_>, area: Rect, theme: &theme::Theme) {
     let hint_text =
-        "Ctrl+D:┃  Ctrl+E:━  Ctrl+T:tab  Ctrl+W:close  Ctrl+F:files  Alt+F:rename  Ctrl+C×2:shell  Ctrl+Q:quit";
+        "Ctrl+D:┃  Ctrl+E:━  Ctrl+T:tab  Ctrl+W:close  Ctrl+F:files  Alt+F:rename  Alt+C:hold  Ctrl+C×2:shell  Ctrl+Q:quit";
     let cwd = app
         .status
         .clone()
@@ -1716,6 +1738,45 @@ mod tests {
         assert_eq!(width_of(TAB_GROUP_DIVIDER), 1);
     }
 
+    // 保留のタブは「灰色の丸 + 番号」だけ (2〜3 桁)。前面なら名前つき。
+    #[test]
+    fn held_tab_label_is_grey_dot_and_number() {
+        assert_eq!(tab_label_small(Some(HELD_MARKER), 5), "●5");
+        assert_eq!(tab_label_small(Some(HELD_MARKER), 12), "●12");
+        assert_eq!(width_of(HELD_MARKER), 1, "文字の丸は 1 桁");
+        assert_eq!(width_of(&tab_label_small(Some(HELD_MARKER), 5)), 2);
+        assert_eq!(
+            tab_label_marked(
+                Some(HELD_MARKER),
+                5,
+                "ccnest",
+                Some("決済まわり"),
+                TAB_LABEL_MAX
+            ),
+            "● 5:決済まわり"
+        );
+    }
+
+    // 保留のマーカーは状態で変わらない (実行中でも対応待ちでも、shell だけでも)。
+    #[test]
+    fn tab_marker_held_ignores_the_status() {
+        for status in [
+            ClaudeStatus::Busy,
+            ClaudeStatus::Background,
+            ClaudeStatus::NeedsAttention,
+            ClaudeStatus::Idle,
+        ] {
+            assert_eq!(tab_marker(true, true, status), Some(HELD_MARKER));
+            assert_eq!(tab_marker(true, false, status), Some(HELD_MARKER));
+            assert_eq!(
+                tab_marker(false, true, status),
+                Some(status_marker(status)),
+                "保留でなければ状態のマーカー"
+            );
+            assert_eq!(tab_marker(false, false, status), None, "shell だけのタブ");
+        }
+    }
+
     // マーカー None (shell のみのタブ) は従来ラベルそのまま
     #[test]
     fn tab_label_marked_none_is_plain() {
@@ -1940,3 +2001,11 @@ mod tests {
 //                        working tabs as marker + number (tab_label_small).
 //                        The active tab keeps its name where it is. The
 //                        floating tab index is mapped to its item position.
+// ver0.22 - 2026-11-21 - Tabs on hold (Alt+C): drawn at the far right as
+//                        HELD_MARKER (a text dot, painted with
+//                        theme.tab_held) + number, whatever the status
+//                        (pure tab_marker). The front tab keeps its name.
+//                        A divider is drawn at every group boundary
+//                        (named │ parked green │ on hold). With
+//                        CCNEST_TAB_GROUP=off a held tab is drawn small in
+//                        place.
