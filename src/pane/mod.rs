@@ -68,7 +68,7 @@ pub struct Pane {
 
 /// プロセスなしで開いた保留のセッションの画面に出す案内。
 const DORMANT_HINT: &str =
-    "保留中のセッションです (Claude は起動していません)。\r\nキーを押すと会話の続きから再開します。\r\n";
+    "保留中のセッションです (Claude は起動していません)。\r\nAlt+C で保留を外すと、会話の続きから再開します (文字を打っても再開します)。\r\n";
 
 /// 純粋判定: 直前に適用したサイズ `last` と要求 (rows, cols) から、適用すべき
 /// 新サイズを返す。0 は 1 に丸める (vt100 / ConPTY とも 0 行 0 列は不正)。
@@ -307,6 +307,8 @@ mod tests {
 }
 
 // Version History
+// ver0.5 - 2026-11-21 - DORMANT_HINT names the key that wakes the pane (Alt+C;
+//                       typing into the pane also wakes it).
 // ver0.4 - 2026-11-21 - A pane can be asleep: `pty` is an Option, None = no child
 //                       process. sleep() kills the process tree and keeps the
 //                       last screen (parser), session id and task name;

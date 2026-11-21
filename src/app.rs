@@ -211,7 +211,7 @@ pub fn hold_notice(stopped: usize, kept: usize) -> Option<String> {
     match (stopped, kept) {
         (0, 0) => None,
         (_, 0) => Some(
-            "保留: Claude を止めてメモリを空けました (開いてキーを押すと続きから再開)".to_string(),
+            "保留: Claude を止めてメモリを空けました (もう一度 Alt+C で続きから再開)".to_string(),
         ),
         (0, _) => Some("保留: 作業中か入力の途中なので Claude は動かしたままです".to_string()),
         (s, k) => Some(format!(
@@ -1770,6 +1770,8 @@ mod tests {
         assert_eq!(hold_notice(0, 0), None, "shell だけのタブ");
         assert!(hold_notice(1, 0).unwrap().contains("メモリを空けました"));
         assert!(hold_notice(2, 0).unwrap().contains("メモリを空けました"));
+        // 起こし方は「もう一度 Alt+C」と名指しする (v0.1.50)
+        assert!(hold_notice(1, 0).unwrap().contains("Alt+C"));
         assert!(hold_notice(0, 1).unwrap().contains("動かしたまま"));
         let mixed = hold_notice(1, 2).unwrap();
         assert!(
@@ -2177,3 +2179,5 @@ mod tests {
 //                        (opens_dormant). App::notice is a status-bar
 //                        message that expires (NOTICE_TTL).
 //                        CCNEST_HOLD_SLEEP=off turns the feature off.
+// ver0.23 - 2026-11-21 - hold_notice names the key that wakes the stopped
+//                        Claude ("もう一度 Alt+C で続きから再開").

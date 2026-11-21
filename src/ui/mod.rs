@@ -817,7 +817,7 @@ fn pane_title(pid: PaneId, cwd: &Path) -> String {
 }
 
 /// 眠っているペイン (保留でメモリを空けた) の枠のタイトルに足す案内。
-const ASLEEP_TITLE_NOTE: &str = "保留中: Claude 停止・キーを押すと続きから再開 ";
+const ASLEEP_TITLE_NOTE: &str = "保留中: Claude 停止・Alt+C で再開 ";
 
 /// 純粋: 眠っているペインの枠のタイトル。いつものタイトルの後ろに案内を足す
 /// (画面は最後の表示のまま動かないので、止まっていることと起こし方を枠に出す)。
@@ -1783,7 +1783,7 @@ mod tests {
     fn asleep_pane_title_says_how_to_wake() {
         let t = pane_title_asleep(3, Path::new(r"C:\work\ccnest"));
         assert!(t.starts_with(" [3] ccnest "), "{t:?}");
-        assert!(t.contains("保留中") && t.contains("キーを押すと"), "{t:?}");
+        assert!(t.contains("保留中") && t.contains("Alt+C で再開"), "{t:?}");
     }
 
     // 保留のマーカーは状態で変わらない (実行中でも対応待ちでも、shell だけでも)。
@@ -2043,3 +2043,6 @@ mod tests {
 //                        (pane_title_asleep). While App::notice is set, the
 //                        bottom line of the status bar shows it instead of
 //                        the key hints.
+// ver0.24 - 2026-11-21 - The frame title of a sleeping pane names the key that
+//                        wakes it: "Alt+C で再開" (was "キーを押すと続きから再開",
+//                        which did not say which key).
