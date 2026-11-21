@@ -26,7 +26,10 @@
 # The Japanese text is written as code points so this file stays ASCII.
 param(
   [string]$Exe = (Join-Path $PSScriptRoot '..\..\target\release\ccnest.exe'),
-  [string]$Inner, [int]$ProcId, [string]$Out, [string]$Ops
+  [string]$Inner, [int]$ProcId, [string]$Out, [string]$Ops,
+  # Inner mode: more screen rows to append after the two standard lines, e.g. "1,2,-1"
+  # (-1 = the last row). Each is written as its text, one line per row.
+  [string]$AlsoRows
 )
 $ErrorActionPreference = 'Stop'
 
@@ -74,6 +77,7 @@ public static class K {
     return GetConsoleScreenBufferInfo(outH, out info);
   }
   // Screen row r, one char per cell (the 2nd cell of a wide char is '\0').
+  public static int Height() { return info.Win.B - info.Win.T + 1; }
   public static string Row(int r, out short[] attrs) {
     short w = info.Size.X;
     var buf = new CHAR_INFO[w];
@@ -150,8 +154,14 @@ public static class K {
   Start-Sleep -Milliseconds 400
   $attrs = $null
   $row = [K]::Row(0, [ref]$attrs)
-  [void][K]::FreeConsole()
   $lines = @($row, (($attrs | ForEach-Object { '{0:x}' -f ($_ -band 0xff) }) -join ' '))
+  # The extra rows are read before the console is released.
+  foreach ($r in @($AlsoRows -split '[,; ]' | Where-Object { $_ })) {
+    $i = [int]$r; if ($i -lt 0) { $i = [K]::Height() + $i }
+    $a2 = $null
+    $lines += ([K]::Row($i, [ref]$a2) -replace "`0", '').TrimEnd()
+  }
+  [void][K]::FreeConsole()
   [IO.File]::WriteAllLines($Out, $lines, (New-Object Text.UTF8Encoding $false))
   exit 0
 }

@@ -3,8 +3,9 @@ pub mod pty;
 pub mod status;
 
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use anyhow::Result;
 use uuid::Uuid;
@@ -32,7 +33,12 @@ pub struct Pane {
     pub cwd: PathBuf,
     pub session_id: Uuid,
     pub created_at: Instant,
-    pub pty: pty::PtyHandle,
+    /// 子プロセス (claude / shell) の PTY。None = 眠っている: 保留 (Alt+C) に
+    /// したタブの Claude を落としてメモリを空けた状態 ([`Pane::sleep`]) か、
+    /// 保留のセッションをプロセスなしで開いた状態 ([`Pane::dormant`])。
+    /// `parser` (最後の画面) は残るので、開けば最後の画面がそのまま見える。
+    /// 起こすのは `App::wake_pane` (同じ id で spawn し直して差し替える)。
+    pub pty: Option<pty::PtyHandle>,
     pub parser: Arc<Mutex<vt100::Parser>>,
     pub command: String,
     pub claude_running: bool,
@@ -55,7 +61,14 @@ pub struct Pane {
     /// 直前に PTY / parser へ適用した (rows, cols)。描画矩形が変わったときだけ
     /// `ResizePseudoConsole` と vt100 `set_size` を呼ぶためのキャッシュ。
     last_size: Option<(u16, u16)>,
+    /// 最後に `write` した時刻 (`created_at` からのミリ秒 + 1。0 = まだ無い)。
+    /// 「入力を送った直後は、まだスピナーが出ていなくても落とさない」の判定用。
+    last_write_ms: AtomicU64,
 }
+
+/// プロセスなしで開いた保留のセッションの画面に出す案内。
+const DORMANT_HINT: &str =
+    "保留中のセッションです (Claude は起動していません)。\r\nキーを押すと会話の続きから再開します。\r\n";
 
 /// 純粋判定: 直前に適用したサイズ `last` と要求 (rows, cols) から、適用すべき
 /// 新サイズを返す。0 は 1 に丸める (vt100 / ConPTY とも 0 行 0 列は不正)。
@@ -110,7 +123,7 @@ impl Pane {
             cwd: cwd.to_path_buf(),
             session_id,
             created_at: Instant::now(),
-            pty,
+            pty: Some(pty),
             parser,
             command,
             claude_running,
@@ -120,7 +133,57 @@ impl Pane {
             output_stamp: hooks.stamp,
             waker,
             last_size: None,
+            last_write_ms: AtomicU64::new(0),
         })
+    }
+
+    /// 保留のセッションを、プロセスを起こさずに眠ったまま開く (再起動後の復元で
+    /// 保留のタブまで claude を起動してメモリを使わないため)。画面には案内だけを
+    /// 出す。起こし方は眠らせたペインと同じ (`App::wake_pane`)。
+    pub fn dormant(id: PaneId, cwd: &Path, session_id: Uuid, wake: WakeTx) -> Self {
+        let mut parser = vt100::Parser::new(24, 80, 2000);
+        parser.process(DORMANT_HINT.as_bytes());
+        Self {
+            id,
+            cwd: cwd.to_path_buf(),
+            session_id,
+            created_at: Instant::now(),
+            pty: None,
+            parser: Arc::new(Mutex::new(parser)),
+            command: "claude".to_string(),
+            claude_running: true,
+            session: SessionTailer::default(),
+            status: ClaudeStatus::NeedsAttention,
+            task: None,
+            output_stamp: OutputStamp::new(),
+            waker: OutputWaker::new(wake, id),
+            last_size: None,
+            last_write_ms: AtomicU64::new(0),
+        }
+    }
+
+    /// 眠っているか (プロセスが無い)。
+    pub fn asleep(&self) -> bool {
+        self.pty.is_none()
+    }
+
+    /// 子プロセスを子孫ごと終了させて眠らせる。最後の画面 (`parser`)・セッション
+    /// id・タスク名は残す。呼ぶ前に、止めても失う物が無いことを確かめること
+    /// (`App::sleep_held_tab`)。すでに眠っていれば何もしない。
+    pub fn sleep(&mut self) {
+        if let Some(pty) = self.pty.take() {
+            pty.kill();
+        }
+    }
+
+    /// 最後に `write` してからの時間。まだ一度も書いていなければ None。
+    pub fn since_last_write(&self) -> Option<Duration> {
+        let at = self.last_write_ms.load(Ordering::Relaxed);
+        if at == 0 {
+            return None;
+        }
+        let now = self.created_at.elapsed().as_millis() as u64 + 1;
+        Some(Duration::from_millis(now.saturating_sub(at)))
     }
 
     /// 描画矩形が変わったときだけ PTY と parser のサイズを揃える。かつては
@@ -131,7 +194,9 @@ impl Pane {
         let Some((r, c)) = next_size(self.last_size, rows, cols) else {
             return false;
         };
-        self.pty.resize(r, c);
+        if let Some(pty) = &self.pty {
+            pty.resize(r, c);
+        }
         if let Ok(mut p) = self.parser.lock() {
             p.set_size(r, c);
         }
@@ -139,12 +204,22 @@ impl Pane {
         true
     }
 
+    /// 子プロセスへ書く。眠っているペインでは何もしない。
     pub fn write(&self, data: &[u8]) {
-        self.pty.write(data);
+        let Some(pty) = &self.pty else {
+            return;
+        };
+        pty.write(data);
+        self.last_write_ms.store(
+            self.created_at.elapsed().as_millis() as u64 + 1,
+            Ordering::Relaxed,
+        );
     }
 
     pub fn terminate(self) {
-        self.pty.kill();
+        if let Some(pty) = &self.pty {
+            pty.kill();
+        }
     }
 
     /// 現在走っている子プロセス（claude 等）を kill し、同じペイン枠に
@@ -153,14 +228,16 @@ impl Pane {
     /// 新しい vt100::Parser を割り当てて画面状態をリセットする。旧 parser は
     /// 旧 PTY の reader スレッドが EOF まで書き込むが、誰も参照しないので問題ない。
     pub fn respawn_as_shell(&mut self) -> Result<()> {
-        self.pty.kill();
+        if let Some(pty) = &self.pty {
+            pty.kill();
+        }
         let new_parser = Arc::new(Mutex::new(vt100::Parser::new(24, 80, 2000)));
         let hooks = ReaderHooks {
             stamp: self.output_stamp.clone(),
             waker: Some(self.waker.clone()),
         };
         let (new_pty, cmd_label) = spawn_shell(&self.cwd, Arc::clone(&new_parser), hooks)?;
-        self.pty = new_pty;
+        self.pty = Some(new_pty);
         self.parser = new_parser;
         // 新しい PTY (40x140) / parser (24x80) は矩形と食い違うので、次の描画後の
         // sync で必ずリサイズさせる。
@@ -230,6 +307,14 @@ mod tests {
 }
 
 // Version History
+// ver0.4 - 2026-11-21 - A pane can be asleep: `pty` is an Option, None = no child
+//                       process. sleep() kills the process tree and keeps the
+//                       last screen (parser), session id and task name;
+//                       dormant() opens a held session without starting claude
+//                       (a hint on the screen). write() is a no-op while asleep
+//                       and records the time of the last write
+//                       (since_last_write) so a pane that was just sent input
+//                       is not put to sleep.
 // ver0.3 - 2026-11-21 - Pane::spawn_with: spawn with ResumeExtras (first prompt /
 //                       per-session permission mode); Pane::spawn delegates.
 // ver0.2 - 2026-10-19 - Pane::spawn takes a SessionStart so a pane can resume an

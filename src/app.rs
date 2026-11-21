@@ -11,7 +11,7 @@ use crate::claude::usage::{UsageCell, UsageLabel, UsageSnapshot};
 use crate::cli::ResumeSpec;
 use crate::pane::grid::{Direction, Layout};
 use crate::pane::status::{
-    aggregate_status, detect_status, sanitize_task, screen_text, ClaudeStatus,
+    aggregate_status, detect_status, is_safe_to_stop, sanitize_task, screen_text, ClaudeStatus,
 };
 use crate::pane::{Pane, PaneId};
 use crate::remote::{self, Inbox, Reply};
@@ -155,6 +155,71 @@ pub fn park_step(prev: Option<Instant>, working: bool, now: Instant) -> (Option<
     )
 }
 
+/// 入力を送ってからこの時間は、画面が「止めてよい」形でも Claude を落とさない。
+/// 送った直後は、まだスピナー行が画面に出ていないことがある。
+pub const SLEEP_QUIET_AFTER_INPUT: Duration = Duration::from_secs(5);
+
+/// お知らせ (ステータスバーの左) を出しておく時間。
+pub const NOTICE_TTL: Duration = Duration::from_secs(8);
+
+/// `CCNEST_HOLD_SLEEP=off` (または `0`) で「保留にしたタブの Claude を落として
+/// メモリを空ける」を止める (v0.1.48 と同じ、保留は見た目だけ)。初回だけ評価。
+pub fn hold_sleep_enabled() -> bool {
+    use std::sync::OnceLock;
+    static ENABLED: OnceLock<bool> = OnceLock::new();
+    *ENABLED.get_or_init(|| {
+        !std::env::var("CCNEST_HOLD_SLEEP").is_ok_and(|v| v.eq_ignore_ascii_case("off") || v == "0")
+    })
+}
+
+/// 保留にしたタブのペイン 1 つを眠らせる (Claude を落とす) かの判定結果。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SleepCheck {
+    /// 落としてよい。
+    Stop,
+    /// claude のペインではない (shell) か、もう眠っている。数えない。
+    Skip,
+    /// 落とさない: 実行中・裏の仕事あり・ダイアログの途中・書きかけの入力あり・
+    /// 入力を送った直後・画面を読めなかった、のどれか。
+    Keep,
+}
+
+/// 純粋関数: ペインを眠らせるか。`safe_screen` = いまの画面が「止めても失う物が
+/// 無い」形か ([`is_safe_to_stop`])。画面を読めなかったら None。`since_write` =
+/// 最後に入力を送ってからの時間。「落としてよい」と言えるときだけ [`SleepCheck::Stop`]。
+pub fn sleep_check(
+    claude_running: bool,
+    asleep: bool,
+    safe_screen: Option<bool>,
+    since_write: Option<Duration>,
+) -> SleepCheck {
+    if !claude_running || asleep {
+        return SleepCheck::Skip;
+    }
+    if since_write.is_some_and(|d| d < SLEEP_QUIET_AFTER_INPUT) {
+        return SleepCheck::Keep;
+    }
+    match safe_screen {
+        Some(true) => SleepCheck::Stop,
+        _ => SleepCheck::Keep,
+    }
+}
+
+/// 純粋関数: 保留にしたときのお知らせ。`stopped` = 落としたペインの数、`kept` =
+/// 落とさなかった claude のペインの数。どちらも 0 (shell だけのタブ) なら None。
+pub fn hold_notice(stopped: usize, kept: usize) -> Option<String> {
+    match (stopped, kept) {
+        (0, 0) => None,
+        (_, 0) => Some(
+            "保留: Claude を止めてメモリを空けました (開いてキーを押すと続きから再開)".to_string(),
+        ),
+        (0, _) => Some("保留: 作業中か入力の途中なので Claude は動かしたままです".to_string()),
+        (s, k) => Some(format!(
+            "保留: Claude を {s} 個止めました ({k} 個は作業中か入力の途中なのでそのまま)"
+        )),
+    }
+}
+
 /// 純粋関数: タブバーに並べる順 (タブ番号の列)。組の順 (名前つき → 緑で小さく
 /// 寄せた → 保留) に並べ、どの組の中でも元の順は変えない (🟨 に戻ったタブ・
 /// 保留を外したタブは、元いた並びの位置に戻る)。
@@ -237,6 +302,9 @@ pub struct App {
     pub sidebar_focused: bool,
     pub quit: bool,
     pub status: Option<String>,
+    /// 一時的なお知らせ (文面, 出した時刻)。ステータスバーの左に [`NOTICE_TTL`] の
+    /// あいだ出す (`status` と違って時間で消える)。
+    pub notice: Option<(String, Instant)>,
     pub renaming_tab: Option<String>,
     /// 名前の入力を始めてから、まだ何も打っていない (今の名前が丸ごと選ばれて
     /// いる状態。Explorer の名前変更と同じ)。最初の 1 文字・貼り付けは丸ごと
@@ -500,6 +568,7 @@ impl App {
             sidebar_focused: false,
             quit: false,
             status: None,
+            notice: None,
             renaming_tab: None,
             rename_fresh: false,
             last_tab_click: None,
@@ -540,21 +609,29 @@ impl App {
         let cwd = self.cwd.clone();
         let new_id = self.next_pane_id;
         self.next_pane_id += 1;
-        let pane = Pane::spawn_with(
-            new_id,
-            &cwd,
-            spec.session_id,
-            SessionStart::Resume,
-            &resume_extras(&spec),
-            self.wake_tx.clone(),
-        )?;
+        let held = saved_tab_hold(&spec.session_id);
+        // 保留のセッションは claude を起こさず、眠ったまま開く (再起動後の復元で
+        // 保留のタブにまでメモリを使わない)。最初の一言がある (続きを頼まれて
+        // いる) セッションは、保留でも起こす。
+        let pane = if opens_dormant(held, spec.prompt.is_some(), hold_sleep_enabled()) {
+            Pane::dormant(new_id, &cwd, spec.session_id, self.wake_tx.clone())
+        } else {
+            Pane::spawn_with(
+                new_id,
+                &cwd,
+                spec.session_id,
+                SessionStart::Resume,
+                &resume_extras(&spec),
+                self.wake_tx.clone(),
+            )?
+        };
         self.panes.insert(new_id, pane);
         self.tabs.push(Tab {
             title: spec.title.unwrap_or_else(|| folder_title(&cwd)),
             user_title: saved_tab_name(&spec.session_id),
             parked: false,
             working_since: None,
-            held: saved_tab_hold(&spec.session_id),
+            held,
             layout: Layout::Leaf(new_id),
             focused: new_id,
             slide: None,
@@ -640,6 +717,10 @@ impl App {
         // 開発用 (CCNEST_STATUS_TRACE): 判定結果と、判定に使った画面テキストを控える。
         let mut trace = status_trace_path().map(|_| String::new());
         for (id, pane) in self.panes.iter_mut() {
+            // 眠っているペイン (プロセスなし) は、最後の状態・タスク名のまま据え置く。
+            if pane.asleep() {
+                continue;
+            }
             pane.session.refresh();
             if !pane.claude_running {
                 // shell ペインに状態色・タスク名は出さない
@@ -1149,6 +1230,102 @@ impl App {
         Some(held)
     }
 
+    /// 保留にしたタブ `idx` の Claude を落としてメモリを空ける。落とすのは、
+    /// いまの画面が「止めても失う物が無い」形のペインだけ ([`sleep_check`]):
+    /// 実行中・裏の仕事あり・ダイアログの途中・書きかけの入力あり・入力を送った
+    /// 直後のペインは動かしたまま。画面はその場で読み直す (2 秒 tick の状態は
+    /// 古いことがある)。戻り値は (落とした数, 落とさなかった claude のペインの数)。
+    /// `CCNEST_HOLD_SLEEP=off` なら何もしない。
+    pub fn sleep_held_tab(&mut self, idx: usize) -> (usize, usize) {
+        if !hold_sleep_enabled() {
+            return (0, 0);
+        }
+        let Some(tab) = self.tabs.get(idx) else {
+            return (0, 0);
+        };
+        let (mut stopped, mut kept) = (0, 0);
+        for pid in tab.layout.leaves() {
+            let Some(pane) = self.panes.get_mut(&pid) else {
+                continue;
+            };
+            // 履歴を見ている途中だと過去の画面が返るので、最下部へ戻してから読む。
+            pane.scroll_to_bottom();
+            let safe = pane.parser.try_lock().ok().map(|p| {
+                let screen = p.screen();
+                let (_, cols) = screen.size();
+                is_safe_to_stop(&screen_text(screen.rows(0, cols)))
+            });
+            match sleep_check(
+                pane.claude_running,
+                pane.asleep(),
+                safe,
+                pane.since_last_write(),
+            ) {
+                SleepCheck::Stop => {
+                    pane.sleep();
+                    pane.status = ClaudeStatus::NeedsAttention;
+                    stopped += 1;
+                }
+                SleepCheck::Keep => kept += 1,
+                SleepCheck::Skip => {}
+            }
+        }
+        (stopped, kept)
+    }
+
+    /// 眠っているペイン `pid` を起こす: 同じ id・フォルダ・セッション id で claude を
+    /// 起動し直して差し替える (会話ログがあれば `--resume`、無ければ新しい
+    /// セッション)。眠っていなければ何もせず false。
+    pub fn wake_pane(&mut self, pid: PaneId) -> Result<bool> {
+        let Some(old) = self.panes.get(&pid).filter(|p| p.asleep()) else {
+            return Ok(false);
+        };
+        let (cwd, session_id) = (old.cwd.clone(), old.session_id);
+        let resumable = crate::claude::session::session_path(&cwd, &session_id.to_string())
+            .is_some_and(|path| path.is_file());
+        let pane = Pane::spawn(
+            pid,
+            &cwd,
+            session_id,
+            start_for(resumable),
+            self.wake_tx.clone(),
+        )?;
+        // 古いペイン (プロセスなし) は差し替えで捨てる。
+        self.panes.insert(pid, pane);
+        Ok(true)
+    }
+
+    /// タブ `idx` の眠っているペインを全部起こす (保留を外したとき)。起こした数。
+    pub fn wake_tab(&mut self, idx: usize) -> Result<usize> {
+        let Some(tab) = self.tabs.get(idx) else {
+            return Ok(0);
+        };
+        let mut woken = 0;
+        for pid in tab.layout.leaves() {
+            if self.wake_pane(pid)? {
+                woken += 1;
+            }
+        }
+        Ok(woken)
+    }
+
+    /// お知らせを出す (ステータスバーの左に [`NOTICE_TTL`] のあいだ)。
+    pub fn set_notice(&mut self, text: String) {
+        self.notice = Some((text, Instant::now()));
+    }
+
+    /// 期限の切れたお知らせを片付ける。片付けたら true (描き直しが要る)。
+    pub fn expire_notice(&mut self, now: Instant) -> bool {
+        let expired = self
+            .notice
+            .as_ref()
+            .is_some_and(|(_, at)| now.saturating_duration_since(*at) >= NOTICE_TTL);
+        if expired {
+            self.notice = None;
+        }
+        expired
+    }
+
     /// 緑 (実行中／裏で実行中) が続いているタブを右へ小さく寄せ、🟨 に変わった
     /// タブを左へ戻す。2 秒 tick から `refresh_pane_state` の直後に呼ぶ。
     ///
@@ -1326,6 +1503,13 @@ fn resume_extras(spec: &ResumeSpec) -> ResumeExtras {
         prompt: spec.prompt.clone(),
         permission_mode: spec.permission_mode.clone(),
     }
+}
+
+/// 純粋: `--resume` / `--add` で開くセッションを、claude を起こさず眠ったまま
+/// 開くか。保留として保存されていて、最初の一言 (続きの指示) が無く、
+/// メモリを空ける機能が有効なとき。
+fn opens_dormant(held: bool, has_prompt: bool, sleep_enabled: bool) -> bool {
+    held && !has_prompt && sleep_enabled
 }
 
 fn start_for(resumable: bool) -> SessionStart {
@@ -1539,6 +1723,68 @@ mod tests {
             (Some(s(602)), false),
             "また緑になったら数え直す"
         );
+    }
+
+    /// 落とすのは「止めてよい画面」で、入力を送った直後でない claude のペインだけ。
+    #[test]
+    fn sleep_check_stops_only_when_it_is_known_to_be_safe() {
+        let long_ago = Some(Duration::from_secs(60));
+        assert_eq!(sleep_check(true, false, Some(true), None), SleepCheck::Stop);
+        assert_eq!(
+            sleep_check(true, false, Some(true), long_ago),
+            SleepCheck::Stop
+        );
+        assert_eq!(
+            sleep_check(true, false, Some(false), long_ago),
+            SleepCheck::Keep,
+            "実行中・ダイアログ・書きかけ"
+        );
+        assert_eq!(
+            sleep_check(true, false, None, long_ago),
+            SleepCheck::Keep,
+            "画面を読めなかったら落とさない"
+        );
+        assert_eq!(
+            sleep_check(true, false, Some(true), Some(Duration::from_secs(2))),
+            SleepCheck::Keep,
+            "入力を送った直後は、画面が空の入力欄でも落とさない"
+        );
+        assert_eq!(
+            sleep_check(true, false, Some(true), Some(SLEEP_QUIET_AFTER_INPUT)),
+            SleepCheck::Stop
+        );
+        assert_eq!(
+            sleep_check(false, false, Some(true), None),
+            SleepCheck::Skip,
+            "shell のペインは落とさない (数えない)"
+        );
+        assert_eq!(
+            sleep_check(true, true, Some(true), None),
+            SleepCheck::Skip,
+            "もう眠っている"
+        );
+    }
+
+    #[test]
+    fn hold_notice_says_what_happened() {
+        assert_eq!(hold_notice(0, 0), None, "shell だけのタブ");
+        assert!(hold_notice(1, 0).unwrap().contains("メモリを空けました"));
+        assert!(hold_notice(2, 0).unwrap().contains("メモリを空けました"));
+        assert!(hold_notice(0, 1).unwrap().contains("動かしたまま"));
+        let mixed = hold_notice(1, 2).unwrap();
+        assert!(
+            mixed.contains("1 個止めました") && mixed.contains("2 個"),
+            "{mixed}"
+        );
+    }
+
+    /// 眠ったまま開くのは、保留として保存されていて、最初の一言が無いときだけ。
+    #[test]
+    fn opens_dormant_only_for_a_held_session_without_a_prompt() {
+        assert!(opens_dormant(true, false, true));
+        assert!(!opens_dormant(false, false, true), "保留でない");
+        assert!(!opens_dormant(true, true, true), "続きの指示がある");
+        assert!(!opens_dormant(true, false, false), "CCNEST_HOLD_SLEEP=off");
     }
 
     const L: TabGroup = TabGroup::Left;
@@ -1919,3 +2165,15 @@ mod tests {
 //                        active_after_hold) and saves it per session id
 //                        through tab_holds; ClosedTab keeps it and tabs opened
 //                        with --resume / --add look it up.
+// ver0.22 - 2026-11-21 - A tab put on hold frees its memory: sleep_held_tab()
+//                        kills the Claude of every pane whose screen is safe
+//                        to stop right now (status::is_safe_to_stop, read
+//                        fresh; pure sleep_check also keeps a pane that was
+//                        sent input in the last 5 s). wake_pane() / wake_tab()
+//                        respawn with --resume in the same pane id.
+//                        refresh_pane_state skips sleeping panes. A held
+//                        session opened with --resume / --add (no first
+//                        prompt) starts dormant, without a process
+//                        (opens_dormant). App::notice is a status-bar
+//                        message that expires (NOTICE_TTL).
+//                        CCNEST_HOLD_SLEEP=off turns the feature off.

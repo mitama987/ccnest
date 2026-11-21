@@ -253,6 +253,8 @@ pub fn run_event_loop<B: Backend>(term: &mut Terminal<B>, mut app: App) -> Resul
             // 緑が続いているタブを右へ小さく寄せ、🟨 に変わったタブを左へ戻す
             // (タブの位置が動くのはこの tick だけ)。
             app.refresh_tab_parking(Instant::now());
+            // 出しっぱなしのお知らせを片付ける。
+            app.expire_notice(Instant::now());
             // `ccnest --add` で外から届いた依頼を開き待ちに積む (下で 1 つ開く)。
             app.accept_remote_requests();
             // `--resume` の残りを 1 tick 1 タブずつ開く。失敗はステータス行に
@@ -879,6 +881,29 @@ fn handle_key(app: &mut App, key: KeyEvent, pane_rects: &HashMap<PaneId, Rect>) 
         app.selection = None;
     }
 
+    // 眠っているペイン (保留でメモリを空けた / 保留のまま開いた) にフォーカスが
+    // あるとき: ペインへ届くはずのキー (文字・Enter・貼り付けなど) で Claude を
+    // 起こし直す。そのキーは捨てる (起動に数秒かかり、届けても読まれない)。
+    // タブの移動 (Alt+←→) や分割などの操作キーは起こさずにそのまま働くので、
+    // 通り過ぎるだけ・最後の画面を見るだけならメモリは使わない。Ctrl+C は
+    // 起こさない (中断のキー。2 連打のシェル化もさせない)。
+    if !app.sidebar_focused {
+        let focused_id = app.current_tab().focused;
+        if app.panes.get(&focused_id).is_some_and(|p| p.asleep()) {
+            if is_ctrl_c(&key) {
+                app.last_ctrl_c = None;
+                return Ok(());
+            }
+            if is_wake_action(resolve(&key, false)) {
+                let woke = app.wake_pane(focused_id)?;
+                if input_trace_enabled() {
+                    trace_append_line(&format!("wake_pane id={focused_id} woke={woke}"));
+                }
+                return Ok(());
+            }
+        }
+    }
+
     // Ctrl+C 2 連打でフォーカス中ペインを shell(cmd.exe / $SHELL) に切り替える。
     // 1 回目は従来どおり子プロセス(claude など)へ 0x03 を pass-through する。
     if is_ctrl_c(&key) {
@@ -952,9 +977,20 @@ fn handle_key(app: &mut App, key: KeyEvent, pane_rects: &HashMap<PaneId, Rect>) 
             if let Some(held) = app.toggle_hold_tab(idx) {
                 // 前面が隣のタブへ移るので、前のタブの選択は残さない。
                 app.selection = None;
+                // 保留にしたら、止めても失う物が無いペインの Claude を落として
+                // メモリを空ける。保留を外したら、眠っているペインを起こす。
+                let (stopped, kept, woken) = if held {
+                    let (stopped, kept) = app.sleep_held_tab(idx);
+                    if let Some(text) = crate::app::hold_notice(stopped, kept) {
+                        app.set_notice(text);
+                    }
+                    (stopped, kept, 0)
+                } else {
+                    (0, 0, app.wake_tab(idx)?)
+                };
                 if input_trace_enabled() {
                     trace_append_line(&format!(
-                        "hold_tab idx={idx} held={held} active={}",
+                        "hold_tab idx={idx} held={held} active={} stopped={stopped} kept={kept} woken={woken}",
                         app.active_tab
                     ));
                 }
@@ -1960,6 +1996,13 @@ fn tab_at(tab_rects: &[(Rect, usize)], mx: i32, my: i32) -> Option<usize> {
         .iter()
         .find(|(r, _)| mx >= r.x && mx < r.x + r.w && my >= r.y && my < r.y + r.h)
         .map(|(_, idx)| *idx)
+}
+
+/// 純粋関数: 眠っているペインを起こすキーか。ペインへ届くはずの入力
+/// (文字・Enter・矢印などの素通し、貼り付け) だけ。タブの移動・分割・保留・
+/// スクロールなど ccnest 自身の操作は起こさない。
+fn is_wake_action(action: Action) -> bool {
+    matches!(action, Action::PassThrough | Action::PasteClipboard)
 }
 
 /// 純粋関数: `tab_rects` のうち、タブ `dragged` と同じ組 (`group_of(i)` が同じ) の
@@ -4870,6 +4913,28 @@ mod tests {
     }
 
     /// 並べ替えの行き先は同じ組の中だけ。タブ 1・3 が右へ小さく寄せてあるとき
+    /// 眠っているペインを起こすのは、ペインへ届くはずの入力だけ。
+    #[test]
+    fn only_input_meant_for_the_pane_wakes_it() {
+        let wake = |code, mods| is_wake_action(resolve(&KeyEvent::new(code, mods), false));
+        assert!(wake(KeyCode::Char('a'), KeyModifiers::NONE), "文字");
+        assert!(wake(KeyCode::Enter, KeyModifiers::NONE), "Enter");
+        assert!(wake(KeyCode::Up, KeyModifiers::NONE), "矢印 (入力欄の履歴)");
+        assert!(wake(KeyCode::Char('v'), KeyModifiers::CONTROL), "貼り付け");
+        assert!(!wake(KeyCode::Right, KeyModifiers::ALT), "次のタブ");
+        assert!(!wake(KeyCode::Left, KeyModifiers::ALT), "前のタブ");
+        assert!(
+            !wake(KeyCode::Char('c'), KeyModifiers::ALT),
+            "保留の切り替え"
+        );
+        assert!(
+            !wake(KeyCode::Char('t'), KeyModifiers::CONTROL),
+            "新しいタブ"
+        );
+        assert!(!wake(KeyCode::Char('w'), KeyModifiers::CONTROL), "閉じる");
+        assert!(!wake(KeyCode::PageUp, KeyModifiers::SHIFT), "スクロール");
+    }
+
     /// (タブバーの並び: 0, 2, 4 │ 1, 3)、0 を右へ引いても寄せた組へは入らない。
     #[test]
     fn drag_targets_stay_inside_the_dragged_tabs_group() {
@@ -5875,3 +5940,12 @@ mod tests {
 //                        over the group key (now Tab::group: named / parked
 //                        green / on hold). The trace logs
 //                        `hold_tab idx=N held=.. active=M`.
+// ver0.26 - 2026-11-21 - Holding a tab frees its memory: after toggle_hold_tab
+//                        the handler calls app.sleep_held_tab (notice in the
+//                        status bar) or, when the hold is released,
+//                        app.wake_tab. A key meant for the pane (pure
+//                        is_wake_action: pass-through / paste) on a sleeping
+//                        focused pane wakes it and is dropped; Ctrl+C is
+//                        ignored there. The tick expires the notice. The
+//                        trace adds stopped= kept= woken= and
+//                        `wake_pane id=N woke=..`.
