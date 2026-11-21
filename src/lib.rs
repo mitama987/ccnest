@@ -7,5 +7,6 @@ pub mod mouse;
 pub mod pane;
 pub mod remote;
 pub mod sidebar;
+pub mod tab_names;
 pub mod ui;
 pub mod wake;

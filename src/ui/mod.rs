@@ -11,7 +11,7 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Clear, Paragraph, Widget};
 use ratatui::Frame;
 
-use crate::app::{float_in_strip, folder_title, App, Rect as AppRect};
+use crate::app::{float_in_strip, folder_title, shown_tab_name, App, Rect as AppRect};
 use crate::claude::usage::{UsageLabel, UsageLevel};
 use crate::pane::grid::{Layout, SplitDir};
 use crate::pane::status::{aggregate_status, status_marker};
@@ -215,11 +215,22 @@ fn draw_tabbar(
             .filter_map(|pid| app.panes.get(pid))
             .any(|p| p.claude_running);
         let marker = has_claude.then(|| status_marker(status));
-        let task = app.panes.get(&tab.focused).and_then(|p| p.task.as_deref());
+        // 手で付けた名前 (ダブルクリック / Alt+F) があれば、タスク名より優先。
+        let task = shown_tab_name(
+            tab.user_title.as_deref(),
+            app.panes.get(&tab.focused).and_then(|p| p.task.as_deref()),
+        );
+        let renaming = active && app.renaming_tab.is_some();
         // 状態はマーカー絵文字だけで出す。タブ名の文字色は変えない
         // (ユーザー決定 2026-11-08: 色のパターンを減らす)。
-        let style = base;
-        let label = if active && app.renaming_tab.is_some() {
+        // 名前の入力を始めた直後 (まだ何も打っていない) は、今の名前が丸ごと
+        // 選ばれている = 打てば置き換わることを、選択色の帯で見せる。
+        let style = if renaming && app.rename_fresh {
+            theme.tab_rename_selected
+        } else {
+            base
+        };
+        let label = if renaming {
             format!(" {}\u{258e} ", app.renaming_tab.as_deref().unwrap_or(""))
         } else {
             format!(
@@ -1620,6 +1631,46 @@ mod tests {
         );
     }
 
+    // 手で付けた名前 (ダブルクリック / Alt+F) は Claude のタスク名より優先して
+    // 「N:名前」で出る。無ければ今までどおりタスク名、それも無ければタイトル
+    #[test]
+    fn user_title_wins_over_the_task_name() {
+        let name = shown_tab_name(Some("決済まわり"), Some("fix-payment-webhook"));
+        assert_eq!(
+            tab_label_marked(Some("🟨"), 2, "ccnest", name, TAB_LABEL_MAX),
+            "🟨 2:決済まわり"
+        );
+        // タスク名がまだ無いタブ (起動直後・shell) でも、付けた名前は出る
+        assert_eq!(
+            tab_label_marked(
+                None,
+                3,
+                "ccnest",
+                shown_tab_name(Some("メモ"), None),
+                TAB_LABEL_MAX
+            ),
+            "3:メモ"
+        );
+        assert_eq!(
+            tab_label_marked(
+                Some("🟢"),
+                1,
+                "ccnest",
+                shown_tab_name(None, Some("fix tests")),
+                TAB_LABEL_MAX
+            ),
+            "🟢 1:fix tests"
+        );
+        assert_eq!(
+            tab_label_marked(None, 1, "ccnest", shown_tab_name(None, None), TAB_LABEL_MAX),
+            "ccnest"
+        );
+        // 長い名前も 16 セルで切る
+        let long = shown_tab_name(Some("とても長いタブの名前を付けてみた"), None);
+        let l = tab_label(4, "t", long, TAB_LABEL_MAX);
+        assert!(l.ends_with('…') && width_of(&l) <= TAB_LABEL_MAX, "{l:?}");
+    }
+
     // マーカー None (shell のみのタブ) は従来ラベルそのまま
     #[test]
     fn tab_label_marked_none_is_plain() {
@@ -1834,3 +1885,8 @@ mod tests {
 //                        records the slots, not the animated positions.
 // ver0.20 - 2026-11-15 - TAB_LABEL_MAX 20 → 16 cells (user request: shorter tab
 //                        text). Fits "NN:" plus a 6-wide-char Japanese name.
+// ver0.21 - 2026-11-21 - The tab label shows Tab.user_title (a name given by
+//                        hand) ahead of the task name. While a name is being
+//                        edited and nothing has been typed yet, the tab is
+//                        drawn in theme.tab_rename_selected (the name is
+//                        selected as a whole).

@@ -11,6 +11,10 @@ pub struct Theme {
     /// オレンジの帯だと状態マーカー 🟨 が背景に溶けて見えない (実機で確認)。
     /// 浮いていることは、ほかのタブの上に重なって動くことで伝わる。
     pub tab_floating: Style,
+    /// 名前の入力を始めた直後 (今の名前が丸ごと選ばれている) のタブ。Windows の
+    /// 文字選択と同じ青帯に白文字: 前面のタブの白帯と見分けがつき、打てば
+    /// 置き換わることが伝わる。1 文字打つと前面のタブの白帯に戻る。
+    pub tab_rename_selected: Style,
     pub section_active: Style,
     pub section_inactive: Style,
     pub hint: Style,
@@ -61,6 +65,10 @@ pub fn default_theme() -> Theme {
         tab_floating: Style::default()
             .fg(Color::Black)
             .bg(Color::White)
+            .add_modifier(Modifier::BOLD),
+        tab_rename_selected: Style::default()
+            .fg(Color::White)
+            .bg(Color::Rgb(0, 120, 215))
             .add_modifier(Modifier::BOLD),
         section_active: Style::default()
             .fg(Color::Black)
@@ -122,3 +130,6 @@ pub fn default_theme() -> Theme {
 // ver0.7 - 2026-11-15 - Added tab_floating for the tab being dragged in the
 //                       tab bar: the same white band as tab_active (an orange
 //                       band hid the 🟨 status marker).
+// ver0.8 - 2026-11-21 - Added tab_rename_selected: the tab whose name is being
+//                       edited and still fully selected (nothing typed yet) is
+//                       drawn as white on a blue band, like selected text.

@@ -649,7 +649,12 @@ fn process_batch(
             // ターミナル側ペーストでも閉じてからフォーカス先へ流す
             // (開いたまま裏へ書き込まれるのを防ぐ)。
             app.context_menu = None;
-            handle_paste(app, &text);
+            // 名前の入力中は、貼り付けも名前の欄へ (裏のペインへ流さない)。
+            if app.renaming_tab.is_some() {
+                paste_into_rename(app, &text);
+            } else {
+                handle_paste(app, &text);
+            }
             i += consumed;
             continue;
         }
@@ -937,7 +942,7 @@ fn handle_key(app: &mut App, key: KeyEvent, pane_rects: &HashMap<PaneId, Rect>) 
             toggle_file_tree(app);
         }
         Action::BeginRenameTab => {
-            app.renaming_tab = Some(app.current_tab().title.clone());
+            app.begin_rename_tab();
         }
         Action::SidebarSection(idx) => {
             app.sidebar.visible = true;
@@ -1065,31 +1070,25 @@ fn toggle_file_tree(app: &mut App) {
 }
 
 fn handle_rename_key(app: &mut App, key: KeyEvent) {
+    // Ctrl+V: クリップボードの文字を名前の欄へ (ペインには流さない)。
+    if key.modifiers.contains(KeyModifiers::CONTROL)
+        && matches!(key.code, KeyCode::Char('v') | KeyCode::Char('V'))
+    {
+        let text = arboard::Clipboard::new()
+            .ok()
+            .and_then(|mut cb| cb.get_text().ok());
+        if let Some(t) = text {
+            paste_into_rename(app, &t);
+        }
+        return;
+    }
+    let mut fresh = app.rename_fresh;
     let Some(buf) = app.renaming_tab.as_mut() else {
         return;
     };
-    match key.code {
-        KeyCode::Enter => {
-            let new_title = buf.trim().to_string();
-            if !new_title.is_empty() {
-                app.current_tab_mut().title = new_title;
-            }
-            app.renaming_tab = None;
-        }
-        KeyCode::Esc => {
-            app.renaming_tab = None;
-        }
-        KeyCode::Backspace => {
-            buf.pop();
-        }
-        KeyCode::Char(c)
-            if !key.modifiers.contains(KeyModifiers::CONTROL)
-                && !key.modifiers.contains(KeyModifiers::ALT) =>
-        {
-            buf.push(c);
-        }
-        _ => {}
-    }
+    let outcome = rename_key(buf, &mut fresh, &key);
+    app.rename_fresh = fresh;
+    apply_rename_outcome(app, outcome);
 }
 
 /// コンテキストメニュー開時のキー入力 (handle_key 最上部から呼ばれるモーダル)。
@@ -1378,6 +1377,21 @@ fn handle_mouse(
         }
     }
 
+    // (0.7) 名前の入力中の左クリック: 入力中のタブの外なら確定 (Explorer と同じ。
+    // Enter と同じ決まり = 何も打っていなければ何も変えない)、入力中のタブの上
+    // なら入力を続ける。どちらもクリックは飲む: マウスモードの子へ流さず
+    // (try_forward より先)、タブの切替や選択も始めない。対の Up はローカルで消化。
+    if app.renaming_tab.is_some() && matches!(me.kind, Down(MouseButton::Left)) {
+        flush_pending_click(app);
+        if tab_at(tab_rects, mx, my) != Some(app.active_tab) {
+            let outcome =
+                rename_finish(app.renaming_tab.as_deref().unwrap_or(""), app.rename_fresh);
+            apply_rename_outcome(app, outcome);
+        }
+        app.mouse_local_drag = true;
+        return;
+    }
+
     // フォーカス先ペインの内側アプリがマウス報告を要求しているなら、
     // crossterm の MouseEvent をそのアプリ向けレポートに変換して PTY へ
     // 転送する。転送した (or アプリが掴んでいて飲み込んだ) ら以降の
@@ -1386,18 +1400,34 @@ fn handle_mouse(
         return;
     }
 
-    // タブバー: 左クリック = 切替、中クリック (ホイールクリック) = そのタブを
-    // 配下の全ペインごと閉じる (ブラウザ流・確認なし)。try_forward の後に置くのは、
-    // 非左イベント到着時の保留クリック flush を従来どおり先に済ませるため
-    // (タブバー座標はペイン外なので子へは転送されない)。リネーム中は両方無視。
-    match classify_tab_mouse(
-        &me.kind,
-        tab_at(tab_rects, mx, my),
-        app.renaming_tab.is_some(),
-    ) {
+    // タブバー: 左クリック = 切替、左ダブルクリック = 名前の入力、中クリック
+    // (ホイールクリック) = そのタブを配下の全ペインごと閉じる (ブラウザ流・確認
+    // なし)。try_forward の後に置くのは、非左イベント到着時の保留クリック flush を
+    // 従来どおり先に済ませるため (タブバー座標はペイン外なので子へは転送されない)。
+    // リネーム中はどれも無視 (左 Down は上の (0.7) が先に取る)。
+    let tab_hit = tab_at(tab_rects, mx, my);
+    let now = Instant::now();
+    let double = is_tab_double_click(app.last_tab_click, now, tab_hit);
+    match classify_tab_mouse(&me.kind, tab_hit, app.renaming_tab.is_some(), double) {
+        TabMouseAction::Rename(i) if i < app.tabs.len() => {
+            // 1 回目の押下でもう前面になっている。並べ替えは始めず (tab_drag を
+            // 立てない)、対の Up / 手ぶれの Drag はローカルで消化する。
+            app.active_tab = i;
+            app.selection = None;
+            app.tab_drag = None;
+            app.last_tab_click = None;
+            app.begin_rename_tab();
+            app.mouse_local_drag = true;
+            if input_trace_enabled() {
+                trace_append_line(&format!("begin_rename_tab idx={i}"));
+            }
+            return;
+        }
         TabMouseAction::Switch(i) if i < app.tabs.len() => {
             app.active_tab = i;
             app.selection = None;
+            // 500ms 以内に同じタブをもう一度押したら名前の入力 (上の Rename)。
+            app.last_tab_click = Some((now, i));
             // このまま左右に引けば並べ替え (上の (0.3))。離せばただの切替。
             let tab_x = tab_rects
                 .iter()
@@ -1424,7 +1454,7 @@ fn handle_mouse(
             tab_rects.clear();
             return;
         }
-        TabMouseAction::Switch(_) | TabMouseAction::Ignore => {}
+        TabMouseAction::Switch(_) | TabMouseAction::Rename(_) | TabMouseAction::Ignore => {}
     }
 
     match me.kind {
@@ -2066,6 +2096,8 @@ enum TabMouseAction {
     Switch(usize),
     /// タブ i を配下ペインごと閉じる (中クリック)。
     Close(usize),
+    /// タブ i の名前の入力を始める (左ダブルクリック)。
+    Rename(usize),
     /// タブバー処理としては何もしない (タブ外 / リネーム中 / Up・Drag・右・ホイール)。
     Ignore,
 }
@@ -2074,10 +2106,12 @@ enum TabMouseAction {
 /// タブなので、切替も閉じるも無視する (別タブにリネームが乗るのを防ぐ)。
 /// 中ボタンは Down で確定し、対の Up(Middle) は追跡しない (`classify_menu_mouse`
 /// と同じ方針。mouse_local_drag を中ボタンから立てない)。
+/// `double` = この左 Down が同じタブへの 2 回目 ([`is_tab_double_click`])。
 fn classify_tab_mouse(
     kind: &crossterm::event::MouseEventKind,
     hit: Option<usize>,
     renaming: bool,
+    double: bool,
 ) -> TabMouseAction {
     use crossterm::event::{MouseButton, MouseEventKind::*};
     let Some(i) = hit else {
@@ -2087,10 +2121,124 @@ fn classify_tab_mouse(
         return TabMouseAction::Ignore;
     }
     match kind {
+        Down(MouseButton::Left) if double => TabMouseAction::Rename(i),
         Down(MouseButton::Left) => TabMouseAction::Switch(i),
         Down(MouseButton::Middle) => TabMouseAction::Close(i),
         _ => TabMouseAction::Ignore,
     }
+}
+
+/// ダブルクリックとみなす 2 回の押下の間隔 (ペインの行ダブルクリックと同じ)。
+const DOUBLE_CLICK: Duration = Duration::from_millis(500);
+
+/// 純粋判定: タブ `hit` への左 Down が、直前のタブクリック `last` (時刻, タブ番号)
+/// と合わせてダブルクリックになるか。同じタブを [`DOUBLE_CLICK`] 以内に押した
+/// ときだけ真。`last` はタブの並びが変わると捨てられる (`App::last_tab_click`) ので、
+/// 並べ替えや閉じたあとの「同じ番号の別のタブ」には当たらない。
+fn is_tab_double_click(last: Option<(Instant, usize)>, now: Instant, hit: Option<usize>) -> bool {
+    matches!(
+        (last, hit),
+        (Some((t, i)), Some(h)) if i == h && now.saturating_duration_since(t) <= DOUBLE_CLICK
+    )
+}
+
+/// 名前の入力 1 手の結果。
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum RenameOutcome {
+    /// まだ入力中。
+    Editing,
+    /// 確定: `Some(名前)` = その名前を付ける、`None` = 手で付けた名前を外す
+    /// (自動の名前に戻す)。
+    Commit(Option<String>),
+    /// 何も変えずにやめる (Esc / 何も打たずに Enter)。
+    Cancel,
+}
+
+/// 純粋関数: 入力を確定したときの結果 (Enter と、入力中のタブの外のクリックで共用)。
+/// 何も打っていない (`fresh`) なら何も変えない: 今出ている自動の名前を、手で
+/// 付けた名前として固めないため。空にして確定 = 手で付けた名前を外す。
+fn rename_finish(buf: &str, fresh: bool) -> RenameOutcome {
+    if fresh {
+        return RenameOutcome::Cancel;
+    }
+    let name = buf.trim();
+    if name.is_empty() {
+        RenameOutcome::Commit(None)
+    } else {
+        RenameOutcome::Commit(Some(name.to_string()))
+    }
+}
+
+/// 純粋関数: 名前の入力中のキー 1 つ。Explorer の名前変更と同じで、入力を
+/// 始めた直後 (`fresh`) は今の名前が丸ごと選ばれている扱い: 最初の 1 文字は
+/// 丸ごと置き換え、Backspace は全部消す。
+fn rename_key(buf: &mut String, fresh: &mut bool, key: &KeyEvent) -> RenameOutcome {
+    match key.code {
+        KeyCode::Enter => return rename_finish(buf, *fresh),
+        KeyCode::Esc => return RenameOutcome::Cancel,
+        KeyCode::Backspace => {
+            if *fresh {
+                buf.clear();
+                *fresh = false;
+            } else {
+                buf.pop();
+            }
+        }
+        KeyCode::Char(c)
+            if !key.modifiers.contains(KeyModifiers::CONTROL)
+                && !key.modifiers.contains(KeyModifiers::ALT) =>
+        {
+            if *fresh {
+                buf.clear();
+                *fresh = false;
+            }
+            buf.push(c);
+        }
+        _ => {}
+    }
+    RenameOutcome::Editing
+}
+
+/// 純粋関数: 名前の入力中の貼り付け。最初の空でない行だけを入れ、制御文字は
+/// 落とす (タブ名は 1 行)。入れる文字が無ければ何もしない (`fresh` もそのまま)。
+fn rename_paste(buf: &mut String, fresh: &mut bool, text: &str) {
+    let line: String = text
+        .lines()
+        .map(|l| l.chars().filter(|c| !c.is_control()).collect::<String>())
+        .find(|l| !l.trim().is_empty())
+        .unwrap_or_default();
+    if line.is_empty() {
+        return;
+    }
+    if *fresh {
+        buf.clear();
+        *fresh = false;
+    }
+    buf.push_str(&line);
+}
+
+/// 名前の入力の結果を反映する (確定なら前面のタブに付けて保存)。
+fn apply_rename_outcome(app: &mut App, outcome: RenameOutcome) {
+    match outcome {
+        RenameOutcome::Editing => return,
+        RenameOutcome::Commit(name) => {
+            if input_trace_enabled() {
+                trace_append_line(&format!("rename_tab idx={} name={name:?}", app.active_tab));
+            }
+            app.set_tab_user_title(app.active_tab, name);
+        }
+        RenameOutcome::Cancel => {}
+    }
+    app.end_rename_tab();
+}
+
+/// 名前の入力中の貼り付け (端末側の貼り付け・Ctrl+V) を入力欄へ入れる。
+fn paste_into_rename(app: &mut App, text: &str) {
+    let mut fresh = app.rename_fresh;
+    if let Some(buf) = app.renaming_tab.as_mut() {
+        rename_paste(buf, &mut fresh, text);
+    }
+    app.rename_fresh = fresh;
 }
 
 /// クリック位置 (col,row) に重なる URL を vt100 セル列から検出して返す。
@@ -4789,54 +4937,225 @@ mod tests {
         assert_eq!(tab_drop_target(&[], 0, 3), None);
     }
 
-    /// タブバー分類: Down(Left)→Switch、Down(Middle)→Close、リネーム中は両方 Ignore、
-    /// タブ外は Ignore、Up/Drag/右/ホイールは Ignore。
+    /// タブバー分類: Down(Left)→Switch、2 回目の Down(Left)→Rename、Down(Middle)→Close、
+    /// リネーム中はどれも Ignore、タブ外は Ignore、Up/Drag/右/ホイールは Ignore。
     #[test]
     fn classify_tab_mouse_table() {
         use crossterm::event::{MouseButton, MouseEventKind::*};
         assert_eq!(
-            classify_tab_mouse(&Down(MouseButton::Left), Some(1), false),
+            classify_tab_mouse(&Down(MouseButton::Left), Some(1), false, false),
             TabMouseAction::Switch(1)
         );
         assert_eq!(
-            classify_tab_mouse(&Down(MouseButton::Middle), Some(1), false),
+            classify_tab_mouse(&Down(MouseButton::Left), Some(1), false, true),
+            TabMouseAction::Rename(1),
+            "同じタブへの 2 回目の左 Down は名前の入力"
+        );
+        assert_eq!(
+            classify_tab_mouse(&Down(MouseButton::Middle), Some(1), false, false),
             TabMouseAction::Close(1)
         );
         assert_eq!(
-            classify_tab_mouse(&Down(MouseButton::Left), Some(1), true),
+            classify_tab_mouse(&Down(MouseButton::Middle), Some(1), false, true),
+            TabMouseAction::Close(1),
+            "ダブルクリックは左ボタンだけ"
+        );
+        assert_eq!(
+            classify_tab_mouse(&Down(MouseButton::Left), Some(1), true, false),
             TabMouseAction::Ignore,
             "リネーム中は切替しない"
         );
         assert_eq!(
-            classify_tab_mouse(&Down(MouseButton::Middle), Some(1), true),
+            classify_tab_mouse(&Down(MouseButton::Left), Some(1), true, true),
+            TabMouseAction::Ignore,
+            "リネーム中は入力を始め直さない"
+        );
+        assert_eq!(
+            classify_tab_mouse(&Down(MouseButton::Middle), Some(1), true, false),
             TabMouseAction::Ignore,
             "リネーム中は閉じない"
         );
         assert_eq!(
-            classify_tab_mouse(&Down(MouseButton::Left), None, false),
+            classify_tab_mouse(&Down(MouseButton::Left), None, false, false),
             TabMouseAction::Ignore
         );
         assert_eq!(
-            classify_tab_mouse(&Down(MouseButton::Middle), None, false),
+            classify_tab_mouse(&Down(MouseButton::Left), None, false, true),
             TabMouseAction::Ignore
         );
         assert_eq!(
-            classify_tab_mouse(&Up(MouseButton::Middle), Some(0), false),
+            classify_tab_mouse(&Down(MouseButton::Middle), None, false, false),
+            TabMouseAction::Ignore
+        );
+        assert_eq!(
+            classify_tab_mouse(&Up(MouseButton::Middle), Some(0), false, false),
             TabMouseAction::Ignore,
             "対の Up は追跡しない"
         );
         assert_eq!(
-            classify_tab_mouse(&Drag(MouseButton::Middle), Some(0), false),
+            classify_tab_mouse(&Up(MouseButton::Left), Some(0), false, true),
+            TabMouseAction::Ignore,
+            "名前の入力は Down で始める"
+        );
+        assert_eq!(
+            classify_tab_mouse(&Drag(MouseButton::Middle), Some(0), false, false),
             TabMouseAction::Ignore
         );
         assert_eq!(
-            classify_tab_mouse(&Down(MouseButton::Right), Some(0), false),
+            classify_tab_mouse(&Down(MouseButton::Right), Some(0), false, false),
             TabMouseAction::Ignore
         );
         assert_eq!(
-            classify_tab_mouse(&ScrollUp, Some(0), false),
+            classify_tab_mouse(&ScrollUp, Some(0), false, false),
             TabMouseAction::Ignore
         );
+    }
+
+    /// ダブルクリック = 同じタブを 500ms 以内にもう一度押す。
+    #[test]
+    fn is_tab_double_click_needs_same_tab_within_500ms() {
+        let t0 = Instant::now();
+        let ms = |n: u64| t0 + Duration::from_millis(n);
+        assert!(is_tab_double_click(Some((t0, 2)), ms(120), Some(2)));
+        assert!(
+            is_tab_double_click(Some((t0, 2)), ms(500), Some(2)),
+            "ちょうど 500ms は含む"
+        );
+        assert!(
+            !is_tab_double_click(Some((t0, 2)), ms(501), Some(2)),
+            "時間切れ"
+        );
+        assert!(
+            !is_tab_double_click(Some((t0, 2)), ms(120), Some(1)),
+            "別のタブ"
+        );
+        assert!(
+            !is_tab_double_click(Some((t0, 2)), ms(120), None),
+            "タブの外"
+        );
+        // 並べ替え・閉じる・開き直しは last を捨てる (App::move_tab / remove_tab)。
+        assert!(
+            !is_tab_double_click(None, ms(120), Some(2)),
+            "1 回目が無い (並びが変わって捨てられた)"
+        );
+    }
+
+    fn rename_press(code: KeyCode) -> KeyEvent {
+        KeyEvent::new(code, KeyModifiers::NONE)
+    }
+
+    /// 入力を始めた直後は今の名前が丸ごと選ばれている: 最初の 1 文字で置き換わる。
+    #[test]
+    fn rename_first_char_replaces_the_whole_name() {
+        let mut buf = "続きから再開".to_string();
+        let mut fresh = true;
+        assert_eq!(
+            rename_key(&mut buf, &mut fresh, &rename_press(KeyCode::Char('A'))),
+            RenameOutcome::Editing
+        );
+        assert_eq!(buf, "A");
+        assert!(!fresh);
+        rename_key(&mut buf, &mut fresh, &rename_press(KeyCode::Char('b')));
+        assert_eq!(buf, "Ab", "2 文字目からは足す");
+        assert_eq!(
+            rename_key(&mut buf, &mut fresh, &rename_press(KeyCode::Enter)),
+            RenameOutcome::Commit(Some("Ab".to_string()))
+        );
+    }
+
+    /// 最初の Backspace は全部消す。そのあとは 1 文字ずつ。
+    #[test]
+    fn rename_backspace_clears_all_when_fresh_then_pops() {
+        let mut buf = "ccnest".to_string();
+        let mut fresh = true;
+        rename_key(&mut buf, &mut fresh, &rename_press(KeyCode::Backspace));
+        assert_eq!(buf, "");
+        assert!(!fresh);
+        for c in "abc".chars() {
+            rename_key(&mut buf, &mut fresh, &rename_press(KeyCode::Char(c)));
+        }
+        rename_key(&mut buf, &mut fresh, &rename_press(KeyCode::Backspace));
+        assert_eq!(buf, "ab");
+    }
+
+    /// 何も打たずに Enter → 何も変えない (自動の名前を手で付けた名前にしない)。
+    #[test]
+    fn rename_enter_without_typing_changes_nothing() {
+        let mut buf = "自動の名前".to_string();
+        let mut fresh = true;
+        assert_eq!(
+            rename_key(&mut buf, &mut fresh, &rename_press(KeyCode::Enter)),
+            RenameOutcome::Cancel
+        );
+        assert_eq!(rename_finish("自動の名前", true), RenameOutcome::Cancel);
+    }
+
+    /// 空にして Enter → 手で付けた名前を外す。空白だけも同じ。前後の空白は落とす。
+    #[test]
+    fn rename_empty_commit_clears_the_name_and_trims() {
+        let mut buf = "手で付けた名前".to_string();
+        let mut fresh = true;
+        rename_key(&mut buf, &mut fresh, &rename_press(KeyCode::Backspace));
+        assert_eq!(
+            rename_key(&mut buf, &mut fresh, &rename_press(KeyCode::Enter)),
+            RenameOutcome::Commit(None)
+        );
+        assert_eq!(rename_finish("   ", false), RenameOutcome::Commit(None));
+        assert_eq!(
+            rename_finish("  Affilia P1 ", false),
+            RenameOutcome::Commit(Some("Affilia P1".to_string()))
+        );
+    }
+
+    /// Esc は取り消し。Ctrl / Alt 付きの文字と矢印などは入力に入れない。
+    #[test]
+    fn rename_esc_cancels_and_modified_chars_are_ignored() {
+        let mut buf = "x".to_string();
+        let mut fresh = false;
+        assert_eq!(
+            rename_key(&mut buf, &mut fresh, &rename_press(KeyCode::Esc)),
+            RenameOutcome::Cancel
+        );
+        let ctrl_a = KeyEvent::new(KeyCode::Char('a'), KeyModifiers::CONTROL);
+        let alt_f = KeyEvent::new(KeyCode::Char('f'), KeyModifiers::ALT);
+        let mut fresh = true;
+        assert_eq!(
+            rename_key(&mut buf, &mut fresh, &ctrl_a),
+            RenameOutcome::Editing
+        );
+        rename_key(&mut buf, &mut fresh, &alt_f);
+        rename_key(&mut buf, &mut fresh, &rename_press(KeyCode::Left));
+        assert_eq!(buf, "x");
+        assert!(fresh, "入力に入らないキーでは選ばれた状態のまま");
+        // Shift 付き (大文字・記号) は入る。
+        let shift_a = KeyEvent::new(KeyCode::Char('A'), KeyModifiers::SHIFT);
+        rename_key(&mut buf, &mut fresh, &shift_a);
+        assert_eq!(buf, "A");
+    }
+
+    /// 貼り付けは最初の空でない 1 行だけ・制御文字は落とす・選ばれた状態なら置き換え。
+    #[test]
+    fn rename_paste_takes_first_line_and_replaces_when_fresh() {
+        let mut buf = "old".to_string();
+        let mut fresh = true;
+        rename_paste(&mut buf, &mut fresh, "\r\n決済まわり\r\n2 行目\n");
+        assert_eq!(buf, "決済まわり");
+        assert!(!fresh);
+        rename_paste(&mut buf, &mut fresh, "\tの\u{1b}続き");
+        assert_eq!(
+            buf, "決済まわりの続き",
+            "2 回目からは足す・タブと ESC は落とす"
+        );
+    }
+
+    /// 入れる文字の無い貼り付け (改行だけ) は何もしない。
+    #[test]
+    fn rename_paste_of_blank_text_keeps_the_selection() {
+        let mut buf = "old".to_string();
+        let mut fresh = true;
+        rename_paste(&mut buf, &mut fresh, "\r\n  \n");
+        assert_eq!(buf, "old");
+        assert!(fresh);
     }
 
     /// normalize_range は行優先・同一行では col 昇順に並べ替える (i64 版)。
@@ -5461,3 +5780,15 @@ mod tests {
 //                        is dropped when the wheel is forwarded to an
 //                        alternate-screen child. fmt_event shows mouse
 //                        modifiers; the trace logs "extend_selection ...".
+// ver0.23 - 2026-11-21 - Double-click a tab to rename it: a second Down(Left) on
+//                        the same tab within 500 ms (is_tab_double_click,
+//                        App::last_tab_click) is TabMouseAction::Rename and
+//                        opens the name input. The input is Explorer-style
+//                        (pure rename_key / rename_finish / rename_paste ->
+//                        RenameOutcome): the name starts selected, the first
+//                        key replaces it, Enter without typing changes
+//                        nothing, an empty name removes the hand-made name.
+//                        A left click outside the edited tab commits and is
+//                        swallowed (taken before try_forward_mouse). Paste
+//                        and Ctrl+V go into the name while renaming. The
+//                        trace logs begin_rename_tab / rename_tab.

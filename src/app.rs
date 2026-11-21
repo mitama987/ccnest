@@ -18,6 +18,10 @@ use crate::wake::{WakeRx, WakeTx};
 
 pub struct Tab {
     pub title: String,
+    /// 手で付けた名前 (タブをダブルクリック / Alt+F)。あれば Claude のタスク名
+    /// (`/rename`・日本語名・端末タイトル・最後の発話) より優先して `N:名前` で出す。
+    /// `tab_names` にセッション id ごとに保存する。
+    pub user_title: Option<String>,
     pub layout: Layout,
     pub focused: PaneId,
     /// タブバーでの「すべり」の途中 (ドラッグで押しのけられた／離されて収まる)。
@@ -79,6 +83,8 @@ pub fn tab_anim_enabled() -> bool {
 /// 閉じたタブの控え (Ctrl+Shift+T で開き直す用)。
 pub struct ClosedTab {
     pub title: String,
+    /// 手で付けた名前 (開き直したタブに戻す)。
+    pub user_title: Option<String>,
     /// 閉じる前のタブの位置。
     pub index: usize,
     /// 閉じる前のペイン ID のままの分割の形。
@@ -109,6 +115,14 @@ pub struct App {
     pub quit: bool,
     pub status: Option<String>,
     pub renaming_tab: Option<String>,
+    /// 名前の入力を始めてから、まだ何も打っていない (今の名前が丸ごと選ばれて
+    /// いる状態。Explorer の名前変更と同じ)。最初の 1 文字・貼り付けは丸ごと
+    /// 置き換え、Backspace は全部消す。そのまま Enter なら何も変えない。
+    pub rename_fresh: bool,
+    /// 直近にタブを左クリックした (時刻, タブ番号)。500ms 以内に同じタブを
+    /// もう一度押したらダブルクリック = 名前の入力を始める。タブの並びが
+    /// 変わったら (並べ替え・閉じる・開き直し) 捨てる。
+    pub last_tab_click: Option<(Instant, usize)>,
     /// 直近の Ctrl+C の (ペイン, 押下時刻)。同ペインで閾値内に再度 Ctrl+C が
     /// 来たら claude→shell の再起動をトリガする。
     pub last_ctrl_c: Option<(PaneId, Instant)>,
@@ -287,6 +301,19 @@ pub enum MenuAction {
     Paste,
 }
 
+/// タブに出す名前 (番号・マーカー抜き): 手で付けた名前があればそれ、無ければ
+/// フォーカスペインのタスク名。どちらも無ければ None (呼び出し側がタブの
+/// タイトルを出す)。描画 (`ui::draw_tabbar`) と名前の入力の初期値で共用。
+pub fn shown_tab_name<'a>(user_title: Option<&'a str>, task: Option<&'a str>) -> Option<&'a str> {
+    user_title.or(task)
+}
+
+/// セッション `id` に手で付けて保存してある名前 (`tab_names`)。
+fn saved_tab_name(session_id: &Uuid) -> Option<String> {
+    let path = crate::tab_names::store_path()?;
+    crate::tab_names::lookup(&path, &session_id.to_string())
+}
+
 /// Derive a tab title from the pane cwd (final path component).
 pub fn folder_title(cwd: &Path) -> String {
     cwd.file_name()
@@ -317,6 +344,7 @@ impl App {
 
         let tab = Tab {
             title: title.unwrap_or_else(|| folder_title(&cwd)),
+            user_title: saved_tab_name(&session_id),
             layout: Layout::Leaf(first_id),
             focused: first_id,
             slide: None,
@@ -333,6 +361,8 @@ impl App {
             quit: false,
             status: None,
             renaming_tab: None,
+            rename_fresh: false,
+            last_tab_click: None,
             last_ctrl_c: None,
             selection: None,
             last_left_click: None,
@@ -380,6 +410,7 @@ impl App {
         self.panes.insert(new_id, pane);
         self.tabs.push(Tab {
             title: spec.title.unwrap_or_else(|| folder_title(&cwd)),
+            user_title: saved_tab_name(&spec.session_id),
             layout: Layout::Leaf(new_id),
             focused: new_id,
             slide: None,
@@ -625,6 +656,7 @@ impl App {
         self.panes.insert(new_id, pane);
         self.tabs.push(Tab {
             title: folder_title(&cwd),
+            user_title: None,
             layout: Layout::Leaf(new_id),
             focused: new_id,
             slide: None,
@@ -696,6 +728,7 @@ impl App {
             .collect();
         ClosedTab {
             title: tab.title.clone(),
+            user_title: tab.user_title.clone(),
             index: idx,
             layout: tab.layout.clone(),
             focused: tab.focused,
@@ -750,6 +783,7 @@ impl App {
             at,
             Tab {
                 title: closed.title,
+                user_title: closed.user_title,
                 layout,
                 focused,
                 slide: None,
@@ -758,6 +792,7 @@ impl App {
         self.active_tab = at;
         // 位置がずれるので、引いている最中の並べ替えは打ち切る。
         self.tab_drag = None;
+        self.last_tab_click = None;
         Ok(true)
     }
 
@@ -767,6 +802,11 @@ impl App {
         self.tabs.remove(idx);
         // 位置がずれるので、引いている最中の並べ替えは打ち切る。
         self.tab_drag = None;
+        // 名前の入力は前面のタブに確定する。タブが減ると前面がずれて別のタブに
+        // 名前が付きかねないので、入力は取り消す。ダブルクリックの 1 回目も捨てる。
+        self.renaming_tab = None;
+        self.rename_fresh = false;
+        self.last_tab_click = None;
         match active_after_close(self.active_tab, idx, self.tabs.len()) {
             Some(active) => self.active_tab = active,
             None => self.quit = true,
@@ -781,7 +821,58 @@ impl App {
             return false;
         }
         self.active_tab = active_after_move(self.active_tab, from, to);
+        // 番号がずれるので、ダブルクリックの 1 回目は捨てる。
+        self.last_tab_click = None;
         true
+    }
+
+    /// タブ `idx` に今出ている名前 (番号・マーカー抜き)。名前の入力の初期値。
+    /// 手で付けた名前 > フォーカスペインのタスク名 > タブのタイトル (フォルダ名)。
+    pub fn tab_display_name(&self, idx: usize) -> String {
+        let Some(tab) = self.tabs.get(idx) else {
+            return String::new();
+        };
+        let task = self.panes.get(&tab.focused).and_then(|p| p.task.as_deref());
+        shown_tab_name(tab.user_title.as_deref(), task)
+            .unwrap_or(&tab.title)
+            .to_string()
+    }
+
+    /// 前面のタブの名前の入力を始める (Alt+F / タブのダブルクリック)。
+    /// 今出ている名前が丸ごと選ばれた状態 (`rename_fresh`) で始まる。
+    pub fn begin_rename_tab(&mut self) {
+        self.renaming_tab = Some(self.tab_display_name(self.active_tab));
+        self.rename_fresh = true;
+    }
+
+    /// 名前の入力をやめる (確定・取り消しのどちらでも呼ぶ)。
+    pub fn end_rename_tab(&mut self) {
+        self.renaming_tab = None;
+        self.rename_fresh = false;
+    }
+
+    /// タブ `idx` に手で名前を付ける (`None` = 外して自動の名前に戻す)。
+    /// そのタブの全ペインのセッション id に保存する (どのペインにフォーカスが
+    /// あっても、どのペインのセッションを後で開き直しても同じ名前になるように)。
+    pub fn set_tab_user_title(&mut self, idx: usize, name: Option<String>) {
+        let Some(tab) = self.tabs.get_mut(idx) else {
+            return;
+        };
+        tab.user_title = name.clone();
+        let ids: Vec<String> = tab
+            .layout
+            .leaves()
+            .into_iter()
+            .filter_map(|pid| self.panes.get(&pid))
+            .map(|p| p.session_id.to_string())
+            .collect();
+        let Some(path) = crate::tab_names::store_path() else {
+            return;
+        };
+        match name {
+            Some(n) => crate::tab_names::set(&path, &ids, &n, chrono::Utc::now().timestamp()),
+            None => crate::tab_names::remove(&path, &ids),
+        }
     }
 
     /// すべりの途中のタブがあるか (あるあいだだけイベントループが描き続ける)。
@@ -1054,6 +1145,7 @@ mod tests {
     fn closed(title: &str) -> ClosedTab {
         ClosedTab {
             title: title.to_string(),
+            user_title: None,
             index: 0,
             layout: Layout::Leaf(1),
             focused: 1,
@@ -1387,3 +1479,12 @@ mod tests {
 //                        pane's alt-screen flag, reset generation and size at
 //                        that moment. It is the start point when Alt / Shift +
 //                        click extends a selection and nothing is selected.
+// ver0.18 - 2026-11-21 - Tab.user_title: a name given by hand (double-click a
+//                        tab / Alt+F). It is shown ahead of the Claude task
+//                        name (shown_tab_name), kept in ClosedTab, saved per
+//                        session id through tab_names (set_tab_user_title)
+//                        and looked up when a tab is opened with --resume /
+//                        --add. rename_fresh / last_tab_click hold the input
+//                        and double-click state; move_tab / remove_tab /
+//                        reopen_closed_tab drop last_tab_click and remove_tab
+//                        cancels a rename in progress.
