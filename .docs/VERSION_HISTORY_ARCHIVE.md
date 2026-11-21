@@ -5,6 +5,68 @@
 
 ---
 
+## 2026-11-21 — 緑のタブは右へ小さく寄せ、オレンジを左に固める（v0.1.47）
+
+ブランチ: `feature/tab-park-working`
+
+※ 版番号: 作業中に別のセッションが v0.1.46（`--resume-prompt-file`）を main へ入れたので、こちらは v0.1.47 に振り直した。衝突は文書と末尾の履歴だけで、コードは自動で合わさった（合わせたあとに全テストと E2E を回し直した）。
+
+### 背景
+
+ゆうさん「緑アイコンのタブは、グルーピングしてまとめられないかな？基本オレンジアイコンのタブしか私みないので」。壁打ちで 3 案（細くする／1 つにまとめる／オレンジを左に寄せる）を出し、ゆうさんの答えは「B（1 つにまとめる）でいってみよう」→ 続けて「オレンジは左に固めたかった」「小さくなれば十分」。
+
+読み取り: 欲しいのは「オレンジが左にまとまっていること」で、緑は消えなくてよく小さくなれば足りる。そこで「1 つのチップにまとめて開閉する」のではなく、**緑を 1 枚ずつ小さく（🟢番号）して右へ寄せる**形にした。まとめるチップが無いので開閉の操作が要らず、緑のタブも 1 クリックで行ける。
+
+### 動き
+
+- 緑（実行中／裏で実行中）が 4 秒続いたタブは、タブバーの右側へ移り `🟢3` のように「マーカー + 番号」だけになる
+- 対応が必要（🟨）のタブと、claude の無いタブは左に名前つきで残る。左右の境に仕切り `│`
+- どちらの組の中でも元の並び順のまま。🟨 に戻ったタブは、待たずに、名前つきの組の元いた位置へ戻る
+- 前面のタブは、寄せてあっても名前つきで出す（小さいタブをクリックすると、その場で名前つきに広がる）
+- 次／前のタブ（`Alt+←→`・`Ctrl+Tab`）は、タブバーに見えている並びの順
+- ドラッグの並べ替えは同じ組の中だけ（組は状態で決まるので、引いても越えられない）
+- タブの番号は本当の並び順のまま（画面の上では連番にならない）
+- `CCNEST_TAB_GROUP=off` で今までどおり
+
+### 位置が勝手に動かない工夫
+
+壁打ちで挙げた弱点（タブの位置が勝手にずれる → 押し間違い）への対策。
+
+- 組が変わるのは 2 秒 tick（`App::refresh_tab_parking`）だけ。クリックした瞬間には何も動かない
+- タブを引いている最中・名前の入力中・タブをクリックしてから 600 ms（ダブルクリックの途中かもしれない）は組を変えず、次の tick へ回す
+- 前面にしたタブを左へ動かさない: 組は状態だけで決め、前面かどうかは「名前を出すか」にだけ効く。小さいタブをダブルクリックしても 2 回目が同じタブに当たる（マーカーの桁は変わらない）
+- 緑になってすぐは寄せない（4 秒の猶予）。すぐ終わるターンでタブが右へ行って戻るのを避ける
+
+### 実装
+
+- `src/app.rs`
+  - `Tab.parked`／`Tab.working_since`、`PARK_AFTER`（4 秒）、`tab_group_enabled()`（`CCNEST_TAB_GROUP`）
+  - 純粋関数 `park_step(prev, working, now)`・`display_order(parked)`・`neighbor_in_order(order, active, dir)`
+  - `App::tab_status`（マーカーと寄せる判定で共用）・`tab_order`・`refresh_tab_parking`・`cancel_slides_outside_group`
+  - `next_tab`／`prev_tab` は `tab_order` の上で動く
+- `src/event.rs`: 2 秒 tick で `refresh_pane_state` の直後に `refresh_tab_parking`。ドラッグは `same_group_rects` で同じ組の矩形だけを `tab_drop_target` に渡す（組の中はタブバーの並び = タブ番号の順なので、判定は今までどおり）
+- `src/ui/mod.rs`: `draw_tabbar` は `tab_order` の順に描く。寄せたタブは `tab_label_small`、境に `TAB_GROUP_DIVIDER`。浮かせるタブはタブ番号から items の位置へ直す
+
+### 確認
+
+- `cargo test`: 473 件（先に main に入った v0.1.46 の分を合わせた数。新規 5 件: `park_step_parks_after_the_grace_and_unparks_at_once`・`display_order_keeps_each_group_in_tab_order`・`neighbor_in_order_follows_the_tab_bar`・`tab_label_small_is_marker_and_number_only`・`drag_targets_stay_inside_the_dragged_tabs_group`）。`cargo fmt --all --check`・`cargo clippy --all-targets -- -D warnings` 警告なし
+- E2E `scripts/e2e/park-working-tabs.ps1`: **PASS**（21 項目）。偽 claude 5 本（alpha・delta = 対応待ち／bravo・cc・echo = 実行中。`idle<N>` のファイルを置くと実行中をやめる）
+  - 猶予のあと `alpha delta │ 🟢2 🟢3 echo(前面)` → alpha をクリック → `🟢2 🟢3 🟢5`（名前つきの組は動かない）
+  - 小さい 3 をクリック → その場で `3:cc`（マーカーの桁は同じ）／小さい 2 をダブルクリック → 名前の入力が開く
+  - cc が実行中をやめる → `alpha cc delta │ …`（元の並びの位置へ戻る）
+  - alpha を cc の上へ引く → `move_tab from=0 to=2` の 1 回（間の bravo は別の組）／寄せた組の上まで引く → 名前つきの組の右端で止まる
+  - Alt+→: 名前つきの組の右端 → 寄せた組の先頭 → … → 名前つきの組の先頭へ回る
+- 同 `-Off`: **PASS**（`CCNEST_TAB_GROUP=off` で 5 枚とも名前つき・並び順どおり・仕切りなし）
+- 同 `-Wt`: **PASS**。実物の Windows Terminal のスクショで、仕切り `│` と `🟢2` が 1 桁ずつずれずに出ることを確認
+- 既存 E2E `dblclick-rename-tab.ps1`（27 項目）・`drag-reorder-tab.ps1`（19 項目）は PASS のまま（偽 claude が対応待ちなので寄せられない）
+
+### 残る制限
+
+- 判定が一瞬だけ 🟨 に振れると、そのタブは左へ出て 4 秒後に右へ戻る。実物で起きるかは未確認（起きたら `CCNEST_STATUS_TRACE` で取る）
+- 寄せたタブに手で付けた名前・タスク名は、前面にするまで見えない
+
+---
+
 ## 2026-11-21 — 再開したセッションに最初の一言とモードを渡す（`--resume-prompt-file`／`--resume-permission-mode`・v0.1.46）
 
 ブランチ: `feature/resume-prompt-file`

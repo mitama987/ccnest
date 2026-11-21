@@ -10,7 +10,9 @@ use crate::claude::launcher::{ResumeExtras, SessionStart};
 use crate::claude::usage::{UsageCell, UsageLabel, UsageSnapshot};
 use crate::cli::ResumeSpec;
 use crate::pane::grid::{Direction, Layout};
-use crate::pane::status::{detect_status, sanitize_task, screen_text, ClaudeStatus};
+use crate::pane::status::{
+    aggregate_status, detect_status, sanitize_task, screen_text, ClaudeStatus,
+};
 use crate::pane::{Pane, PaneId};
 use crate::remote::{self, Inbox, Reply};
 use crate::sidebar::SidebarState;
@@ -22,6 +24,13 @@ pub struct Tab {
     /// (`/rename`・日本語名・端末タイトル・最後の発話) より優先して `N:名前` で出す。
     /// `tab_names` にセッション id ごとに保存する。
     pub user_title: Option<String>,
+    /// 緑 (実行中／裏で実行中) が続いているので、タブバーの右側に小さく
+    /// (`🟢番号` だけで) 寄せてある。対応が必要 (🟨) になったら左へ戻る。
+    /// 2 秒 tick の [`App::refresh_tab_parking`] だけが変える (クリックの瞬間に
+    /// タブの位置を動かさないため)。
+    pub parked: bool,
+    /// 緑が続いている起点。[`PARK_AFTER`] 続いたら `parked` にする。
+    pub working_since: Option<Instant>,
     pub layout: Layout,
     pub focused: PaneId,
     /// タブバーでの「すべり」の途中 (ドラッグで押しのけられた／離されて収まる)。
@@ -78,6 +87,57 @@ pub fn tab_anim_enabled() -> bool {
     *ENABLED.get_or_init(|| {
         !std::env::var("CCNEST_TAB_ANIM").is_ok_and(|v| v.eq_ignore_ascii_case("off") || v == "0")
     })
+}
+
+/// 緑になってから右へ寄せるまでの猶予。すぐ終わるターン (緑 → すぐ 🟨) で
+/// タブが右へ行って戻るのを避ける。🟨 に変わったときは待たずに左へ戻す。
+pub const PARK_AFTER: Duration = Duration::from_secs(4);
+
+/// タブをクリックした直後は並びを変えない時間 (ダブルクリックの 2 回目が
+/// 別のタブに当たらないように。ダブルクリックの間隔 500ms より少し長く)。
+const PARK_FREEZE_AFTER_CLICK: Duration = Duration::from_millis(600);
+
+/// `CCNEST_TAB_GROUP=off` (または `0`) で「緑のタブを右へ小さく寄せる」を止める
+/// (v0.1.45 までと同じ、並び順どおり・全部名前つき)。初回だけ評価。
+pub fn tab_group_enabled() -> bool {
+    use std::sync::OnceLock;
+    static ENABLED: OnceLock<bool> = OnceLock::new();
+    *ENABLED.get_or_init(|| {
+        !std::env::var("CCNEST_TAB_GROUP").is_ok_and(|v| v.eq_ignore_ascii_case("off") || v == "0")
+    })
+}
+
+/// 純粋関数: 1 tick ぶんの「右へ寄せるか」。`prev` = 緑が続いている起点
+/// (`Tab::working_since`)、`working` = いま緑か。戻り値は (新しい起点, 寄せるか)。
+/// 緑でなくなったら起点ごと消す (= すぐ左へ戻る)。緑が [`PARK_AFTER`] 続いたら寄せる。
+pub fn park_step(prev: Option<Instant>, working: bool, now: Instant) -> (Option<Instant>, bool) {
+    if !working {
+        return (None, false);
+    }
+    let since = prev.unwrap_or(now);
+    (
+        Some(since),
+        now.saturating_duration_since(since) >= PARK_AFTER,
+    )
+}
+
+/// 純粋関数: タブバーに並べる順 (タブ番号の列)。寄せていないタブを並び順どおり
+/// 左に、寄せたタブを並び順どおり右に。どちらの組の中でも元の順は変えない
+/// (🟨 に戻ったタブは、元いた並びの位置に戻る)。
+pub fn display_order(parked: &[bool]) -> Vec<usize> {
+    let left = (0..parked.len()).filter(|i| !parked[*i]);
+    let right = (0..parked.len()).filter(|i| parked[*i]);
+    left.chain(right).collect()
+}
+
+/// 純粋関数: `order` (タブバーの並び) の上で、`active` の隣 (`dir` = +1 右 / -1 左)。
+/// 端は反対側へ回る。`active` が `order` に無ければ動かさない。
+pub fn neighbor_in_order(order: &[usize], active: usize, dir: i32) -> usize {
+    let Some(pos) = order.iter().position(|i| *i == active) else {
+        return active;
+    };
+    let n = order.len() as i32;
+    order[(pos as i32 + dir).rem_euclid(n) as usize]
 }
 
 /// 閉じたタブの控え (Ctrl+Shift+T で開き直す用)。
@@ -353,6 +413,8 @@ impl App {
         let tab = Tab {
             title: title.unwrap_or_else(|| folder_title(&cwd)),
             user_title: saved_tab_name(&session_id),
+            parked: false,
+            working_since: None,
             layout: Layout::Leaf(first_id),
             focused: first_id,
             slide: None,
@@ -420,6 +482,8 @@ impl App {
         self.tabs.push(Tab {
             title: spec.title.unwrap_or_else(|| folder_title(&cwd)),
             user_title: saved_tab_name(&spec.session_id),
+            parked: false,
+            working_since: None,
             layout: Layout::Leaf(new_id),
             focused: new_id,
             slide: None,
@@ -666,6 +730,8 @@ impl App {
         self.tabs.push(Tab {
             title: folder_title(&cwd),
             user_title: None,
+            parked: false,
+            working_since: None,
             layout: Layout::Leaf(new_id),
             focused: new_id,
             slide: None,
@@ -793,6 +859,8 @@ impl App {
             Tab {
                 title: closed.title,
                 user_title: closed.user_title,
+                parked: false,
+                working_since: None,
                 layout,
                 focused,
                 slide: None,
@@ -920,21 +988,93 @@ impl App {
         }
     }
 
+    /// タブバーで右隣のタブへ (見えている並びの順。右端からは左端へ回る)。
     pub fn next_tab(&mut self) {
         if self.tabs.is_empty() {
             return;
         }
-        self.active_tab = (self.active_tab + 1) % self.tabs.len();
+        self.active_tab = neighbor_in_order(&self.tab_order(), self.active_tab, 1);
     }
 
+    /// タブバーで左隣のタブへ。
     pub fn prev_tab(&mut self) {
         if self.tabs.is_empty() {
             return;
         }
-        if self.active_tab == 0 {
-            self.active_tab = self.tabs.len() - 1;
-        } else {
-            self.active_tab -= 1;
+        self.active_tab = neighbor_in_order(&self.tab_order(), self.active_tab, -1);
+    }
+
+    /// タブの状態 = (claude ペインがあるか, 配下の全ペインの状態の畳み込み)。
+    /// タブバーのマーカーと「右へ寄せるか」で共用。
+    pub fn tab_status(&self, tab: &Tab) -> (bool, ClaudeStatus) {
+        let panes = || {
+            tab.layout
+                .leaves()
+                .into_iter()
+                .filter_map(|pid| self.panes.get(&pid))
+        };
+        (
+            panes().any(|p| p.claude_running),
+            aggregate_status(panes().map(|p| p.status)),
+        )
+    }
+
+    /// タブバーに並べる順 (タブ番号の列)。[`display_order`] 参照。
+    /// `CCNEST_TAB_GROUP=off` なら並び順どおり。
+    pub fn tab_order(&self) -> Vec<usize> {
+        if !tab_group_enabled() {
+            return (0..self.tabs.len()).collect();
+        }
+        let parked: Vec<bool> = self.tabs.iter().map(|t| t.parked).collect();
+        display_order(&parked)
+    }
+
+    /// 緑 (実行中／裏で実行中) が続いているタブを右へ小さく寄せ、🟨 に変わった
+    /// タブを左へ戻す。2 秒 tick から `refresh_pane_state` の直後に呼ぶ。
+    ///
+    /// 位置が動くのはこの tick だけ: クリックした瞬間には動かさない。さらに、
+    /// タブを引いている最中・名前の入力中・タブをクリックした直後 (ダブル
+    /// クリックの途中かもしれない) は並びを変えず、次の tick へ回す。
+    pub fn refresh_tab_parking(&mut self, now: Instant) {
+        if !tab_group_enabled() {
+            return;
+        }
+        let just_clicked = self
+            .last_tab_click
+            .is_some_and(|(t, _)| now.saturating_duration_since(t) <= PARK_FREEZE_AFTER_CLICK);
+        if self.tab_drag.is_some() || self.renaming_tab.is_some() || just_clicked {
+            return;
+        }
+        let working: Vec<bool> = self
+            .tabs
+            .iter()
+            .map(|t| {
+                let (has_claude, status) = self.tab_status(t);
+                has_claude && matches!(status, ClaudeStatus::Busy | ClaudeStatus::Background)
+            })
+            .collect();
+        for (tab, working) in self.tabs.iter_mut().zip(working) {
+            let (since, parked) = park_step(tab.working_since, working, now);
+            if parked != tab.parked {
+                // 組が変わる = 定位置が変わるので、途中のすべりは捨てる。
+                tab.slide = None;
+            }
+            tab.working_since = since;
+            tab.parked = parked;
+        }
+    }
+
+    /// `move_tab` の直後に呼ぶ: 引いたタブ `moved` と違う組 (寄せた／寄せていない)
+    /// のタブのすべりを取り消す。`slide_displaced` はタブ番号の範囲で動かすが、
+    /// 違う組のタブはタブバーの上では動いていない。
+    pub fn cancel_slides_outside_group(&mut self, moved: usize) {
+        let Some(group) = self.tabs.get(moved).map(|t| t.parked) else {
+            return;
+        };
+        for t in &mut self.tabs {
+            if t.parked != group {
+                t.slide = None;
+            }
         }
     }
 
@@ -1246,6 +1386,69 @@ mod tests {
     /// タブ移動後のアクティブ index: 動かしたタブがアクティブならついていく。
     /// アクティブをまたいで右へ動いたら 1 つ左へ、左へ動いたら 1 つ右へ。
     /// またがない移動では不変。
+    /// 緑が 4 秒続いたら右へ寄せる。緑でなくなったらすぐ戻す (起点も消す)。
+    #[test]
+    fn park_step_parks_after_the_grace_and_unparks_at_once() {
+        let t0 = Instant::now();
+        let s = |n: u64| t0 + Duration::from_secs(n);
+        assert_eq!(park_step(None, false, t0), (None, false));
+        assert_eq!(
+            park_step(None, true, t0),
+            (Some(t0), false),
+            "緑になった最初の tick"
+        );
+        assert_eq!(
+            park_step(Some(t0), true, s(2)),
+            (Some(t0), false),
+            "2 秒ではまだ"
+        );
+        assert_eq!(
+            park_step(Some(t0), true, s(4)),
+            (Some(t0), true),
+            "4 秒続いたら寄せる"
+        );
+        assert_eq!(park_step(Some(t0), true, s(600)), (Some(t0), true));
+        assert_eq!(
+            park_step(Some(t0), false, s(601)),
+            (None, false),
+            "🟨 に変わったら待たずに戻す"
+        );
+        assert_eq!(
+            park_step(None, true, s(602)),
+            (Some(s(602)), false),
+            "また緑になったら数え直す"
+        );
+    }
+
+    /// 寄せていないタブが左・寄せたタブが右。どちらも元の並びの順。
+    #[test]
+    fn display_order_keeps_each_group_in_tab_order() {
+        assert_eq!(
+            display_order(&[true, false, true, true, false]),
+            [1, 4, 0, 2, 3]
+        );
+        assert_eq!(display_order(&[false, false, false]), [0, 1, 2]);
+        assert_eq!(display_order(&[true, true]), [0, 1]);
+        assert!(display_order(&[]).is_empty());
+    }
+
+    /// 隣のタブ = タブバーに見えている並びの隣。端は回る。
+    #[test]
+    fn neighbor_in_order_follows_the_tab_bar() {
+        let order = [1, 4, 0, 2, 3];
+        assert_eq!(neighbor_in_order(&order, 1, 1), 4);
+        assert_eq!(neighbor_in_order(&order, 4, 1), 0, "左の組の端から右の組へ");
+        assert_eq!(neighbor_in_order(&order, 3, 1), 1, "右端から左端へ回る");
+        assert_eq!(neighbor_in_order(&order, 1, -1), 3, "左端から右端へ回る");
+        assert_eq!(neighbor_in_order(&order, 0, -1), 4);
+        assert_eq!(
+            neighbor_in_order(&order, 9, 1),
+            9,
+            "並びに無ければ動かさない"
+        );
+        assert_eq!(neighbor_in_order(&[0], 0, 1), 0);
+    }
+
     #[test]
     fn active_after_move_table() {
         assert_eq!(active_after_move(0, 0, 2), 2, "動かしたタブについていく");
@@ -1509,3 +1712,13 @@ mod tests {
 //                        prompt and permission mode to the pane (resume_extras,
 //                        Pane::spawn_with): `--resume-prompt-file` /
 //                        `--resume-permission-mode`.
+// ver0.20 - 2026-11-21 - Tab.parked / working_since: a tab that has been
+//                        working (🟢) for PARK_AFTER (4 s) is parked on the
+//                        right of the tab bar and drawn small; it returns as
+//                        soon as it needs attention. Pure park_step /
+//                        display_order / neighbor_in_order; tab_order() is
+//                        the tab-bar order (next_tab / prev_tab follow it).
+//                        refresh_tab_parking() changes groups only on the
+//                        2 s tick and never during a tab drag, a rename or
+//                        within 600 ms of a tab click. tab_status() is
+//                        shared with the tab marker. CCNEST_TAB_GROUP=off.
