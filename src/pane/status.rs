@@ -396,6 +396,56 @@ pub fn detect_status(screen_text: &str) -> ClaudeStatus {
     }
 }
 
+/// Claude Code の入力欄の先頭に出る記号 (ユーザーの発話の行頭も同じ記号)。
+const PROMPT: &str = "❯";
+
+/// 入力欄が「空で」出ているか。上枠と下枠の罫線 2 本のあいだが、プロンプト記号
+/// `❯` だけの 1 行 (後ろは空白・NBSP だけ) のときに真。
+///
+/// 偽になる画面:
+/// - 入力欄が無い (許可・質問・計画承認のダイアログは入力欄を置き換える)
+/// - 入力欄に書きかけの文字がある (1 行でも複数行でも)
+///
+/// 上枠は右端にセッション名の札が付いて `──── name ─` で終わることがあるので、
+/// 上枠の行の残りは読み飛ばす。
+pub fn at_empty_prompt(screen_text: &str) -> bool {
+    let Some((bottom, _)) = last_rule(screen_text) else {
+        return false;
+    };
+    let above = &screen_text[..bottom];
+    let Some((_, top_end)) = last_rule(above) else {
+        return false;
+    };
+    let after_top = &above[top_end..];
+    let Some(line_end) = after_top.find('\n') else {
+        return false;
+    };
+    let mut lines = after_top[line_end + 1..]
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty());
+    lines.next() == Some(PROMPT) && lines.next().is_none()
+}
+
+/// 止めても失う物が無い画面か (保留にしたタブの Claude を落としてメモリを空けて
+/// よいか)。次の全部を満たすときだけ真:
+/// - 実行中でない (スピナー行・旧 CLI の "esc to interrupt" が無い)
+/// - 裏の仕事が無い (フッターの札 `1 shell` など・`Waiting for … to finish`)。
+///   [`detect_status`] は「判断待ち」の節があれば裏の仕事があっても
+///   NeedsAttention を返すが、ここでは裏の仕事があれば必ず偽 (落とすと止まる)
+/// - 入力欄が空で出ている ([`at_empty_prompt`])。ダイアログの途中や、書きかけの
+///   入力がある画面は偽 (落とすとダイアログ・書きかけが消える)
+///
+/// 「真だと言えるときだけ落とす」向き: 本体の版が変わって画面の形が読めなく
+/// なったら偽になり、落とさない側に倒れる。
+pub fn is_safe_to_stop(screen_text: &str) -> bool {
+    !has_spinner_timer(screen_text)
+        && !BUSY_MARKERS.iter().any(|m| screen_text.contains(m))
+        && !has_background_work(screen_text)
+        && !is_waiting_for_background(screen_text)
+        && at_empty_prompt(screen_text)
+}
+
 /// タブ配下の複数ペインの状態を 1 つ (タブのマーカー) に畳む。
 /// 優先度: NeedsAttention > Busy > Background > Idle (1 ペインでも対応待ちなら 🟨)。
 pub fn aggregate_status(statuses: impl IntoIterator<Item = ClaudeStatus>) -> ClaudeStatus {
@@ -567,6 +617,101 @@ mod tests {
             ClaudeStatus::NeedsAttention
         );
         assert_eq!(detect_status(""), ClaudeStatus::NeedsAttention);
+    }
+
+    // ---- at_empty_prompt / is_safe_to_stop ----
+
+    /// 入力欄の中身 (`box_body`) を差し替えた画面。
+    fn screen_with_box(body: &str, box_body: &str, footer: &str) -> String {
+        let rule = "─".repeat(72);
+        format!("{body}\n{rule}\n{box_body}\n{rule}\n  {footer}\n")
+    }
+
+    const IDLE_FOOTER: &str = "⏸ plan mode on (shift+tab to cycle) · ← 8 agents";
+
+    // 空の入力欄: 記号だけ・後ろに空白・後ろに NBSP (どれも実物にある形)
+    #[test]
+    fn empty_prompt_is_detected_in_its_real_shapes() {
+        for prompt in ["❯", "❯ ", "❯\u{a0}"] {
+            let text = screen_with_box("● 終わったよ。", prompt, IDLE_FOOTER);
+            assert!(at_empty_prompt(&text), "{prompt:?}");
+            assert!(is_safe_to_stop(&text), "{prompt:?}");
+        }
+        // 上枠の右端にセッション名の札が付く形
+        let rule = "─".repeat(60);
+        let text =
+            format!("● 終わったよ。\n{rule} hold-tab ─\n❯ \n{rule}────────────\n  {IDLE_FOOTER}\n");
+        assert!(at_empty_prompt(&text));
+        assert!(is_safe_to_stop(&text));
+    }
+
+    // 書きかけの入力がある画面は落とさない (落とすと書きかけが消える)
+    #[test]
+    fn a_draft_in_the_input_box_is_not_safe_to_stop() {
+        let one = screen_with_box("● 終わったよ。", "❯ 途中まで書いた", IDLE_FOOTER);
+        assert!(!at_empty_prompt(&one));
+        assert!(!is_safe_to_stop(&one));
+        let two = screen_with_box("● 終わったよ。", "❯ 1 行目\n  2 行目", IDLE_FOOTER);
+        assert!(!at_empty_prompt(&two));
+        let blank_then_text = screen_with_box("● 終わったよ。", "❯\n  2 行目", IDLE_FOOTER);
+        assert!(!at_empty_prompt(&blank_then_text));
+    }
+
+    // 入力欄が無い画面 (許可・質問のダイアログ) は落とさない
+    #[test]
+    fn a_dialog_is_not_safe_to_stop() {
+        let dialog = "● Bash(rm -rf build)\n\nDo you want to proceed?\n❯ 1. Yes\n  2. No";
+        assert_eq!(detect_status(dialog), ClaudeStatus::NeedsAttention);
+        assert!(!at_empty_prompt(dialog));
+        assert!(!is_safe_to_stop(dialog));
+        // 罫線が 1 本だけ (ダイアログの上の線) でも偽
+        let rule = "─".repeat(72);
+        let one_rule = format!("● plan\n{rule}\n Ready to code?\n❯ 1. Yes\n  2. No");
+        assert!(!at_empty_prompt(&one_rule));
+        assert!(!at_empty_prompt(""));
+        assert!(!at_empty_prompt("❯ "));
+    }
+
+    // 実行中・裏の仕事があるときは、入力欄が空でも落とさない
+    #[test]
+    fn working_or_background_is_not_safe_to_stop() {
+        let busy = screen_with_box(
+            "❯ 指示\n\n✶ Boondoggling… (6s · ↓302 tokens)",
+            "❯ ",
+            "⏵⏵ bypass permissions on · esc to interrupt",
+        );
+        assert!(at_empty_prompt(&busy));
+        assert!(!is_safe_to_stop(&busy));
+        // 実物: 裏でシェルが動いている (フッターの札 `1 shell`)
+        assert!(at_empty_prompt(REAL_BACKGROUND_SCREEN));
+        assert!(!is_safe_to_stop(REAL_BACKGROUND_SCREEN));
+        // 裏のエージェント待ち
+        let waiting = screen_with_box(
+            "● started\n\n✻ Waiting for 1 background agent to finish\n",
+            "❯ ",
+            "⏵⏵ bypass permissions on · ← 8 agents",
+        );
+        assert!(!is_safe_to_stop(&waiting));
+    }
+
+    // 「判断待ち」の節があると detect_status は 🟨 (NeedsAttention) を返すが、
+    // 裏の仕事が動いているなら落とさない (落とすと裏の仕事が止まる)
+    #[test]
+    fn decision_pending_with_background_work_is_not_safe_to_stop() {
+        let text = screen_with_box(
+            "▼ ゆうさんの判断待ち\n・マーク: A か B のどれにするか\n\n✻ Churned for 5s · done 17:06 · 1 shell still running\n",
+            "❯ ",
+            "⏵⏵ bypass permissions on · 1 shell",
+        );
+        assert_eq!(detect_status(&text), ClaudeStatus::NeedsAttention);
+        assert!(!is_safe_to_stop(&text));
+        // 同じ画面で裏の仕事が終わっていれば落としてよい
+        let done = screen_with_box(
+            "▼ ゆうさんの判断待ち\n・マーク: A か B のどれにするか\n\n✻ Churned for 5s · done 17:06\n",
+            "❯ ",
+            "⏵⏵ bypass permissions on",
+        );
+        assert!(is_safe_to_stop(&done));
     }
 
     // ---- has_background_work / Background ----
@@ -1418,6 +1563,10 @@ mod tests {
 }
 
 // Version History
+// - ver1.11 (2026-11-21): at_empty_prompt / is_safe_to_stop を追加。保留 (Alt+C) にした
+//   タブの Claude を落としてメモリを空けてよい画面か = 実行中でない・裏の仕事が無い・
+//   入力欄が空で出ている (ダイアログの途中・書きかけの入力は偽)。読めない画面は偽
+//   (落とさない側に倒す)。
 // - ver1.10 (2026-11-18): 放置中のまとめ (idle compaction) のあとも、裏の workflow /
 //   エージェント待ちを Background のままにする。まとめはターンを始めずに、待ちの行の下へ
 //   子の行 (`  ⎿  Referenced file …`) とお知らせ (`● Compacted while idle, …`) を足すので、

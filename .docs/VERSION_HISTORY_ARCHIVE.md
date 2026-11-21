@@ -5,6 +5,76 @@
 
 ---
 
+## 2026-11-21 — 保留にしたタブの Claude を止めてメモリを空ける（v0.1.49）
+
+ブランチ: `feature/hold-sleep`
+
+### 背景
+
+ゆうさん「CCNEST ってタブ開いてるだけでメモリ食ってる？ 保留にしたやつはメモリ解放とかできるのかな？」。実測で claude.exe は 1 タブ 620〜849 MB（8 タブで約 6.0 GB・PC の空き 1.8 GB）。v0.1.48 の保留は見た目だけで、プロセスは動いたままだった。
+
+レイナの案「対応待ち 🟨 のタブを保留にしたときだけ落とす。動いているタブは落とさない」→ ゆうさん「これお願い」。
+
+### 動き
+
+- Alt+C で保留にした瞬間、そのタブの claude のペインを 1 つずつ見て、**止めても失う物が無いと言えるペインだけ**プロセスを木ごと終了する
+- 止めたペインは最後の画面をそのまま残す。枠のタイトルに「保留中: Claude 停止・キーを押すと続きから再開」
+- **開くだけ・Alt+←→ で通り過ぎるだけでは起こさない**（メモリを使わない）
+- 眠っているペインにキー（文字・Enter・矢印・貼り付け）を打つと、同じペインで `claude --resume <セッション id>` を起こし直す。そのキーは捨てる。保留を外したとき（Alt+C）も起こす。Ctrl+C は何もしない（シェル化もしない）
+- ステータスバーの下段に 8 秒、結果を出す:「Claude を止めてメモリを空けました」／「作業中か入力の途中なので Claude は動かしたままです」
+- `--resume`／`--add` で開く保留のセッションは、プロセスを起こさずに開く（再起動後の復元で保留のタブにメモリを使わない）。最初の一言（`--resume-prompt-file`）があるセッションは起こす
+- `CCNEST_HOLD_SLEEP=off` で v0.1.48 と同じ（保留は見た目だけ）
+
+### 「止めても失う物が無い」の決め方（ここが要）
+
+`status::is_safe_to_stop`。次の全部を満たすときだけ真。読めない画面は偽＝止めない側に倒す。
+
+- 実行中でない（スピナー行・`esc to interrupt` が無い）
+- 裏の仕事が無い（フッターの札 `1 shell` など・`Waiting for … to finish`）。**タブの色（🟨）では決めない**: `detect_status` は「判断待ち」の節があれば裏でシェルが動いていても 🟨 を返すので、色で決めると裏の仕事を止めてしまう
+- 入力欄が空で出ている（`at_empty_prompt`: 罫線 2 本のあいだが `❯` だけ）。許可・質問・計画承認のダイアログの途中（入力欄が無い）と、書きかけの入力がある画面は偽
+
+加えて `app::sleep_check`:
+
+- 画面は Alt+C を押したその場で読み直す（2 秒 tick の状態は古いことがある。履歴を見ている途中なら最下部へ戻してから読む）
+- 最後にキーを送ってから 5 秒以内のペインは止めない（送った直後は、まだスピナー行が出ていないことがある）
+- 画面のロックが取れなかったら止めない
+
+止めるのは保留にしたその時だけ。保留中にあとから作業が終わったタブを自動で止めることはしない（見ていないときに、画面の読み違いでプロセスを止める事故を避ける）。
+
+### 実装
+
+- `src/pane/status.rs`: `at_empty_prompt`・`is_safe_to_stop`
+- `src/pane/mod.rs`: `Pane.pty` を `Option` に（None = 眠っている）。`sleep()`・`dormant()`・`asleep()`・`since_last_write()`。`write()` は眠っていれば何もしない
+- `src/app.rs`: 純粋関数 `sleep_check`・`hold_notice`・`opens_dormant`、`App::sleep_held_tab`・`wake_pane`・`wake_tab`・`notice`（時間で消えるお知らせ）。`refresh_pane_state` は眠っているペインを読み飛ばす。`spawn_next_resume` は保留のセッションを `Pane::dormant` で開く
+- `src/event.rs`: `Action::ToggleHoldTab` のあとで `sleep_held_tab`／`wake_tab`。眠っているペインにフォーカスがあるときのキー（`is_wake_action` = 素通しと貼り付け）で `wake_pane`。2 秒 tick でお知らせを片付ける
+- `src/ui/mod.rs`: `pane_title_asleep`。お知らせがあるあいだ、ステータスバーの下段（操作ヒントの行）をお知らせに替える（上段の cwd の枠は幅が足りないと真っ先に落ちるので使わない）
+
+### 確認
+
+- `cargo test`: 497 件（新規 10 件: `status` 5 件・`sleep_check_stops_only_when_it_is_known_to_be_safe`・`hold_notice_says_what_happened`・`opens_dormant_only_for_a_held_session_without_a_prompt`・`only_input_meant_for_the_pane_wakes_it`・`asleep_pane_title_says_how_to_wake`）。`cargo fmt --all --check`・`cargo clippy --all-targets -- -D warnings` 警告なし
+- E2E `scripts/e2e/hold-sleep.ps1`: **PASS**（38 項目）。偽 claude（`hold-sleep-shim.ps1`）が Claude Code の画面の形を描く: 空の入力欄／スピナー行／書きかけの入力
+  - 空の入力欄のタブを保留 → プロセスが消える・お知らせ／開く → 最後の画面と「保留中」・何も起きない／Alt+←→ で通る → 何も起きない
+  - Enter → `--resume <同じ id>` で起動／保留を外す → 起きたまま／もう一度保留 → 止まる／眠ったまま外す → 起きる
+  - スピナー行のタブ・書きかけのあるタブ・キーを送った直後のタブ → 止めない（キーの 6 秒後に保留し直すと止まる）
+  - 別の窓を `--resume` で起こす → 保留のセッションはプロセスなしで開く・Enter で起きる
+- 同 `-Off`: **PASS**（`CCNEST_HOLD_SLEEP=off` では止めない）
+- **本物の Claude Code 2.1.330**（`hold-sleep-real.ps1`・sonnet）: **PASS**（14 項目）
+  - 1 ターン打って返事が終わった画面（`❯` だけの入力欄）で Alt+C → `stopped=1 kept=0`・claude.exe 0 個・**650 MB 空いた**（残りはペインの擬似コンソールのホスト 1 個・約 1 MB）
+  - Enter → `claude.exe --resume <同じ id>` が起動し、会話（`● mango`）が画面に戻る
+  - 起こし直したセッションも、保留し直すと止まる
+- 既存 E2E `hold-tab.ps1`（28 項目）・`park-working-tabs.ps1`・`drag-reorder-tab.ps1`・`dblclick-rename-tab.ps1`・`reopen-tab.ps1` は PASS のまま（これらの偽 claude は入力欄を描かないので、保留にしても止まらない = 今までどおり）
+- E2E はどれも窓を作らない起こし方（CREATE_NO_WINDOW）で回した
+
+### 残る制限
+
+- 止めたペインを起こすと、モードは窓の既定（plan）に戻る（Ctrl+Shift+T と同じ）。入力欄の書きかけは、あれば止めないので消えない
+- 質問・許可のダイアログが出ているタブは止めない（止めるとダイアログが消えるため）。保留にしてもメモリは空かない
+- 本体の版が変わって入力欄の形（罫線 2 本と `❯`）が変わると、止めなくなる（お知らせは「動かしたまま」になる）。そのときは `CCNEST_STATUS_TRACE` で実物を取って `at_empty_prompt` を直す
+- 止めたあと、ペインの擬似コンソールのホスト（約 1 MB）は ccnest がペインを閉じるまで残る。閉じたタブでも同じ（前からの動き）
+- 保留中にあとから作業が終わったタブは、止まらない。空けたいときは一度外して保留し直す
+
+---
+
 ## 2026-11-21 — タブの「保留」（Alt+C で灰色の丸 + 番号だけ・v0.1.48）
 
 ブランチ: `feature/tab-hold`

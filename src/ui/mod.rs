@@ -646,10 +646,16 @@ fn draw_statusbar(app: &App, frame: &mut Frame<'_>, area: Rect, theme: &theme::T
     // 利用制限はアカウント全体の値なので、どのペインにフォーカスしても同じ。
     let usage = app.usage_label().unwrap_or_default();
 
-    // 上段: cwd / status + モデル + ブランチ + 利用制限、下段: ショートカットヒント
+    // 上段: cwd / status + モデル + ブランチ + 利用制限、下段: ショートカットヒント。
+    // 一時的なお知らせ (保留でメモリを空けた等) があるあいだは、下段をお知らせに
+    // 替える。上段の cwd の枠は幅が足りないと真っ先に落ちるので、そこには出さない。
+    let bottom = match &app.notice {
+        Some((text, _)) => Line::from(Span::styled(text.clone(), theme.status_model)),
+        None => Line::from(Span::styled(hint_text, theme.hint)),
+    };
     let lines = vec![
         status_line(&cwd, &model, &branch, &usage, area.width as usize, theme),
-        Line::from(Span::styled(hint_text, theme.hint)),
+        bottom,
     ];
     frame.render_widget(Paragraph::new(lines), area);
 }
@@ -810,6 +816,15 @@ fn pane_title(pid: PaneId, cwd: &Path) -> String {
     format!(" [{pid}] {} ", folder_title(cwd))
 }
 
+/// 眠っているペイン (保留でメモリを空けた) の枠のタイトルに足す案内。
+const ASLEEP_TITLE_NOTE: &str = "保留中: Claude 停止・キーを押すと続きから再開 ";
+
+/// 純粋: 眠っているペインの枠のタイトル。いつものタイトルの後ろに案内を足す
+/// (画面は最後の表示のまま動かないので、止まっていることと起こし方を枠に出す)。
+fn pane_title_asleep(pid: PaneId, cwd: &Path) -> String {
+    format!("{}{ASLEEP_TITLE_NOTE}", pane_title(pid, cwd))
+}
+
 /// 純粋: Claude ペインの枠。通常の箱線 (┌ ─ ┐ │ └ ┘) に " [id] フォルダ名 "
 /// タイトル。v0.1.17 で試した細線 (1/8 ブロック) は本人の判断で v0.1.18 に撤回。
 fn pane_block(title: String, border_style: Style) -> Block<'static> {
@@ -865,7 +880,13 @@ fn render_layout(
                     let title = app
                         .panes
                         .get(pid)
-                        .map(|p| pane_title(*pid, &p.cwd))
+                        .map(|p| {
+                            if p.asleep() {
+                                pane_title_asleep(*pid, &p.cwd)
+                            } else {
+                                pane_title(*pid, &p.cwd)
+                            }
+                        })
                         .unwrap_or_else(|| format!(" [{pid}] (gone) "));
                     let block = pane_block(title, border_style);
                     let inner = block.inner(area);
@@ -1757,6 +1778,14 @@ mod tests {
         );
     }
 
+    // 眠っているペインの枠には、止まっていることと起こし方を出す
+    #[test]
+    fn asleep_pane_title_says_how_to_wake() {
+        let t = pane_title_asleep(3, Path::new(r"C:\work\ccnest"));
+        assert!(t.starts_with(" [3] ccnest "), "{t:?}");
+        assert!(t.contains("保留中") && t.contains("キーを押すと"), "{t:?}");
+    }
+
     // 保留のマーカーは状態で変わらない (実行中でも対応待ちでも、shell だけでも)。
     #[test]
     fn tab_marker_held_ignores_the_status() {
@@ -2009,3 +2038,8 @@ mod tests {
 //                        (named │ parked green │ on hold). With
 //                        CCNEST_TAB_GROUP=off a held tab is drawn small in
 //                        place.
+// ver0.23 - 2026-11-21 - A sleeping pane (held tab whose Claude was stopped to
+//                        free memory) shows a note in its frame title
+//                        (pane_title_asleep). While App::notice is set, the
+//                        bottom line of the status bar shows it instead of
+//                        the key hints.
