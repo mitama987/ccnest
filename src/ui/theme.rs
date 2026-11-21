@@ -7,6 +7,9 @@ pub struct Theme {
     pub border_claude: Style,
     pub tab_active: Style,
     pub tab_inactive: Style,
+    /// 保留 (Alt+C) のタブ。ほかのタブより暗い灰色で「今は見なくていい」を示す。
+    /// マーカーの丸もこの色で塗る。
+    pub tab_held: Style,
     /// ドラッグで引いている最中の (浮いた) タブ。前面のタブと同じ白帯にする:
     /// オレンジの帯だと状態マーカー 🟨 が背景に溶けて見えない (実機で確認)。
     /// 浮いていることは、ほかのタブの上に重なって動くことで伝わる。
@@ -62,6 +65,7 @@ pub fn default_theme() -> Theme {
             .bg(Color::White)
             .add_modifier(Modifier::BOLD),
         tab_inactive: Style::default().fg(Color::Gray),
+        tab_held: Style::default().fg(Color::DarkGray),
         tab_floating: Style::default()
             .fg(Color::Black)
             .bg(Color::White)
@@ -133,3 +137,5 @@ pub fn default_theme() -> Theme {
 // ver0.8 - 2026-11-21 - Added tab_rename_selected: the tab whose name is being
 //                       edited and still fully selected (nothing typed yet) is
 //                       drawn as white on a blue band, like selected text.
+// ver0.9 - 2026-11-21 - Added tab_held: a tab put on hold with Alt+C is drawn
+//                       in dark grey (marker dot and number).

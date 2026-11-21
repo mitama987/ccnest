@@ -261,7 +261,8 @@ try {
   if ($Wt) {
     Start-Process wt.exe -ArgumentList @('-w', 'new', '--size', '110,14', '-d', "`"$work`"", 'cmd.exe', '/c', "`"$run`"")
   } else {
-    $p = Start-Process -FilePath "conhost.exe" -ArgumentList "cmd.exe /c `"$run`"" -WorkingDirectory $work -PassThru
+    # Hidden start; on-desktop2.ps1 moves the window to virtual desktop 2 before showing it.
+    $p = Start-Process -FilePath "conhost.exe" -ArgumentList "powershell.exe -NoProfile -ExecutionPolicy Bypass -File `"$PSScriptRoot\on-desktop2.ps1`" `"$run`"" -WorkingDirectory $work -WindowStyle Hidden -PassThru
   }
   $deadline = (Get-Date).AddSeconds(20)
   do {

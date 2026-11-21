@@ -5,6 +5,88 @@
 
 ---
 
+## 2026-11-21 — タブの「保留」（Alt+C で灰色の丸 + 番号だけ・v0.1.48）
+
+ブランチ: `feature/tab-hold`
+
+### 背景
+
+ゆうさん「一旦保留のタブもあることに気づいたから、タブ開いてる状態で Ctrl+C でアーカイブみたいな感じにして、灰色アイコンに変えて、アイコン + 数字だけのタブにできないかな？」。🟨（対応が必要）の中に「いまは手を付けない」タブが混ざると、本当に見るべき 🟨 が埋もれる。
+
+壁打ちで決めたこと:
+
+- キーは **Alt+C**。Ctrl+C はすでに 3 役（選択のコピー／Claude の中断／2 連打で Claude を落としてシェル化）で、保留のつもりで作業を止める事故になる。「タブをクリックした直後の Ctrl+C」案も、暴走しているタブを止めに行く操作（クリック → すぐ Ctrl+C）が保留になるのでやめた
+- 戻すのは **手で**（もう一度 Alt+C）。状態が 🟢／🟨 に変わっても灰色のまま（ゆうさん「手で戻すまで灰色」）
+- Claude Code 本体（2.1.330 の exe）に `alt+c`／`meta+c` の割り当ては無い。`meta+a` はあるので、代わりの候補だった Alt+A は選ばなくて正解だった
+
+### 動き
+
+- 前面のタブで Alt+C → そのタブはタブバーのいちばん右（2 本目の仕切り `│` の後ろ）へ行き `●5` だけになる。前面は隣のタブへ移る（メールのアーカイブと同じ）
+  - 隣の決め方: 同じ組の右隣 → 同じ組の左隣 → 保留でない右のタブ → 保留でない左のタブ → 無ければそのまま
+- 保留のタブをクリックすると、その場で名前つき（`● 5:名前`）で開く。そこで Alt+C → 名前つきの組の元いた位置へ戻る（前面はそのまま）
+- 保留のタブは状態を出さない。実行中でも、終わって対応待ちになっても `●番号` のまま
+- 緑を寄せるとき（2 秒 tick だけ）と違い、押した瞬間に位置が変わる。自分で押したキーなので、動くことが返事になる
+- 保留はセッション id ごとに `%APPDATA%\ccnest\tab-holds.json` に保存。Ctrl+Shift+T・窓を閉じたあと・`--resume`／`--add` でも保留のまま。`CCNEST_TAB_HOLDS=<path>` で置き場所を変える
+- ドラッグの並べ替えは同じ組の中だけ（組が 3 つになっただけで決まりは同じ）。`Alt+←→` は保留のタブも順に通る
+- `CCNEST_TAB_GROUP=off` では位置を動かさず、その場で `●番号` にする（仕切りなし）
+
+### 実装
+
+- `src/app.rs`
+  - `Tab.held`・`Tab::group()`・`enum TabGroup { Left, Working, Held }`・純粋関数 `tab_group(held, parked)`（保留が勝つ）
+  - `display_order` は組の列を受ける（組の順に安定ソート）。純粋関数 `active_after_hold(order, groups, idx)`
+  - `App::toggle_hold_tab(idx)`: 反転 → 途中のすべり・引いている最中の並べ替え・ダブルクリックの 1 回目を捨てる → 保留にしたときだけ前面を隣へ → 保存
+  - `Tab.parked` は保留の間も裏で更新し続ける（外した瞬間に正しい組へ入る）
+  - `ClosedTab.held`（開き直しても保留）・`saved_tab_hold`（`--resume`／`--add` で開くタブ）
+- `src/tab_holds.rs`（新規）: `tab_names` と同じ型（書く前に読み直す・一時ファイル → rename・500 件まで）。中身は「セッション id → 保留にした時刻」
+- `src/keymap.rs`: `Action::ToggleHoldTab`。`alt && !ctrl` の `c`／`C`（Ctrl+C と Ctrl+Alt+C は取らない）
+- `src/event.rs`: `Action::ToggleHoldTab` → `toggle_hold_tab(active_tab)`。`same_group_rects` は組の型を問わない形に（`Tab::group` を渡す）。トレース `hold_tab idx=N held=… active=M`
+- `src/ui/mod.rs`: `HELD_MARKER`（文字の `●`・1 桁）・純粋関数 `tab_marker`（保留は状態を見ない）。仕切りは組の境ごとに 1 本（最大 2 本）。ステータスバーのヒントに `Alt+C:hold`
+- `src/ui/theme.rs`: `tab_held`（暗い灰色。丸も番号もこの色）
+
+### マーカーの選び方
+
+丸の絵文字に灰色は無い（⚪ 白／⚫ 黒）。Windows Terminal の実物に 3 案を並べて撮った:
+
+- 文字の `●` を灰色で塗る: 小さく控えめ。「今は見なくていい」が伝わる
+- ⚪: 🟢 と同じ大きさで白く光り、保留なのにいちばん目立つ
+- ⚫: 黒地に溶けてほぼ見えない
+
+初期値は `●`。替えるなら `HELD_MARKER` の 1 か所。
+
+### 確認
+
+- `cargo test`: 487 件（新規 14 件: `tab_holds` 6 件・`display_order_puts_held_tabs_last`・`tab_group_held_wins_over_parked`・`active_after_hold_*` 2 件・`alt_c_toggles_hold`・`ctrl_c_is_not_hold`・`held_tab_label_is_grey_dot_and_number`・`tab_marker_held_ignores_the_status`。`display_order_keeps_each_group_in_tab_order` は組の列に書き直し）。`cargo fmt --all --check`・`cargo clippy --all-targets -- -D warnings` 警告なし
+- E2E `scripts/e2e/hold-tab.ps1`: **PASS**（28 項目）。偽 claude 5 本（bravo だけ実行中）
+  - Alt+C → `alpha cc delta │ 🟢2 │ ●5`・前面は delta・保存 1 件／保留のタブをクリック → `● 5:echo`／もう一度 Alt+C → 元の位置・保存 0 件
+  - alpha を保留 → 前面は右隣の cc（緑の bravo ではない）
+  - 実行中の bravo を保留 → 実行をやめて対応待ちになっても `●2` のまま
+  - 保留のタブを中クリックで閉じる → Ctrl+Shift+T → 保留のまま開き直る
+  - Ctrl+C は保留にしない（`hold_tab` が出ない・キーは ccnest に届いている）
+  - 別の窓を `--resume` で起こす → 保存にあるセッションのタブだけ `●2`
+- 同 `-Off`: **PASS**（5 項目。その場で `●5`・仕切りなし）
+- 同 `-Wt`: **PASS**。実物の Windows Terminal のスクショで `●1 ●4` が 1 桁ずつ・灰色で出ることを確認
+- 既存 E2E `park-working-tabs.ps1`（21 項目）・`drag-reorder-tab.ps1`・`dblclick-rename-tab.ps1`・`reopen-tab.ps1` は PASS のまま
+
+### E2E の窓は仮想デスクトップ 2 に出す（`scripts/e2e/on-desktop2.ps1`）
+
+ゆうさん「テストはデスクトップ 2 でやって」。テストの窓が今の画面に出て、打っている文字が 2 文字そちらへ入った。
+
+- 別プロセスの窓を仮想デスクトップ間で移す公開 API は無い。ただし `IVirtualDesktopManager.MoveWindowToDesktop` は呼んだプロセス自身の窓なら通り、conhost の窓は「コンソールに最初に付いたプロセス」の持ち物として扱われる（実測: `move_hr=0`）
+- そこで conhost を **隠して** 起こし（`-WindowStyle Hidden`）、最初のプロセスにした `on-desktop2.ps1` が自分の窓をデスクトップ 2 へ移してから、アクティブにせずに出す（`SW_SHOWNOACTIVATE`）。そのあと本来のコマンドを走らせる
+- 外から確かめた結果: 窓の所属 = デスクトップ 2 の GUID・見えている・前面の窓は変わらない
+- デスクトップが 1 つしか無い／移せなかったときは隠れたまま走る（画面の読み取りと入力はコンソール API なので隠れていても動く）。見たいときは `CCNEST_E2E_DESKTOP=current`
+- 入れたのはタブ系の 5 本（`hold-tab`・`park-working-tabs`・`drag-reorder-tab`・`dblclick-rename-tab`・`reopen-tab`）。ほかの E2E は次に回すときに同じ 1 行へ替える
+- プロセスの親子が `conhost → powershell → ccnest` に変わる（`reopen-tab.ps1` は conhost の直下を探していたので孫を探す形に直した）
+- **Windows Terminal の窓（`-Wt`・`*-wt.ps1`）は移せない**（持ち主が WindowsTerminal.exe）。スクショが要るときだけ使う
+
+### 残る制限
+
+- conhost は `●` を 2 桁で描く（WT は 1 桁）。conhost で保留のタブより右の桁がずれ、閉じたあとに字が残って見えることがある。ccnest は WT 前提（`…` や `│` と同じ扱い）
+- 保留にしてもプロセス（claude.exe）は動いたまま = メモリは空かない。実測で 1 タブの claude.exe は 620〜849 MB（8 タブで約 6.0 GB）。保留のタブのプロセスを落として、開いたときに `--resume` で戻す形は別の変更
+
+---
+
 ## 2026-11-21 — 緑のタブは右へ小さく寄せ、オレンジを左に固める（v0.1.47）
 
 ブランチ: `feature/tab-park-working`

@@ -30,6 +30,9 @@ pub enum Action {
     FocusSidebar,
     FocusContent,
     BeginRenameTab,
+    /// 前面のタブの保留を切り替える (Alt+C)。保留のタブはタブバーの右端に
+    /// 灰色のマーカー + 番号だけで出る。
+    ToggleHoldTab,
     ScrollLineUp,
     ScrollLineDown,
     ScrollPageUp,
@@ -45,6 +48,13 @@ pub fn resolve(ev: &KeyEvent, sidebar_focused: bool) -> Action {
     // Alt+F → begin rename. (Ctrl+F は ToggleFileTree なので衝突しない。)
     if alt && matches!(ev.code, KeyCode::Char('f') | KeyCode::Char('F')) {
         return Action::BeginRenameTab;
+    }
+
+    // Alt+C → 保留の切り替え。Ctrl 付き (Ctrl+C = 中断・コピー、AltGr 相当の
+    // Ctrl+Alt+C) は取らない: 保留のつもりで作業を止めないため、Ctrl+C とは
+    // 別のキーにしてある。
+    if alt && !ctrl && matches!(ev.code, KeyCode::Char('c') | KeyCode::Char('C')) {
+        return Action::ToggleHoldTab;
     }
 
     // Global multiplexer hotkeys (prefix-less) — claimed before pass-through.
@@ -280,6 +290,46 @@ mod tests {
     }
 
     #[test]
+    fn alt_c_toggles_hold() {
+        assert_eq!(
+            resolve(&key(KeyCode::Char('c'), KeyModifiers::ALT), false),
+            Action::ToggleHoldTab
+        );
+        assert_eq!(
+            resolve(&key(KeyCode::Char('C'), KeyModifiers::ALT), false),
+            Action::ToggleHoldTab
+        );
+        assert_eq!(
+            resolve(&key(KeyCode::Char('c'), KeyModifiers::ALT), true),
+            Action::ToggleHoldTab,
+            "サイドバーにフォーカスがあっても同じ"
+        );
+    }
+
+    /// Ctrl+C (中断・コピー) と Ctrl+Alt+C は保留にしない。
+    #[test]
+    fn ctrl_c_is_not_hold() {
+        assert_ne!(
+            resolve(&key(KeyCode::Char('c'), KeyModifiers::CONTROL), false),
+            Action::ToggleHoldTab
+        );
+        assert_ne!(
+            resolve(
+                &key(
+                    KeyCode::Char('c'),
+                    KeyModifiers::CONTROL | KeyModifiers::ALT
+                ),
+                false
+            ),
+            Action::ToggleHoldTab
+        );
+        assert_ne!(
+            resolve(&key(KeyCode::Char('c'), KeyModifiers::NONE), false),
+            Action::ToggleHoldTab
+        );
+    }
+
+    #[test]
     fn shift_pageup_scrolls() {
         assert_eq!(
             resolve(&key(KeyCode::PageUp, KeyModifiers::SHIFT), false),
@@ -315,3 +365,6 @@ mod tests {
 // Version History
 // ver0.1 - 2026-10-31 - Ctrl+Shift+T (t or T) resolves to Action::ReopenClosedTab,
 //                       checked before Ctrl+T (NewTab).
+// ver0.2 - 2026-11-21 - Alt+C (c or C, without Ctrl) resolves to
+//                       Action::ToggleHoldTab: put the front tab on hold / take
+//                       it off hold.
