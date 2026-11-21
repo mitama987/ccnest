@@ -6,7 +6,7 @@ use anyhow::Result;
 use uuid::Uuid;
 
 use crate::claude::jp_title::{pick_task, JpTitler};
-use crate::claude::launcher::SessionStart;
+use crate::claude::launcher::{ResumeExtras, SessionStart};
 use crate::claude::usage::{UsageCell, UsageLabel, UsageSnapshot};
 use crate::cli::ResumeSpec;
 use crate::pane::grid::{Direction, Layout};
@@ -332,14 +332,22 @@ impl App {
     /// 2 秒 tick ごとに 1 タブずつ開く ([`App::spawn_next_resume`])。
     pub fn with_resumes(cwd: PathBuf, resumes: Vec<ResumeSpec>) -> Result<Self> {
         let mut pending_resumes: VecDeque<ResumeSpec> = resumes.into();
-        let (session_id, start, title) = match pending_resumes.pop_front() {
-            Some(r) => (r.session_id, SessionStart::Resume, r.title),
-            None => (Uuid::new_v4(), SessionStart::New, None),
+        let (session_id, start, title, extras) = match pending_resumes.pop_front() {
+            Some(r) => {
+                let extras = resume_extras(&r);
+                (r.session_id, SessionStart::Resume, r.title, extras)
+            }
+            None => (
+                Uuid::new_v4(),
+                SessionStart::New,
+                None,
+                ResumeExtras::default(),
+            ),
         };
         let mut panes = HashMap::new();
         let first_id = 1 as PaneId;
         let (wake_tx, wake_rx) = std::sync::mpsc::channel();
-        let first = Pane::spawn(first_id, &cwd, session_id, start, wake_tx.clone())?;
+        let first = Pane::spawn_with(first_id, &cwd, session_id, start, &extras, wake_tx.clone())?;
         panes.insert(first_id, first);
 
         let tab = Tab {
@@ -400,11 +408,12 @@ impl App {
         let cwd = self.cwd.clone();
         let new_id = self.next_pane_id;
         self.next_pane_id += 1;
-        let pane = Pane::spawn(
+        let pane = Pane::spawn_with(
             new_id,
             &cwd,
             spec.session_id,
             SessionStart::Resume,
+            &resume_extras(&spec),
             self.wake_tx.clone(),
         )?;
         self.panes.insert(new_id, pane);
@@ -1051,6 +1060,14 @@ fn reopen_index(index: usize, len: usize) -> usize {
 }
 
 /// 純粋: 会話ログがあれば `--resume`、無ければ新しいセッション。
+/// 純粋: `--resume` 1 つ分の指定から、そのセッションだけに付ける起動指定を取り出す。
+fn resume_extras(spec: &ResumeSpec) -> ResumeExtras {
+    ResumeExtras {
+        prompt: spec.prompt.clone(),
+        permission_mode: spec.permission_mode.clone(),
+    }
+}
+
 fn start_for(resumable: bool) -> SessionStart {
     if resumable {
         SessionStart::Resume
@@ -1488,3 +1505,7 @@ mod tests {
 //                        and double-click state; move_tab / remove_tab /
 //                        reopen_closed_tab drop last_tab_click and remove_tab
 //                        cancels a rename in progress.
+// ver0.19 - 2026-11-21 - with_resumes / spawn_next_resume pass each ResumeSpec's
+//                        prompt and permission mode to the pane (resume_extras,
+//                        Pane::spawn_with): `--resume-prompt-file` /
+//                        `--resume-permission-mode`.

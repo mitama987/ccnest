@@ -70,6 +70,62 @@ pub enum SessionStart {
     Resume,
 }
 
+/// 再開するセッション 1 つにだけ付ける指定 (`ccnest --resume-prompt-file` /
+/// `--resume-permission-mode`)。既定 (どちらも None) は「開くだけ・ほかのタブと同じモード」。
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ResumeExtras {
+    /// 再開してすぐ送る最初の一言 (claude の位置引数)。
+    pub prompt: Option<String>,
+    /// このセッションだけの開始モード。
+    pub permission_mode: Option<String>,
+}
+
+/// 純粋: セッション個別のモード指定を、窓全体の [`SpawnOpts`] に重ねる。
+/// - 指定なし → そのまま。
+/// - `bypassPermissions` → bypass で開始 (`--dangerously-skip-permissions`。
+///   `CCNEST_CLAUDE_PERMISSION_MODE=off` と同じ渡し方)。ただし安全弁
+///   `CCNEST_CLAUDE_NO_SKIP_PERMISSIONS` (bypass = Off) が効いているときは
+///   bypass に上げず、窓の既定のまま。
+/// - それ以外 (`plan` / `acceptEdits` / `default` …) → `--permission-mode` に渡す。
+pub fn opts_for_resume(base: &SpawnOpts, mode: Option<&str>) -> SpawnOpts {
+    let Some(mode) = mode.map(str::trim).filter(|m| !m.is_empty()) else {
+        return base.clone();
+    };
+    if mode.eq_ignore_ascii_case("bypassPermissions") {
+        if base.bypass == BypassFlag::Off {
+            return base.clone();
+        }
+        return SpawnOpts {
+            permission_mode: None,
+            bypass: BypassFlag::StartIn,
+        };
+    }
+    SpawnOpts {
+        permission_mode: Some(mode.to_string()),
+        bypass: match base.bypass {
+            BypassFlag::Off => BypassFlag::Off,
+            _ => BypassFlag::AllowCycle,
+        },
+    }
+}
+
+/// [`build_claude_args`] に、再開セッション個別の指定を足したもの。モードは
+/// [`opts_for_resume`] で重ね、最初の一言は末尾の位置引数にする
+/// (`claude --resume <id> ... "<一言>"` = 再開してすぐその発話を送る)。
+pub fn build_claude_args_with(
+    session_id: &str,
+    start: SessionStart,
+    opts: &SpawnOpts,
+    extras: &ResumeExtras,
+) -> Vec<String> {
+    let opts = opts_for_resume(opts, extras.permission_mode.as_deref());
+    let mut args = build_claude_args(session_id, start, &opts);
+    if let Some(prompt) = extras.prompt.as_deref().filter(|p| !p.is_empty()) {
+        args.push(prompt.to_string());
+    }
+    args
+}
+
 /// `claude` に渡す引数列 (バイナリ名を除く) を組み立てる純粋関数。
 pub fn build_claude_args(session_id: &str, start: SessionStart, opts: &SpawnOpts) -> Vec<String> {
     let id_flag = match start {
@@ -95,6 +151,7 @@ pub fn spawn_claude(
     cwd: &Path,
     session_id: Uuid,
     start: SessionStart,
+    extras: &ResumeExtras,
     parser: Arc<Mutex<vt100::Parser>>,
     hooks: ReaderHooks,
 ) -> Result<(PtyHandle, String, bool)> {
@@ -109,7 +166,7 @@ pub fn spawn_claude(
         // 従来の bypass 直行に戻すには CCNEST_CLAUDE_PERMISSION_MODE=off。
         // 詳細は spawn_opts_from のドキュメントコメントを参照。
         let opts = spawn_opts_from(|k| std::env::var(k).ok());
-        for arg in build_claude_args(&session_id.to_string(), start, &opts) {
+        for arg in build_claude_args_with(&session_id.to_string(), start, &opts, extras) {
             cmd.arg(arg);
         }
         cmd.cwd(cwd);
@@ -342,6 +399,87 @@ mod tests {
         );
     }
 
+    fn extras(prompt: Option<&str>, mode: Option<&str>) -> ResumeExtras {
+        ResumeExtras {
+            prompt: prompt.map(str::to_string),
+            permission_mode: mode.map(str::to_string),
+        }
+    }
+
+    // 個別の指定が無い再開は、これまでと 1 文字も変わらない
+    #[test]
+    fn resume_without_extras_is_unchanged() {
+        let opts = spawn_opts_from(env_none);
+        assert_eq!(
+            build_claude_args_with("abc", SessionStart::Resume, &opts, &ResumeExtras::default()),
+            build_claude_args("abc", SessionStart::Resume, &opts)
+        );
+    }
+
+    // 最初の一言は末尾の位置引数 1 つ (空白や句読点があっても割れない)
+    #[test]
+    fn resume_prompt_is_the_last_positional_arg() {
+        let args = build_claude_args_with(
+            "abc",
+            SessionStart::Resume,
+            &spawn_opts_from(env_none),
+            &extras(Some("続きを進めて。 判断待ちは進めない。"), None),
+        );
+        assert_eq!(
+            args,
+            [
+                "--resume",
+                "abc",
+                "--permission-mode",
+                "plan",
+                "--allow-dangerously-skip-permissions",
+                "続きを進めて。 判断待ちは進めない。",
+            ]
+        );
+    }
+
+    // 直前が bypass だったセッションは bypass で開始 (CCNEST_CLAUDE_PERMISSION_MODE=off と同じ渡し方)
+    #[test]
+    fn resume_in_bypass_mode_starts_in_bypass() {
+        let args = build_claude_args_with(
+            "abc",
+            SessionStart::Resume,
+            &spawn_opts_from(env_none),
+            &extras(Some("go on"), Some("bypassPermissions")),
+        );
+        assert_eq!(
+            args,
+            ["--resume", "abc", "--dangerously-skip-permissions", "go on"]
+        );
+    }
+
+    // bypass 以外のモードは --permission-mode に渡し、bypass はサイクル追加のまま
+    #[test]
+    fn resume_in_other_mode_passes_it_through() {
+        let base = spawn_opts_from(env_none);
+        assert_eq!(
+            opts_for_resume(&base, Some("acceptEdits")),
+            SpawnOpts {
+                permission_mode: Some("acceptEdits".to_string()),
+                bypass: BypassFlag::AllowCycle,
+            }
+        );
+        assert_eq!(opts_for_resume(&base, None), base);
+        assert_eq!(opts_for_resume(&base, Some("  ")), base);
+    }
+
+    // 安全弁 CCNEST_CLAUDE_NO_SKIP_PERMISSIONS が効いている窓では、bypass に上げない
+    #[test]
+    fn resume_mode_never_overrides_the_no_skip_safety_valve() {
+        let get = |k: &str| (k == "CCNEST_CLAUDE_NO_SKIP_PERMISSIONS").then(|| "1".to_string());
+        let base = spawn_opts_from(get);
+        assert_eq!(opts_for_resume(&base, Some("bypassPermissions")), base);
+        assert_eq!(
+            opts_for_resume(&base, Some("acceptEdits")).bypass,
+            BypassFlag::Off
+        );
+    }
+
     #[test]
     fn env_hygiene_drops_terminal_identity_but_keeps_the_rest() {
         assert!(!should_pass_env("WT_SESSION"));
@@ -379,6 +517,9 @@ mod tests {
 }
 
 // Version History
+// - ver1.6 (2026-11-21): ResumeExtras (最初の一言・セッション個別の開始モード) と
+//   opts_for_resume / build_claude_args_with。spawn_claude が extras を受け取る。
+//   Windows Update の再起動で止まったセッションを、直前のモードで開き直して続きを指示する用。
 // - ver1.5 (2026-11-11): apply_env が子へ `CCNEST_PID=<この ccnest の pid>` を渡す
 //   (タブの中から `ccnest --add` を打ったときの宛先。remote.rs)。
 // - ver1.4 (2026-10-19): SessionStart (New / Resume) を追加。Resume は `--session-id` の

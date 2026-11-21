@@ -50,6 +50,7 @@ From any directory:
 ccnest          # use the current directory as the initial pane cwd
 ccnest path\to\project
 ccnest path\to\project --resume <session-id>=<tab name> --resume <session-id>
+ccnest path\to\project --resume <session-id> --resume-prompt-file prompt.txt --resume-permission-mode bypassPermissions
 ```
 
 `--resume` reopens existing Claude sessions (`claude --resume <id>`), one tab
@@ -57,6 +58,19 @@ each, for example after a reboot. The tab name after `=` is optional (the
 folder name otherwise). The first session opens right away; the rest open one
 per 2 seconds without switching the active tab, so parallel Claude starts do
 not write `~/.claude.json` at the same time.
+
+Two options apply to the `--resume` right before them, for a session that was
+cut off mid-work (a reboot, for example):
+
+- `--resume-prompt-file <path>` sends the text of that file as the session's
+  first message as soon as it is reopened (`claude --resume <id> "<text>"`), so
+  it picks the work up without anyone typing. The text is folded to one line.
+- `--resume-permission-mode <mode>` starts that one session in the given mode
+  (`bypassPermissions`, `plan`, `acceptEdits`, ...) instead of the window's
+  default (plan). `bypassPermissions` is ignored when
+  `CCNEST_CLAUDE_NO_SKIP_PERMISSIONS` is set.
+
+Sessions without these options just open, as before.
 
 ### Add tabs to a running window
 
@@ -378,3 +392,4 @@ ver0.1.42 - 2026-11-15 - 🟨 when a decision is pending, even with background w
 ver0.1.43 - 2026-11-18 - 🟢 stays on after an idle compaction. When a session is left idle, Claude Code compacts it without starting a turn and adds lines below the `✻ Waiting for 1 dynamic workflow to finish` line: indented child lines (`  ⎿  Referenced file …`, `  ⎿  Skills restored …`) and the notice `● Compacted while idle, before the prompt cache expired · turn off with "idleCompaction": false in settings.json`. The waiting line was no longer the last line above the prompt box, so a tab whose workflow was still running fell back to 🟨. ccnest now looks at the last line that starts at column 0 (turn markers `●` / `✻` / `❯` always do; child lines and wrapped continuations are indented) and steps over the idle-compaction notice (also `Compacted using a summary written while you were away`). A new turn below the notice still gives 🟨. E2E `scripts/e2e/idle-compaction-waiting.ps1` (a fake claude draws the screen; transcribed from a screenshot).
 ver0.1.44 - 2026-11-18 - Extend the selection to the click. `Alt` + left-click (or `Shift` + left-click in terminals that pass it on) selects from the existing selection, or from your last plain click when nothing is selected, to the clicked cell, so a long Claude Code reply can be selected with click, wheel scroll, Alt+click instead of dragging through it. Clicking inside a selection moves its end; clicking outside grows it without dropping what was selected; keep the button down to drag the end. The start point is stored in buffer coordinates, so it stays on the same text while the history scrolls, and it is dropped when the pane is resized, the app enters or leaves the alternate screen, or a fullscreen (alternate-screen) app is scrolled with the wheel. Windows Terminal keeps Shift+click for its own selection and does not send it to the app (checked with real pointer input: Alt+click arrives with the ALT modifier, Shift+click does not arrive), which is why Alt is the trigger there. In a pane whose app turned mouse reporting on, Alt + left button is handled by ccnest and not forwarded. `CCNEST_INPUT_TRACE` now shows mouse modifiers (`Mouse(Down(Left)@31,7,KeyModifiers(ALT))`) and logs `extend_selection pane=N anchor=.. cursor=..`. E2E `scripts/e2e/click-extend-selection.ps1` (`-MouseMode` for a mouse-reporting pane) and `scripts/e2e/click-extend-selection-wt.ps1` (real Windows Terminal).
 ver0.1.45 - 2026-11-21 - Double-click a tab to rename it. Two left presses on the same tab within 500 ms (with no reorder in between) open the name input on that tab; the first press still switches to the tab at once. The input works like Explorer's rename: the current name starts out selected (white on a blue band), the first key replaces it, `Backspace` clears it, `Enter` or a left click outside the tab commits, `Esc` cancels, `Enter` without typing changes nothing, and committing an empty name removes the name and brings the automatic one back. `Ctrl+V` and terminal paste now go into the name (first line) instead of the pane behind it. Fixes `Alt+F` rename, which until now only changed the folder-name title and so was invisible on any tab running Claude: a name given by hand is now shown as `N:<name>` ahead of the `/rename` name, the Japanese name, the OSC title and the last message. The name is stored per session id in `%APPDATA%\ccnest\tab-names.json` (all panes of the tab; 500 entries max) and comes back after Ctrl+Shift+T, after the window is closed, and with `--resume` / `--add`; Claude Code's own session name is not touched. `CCNEST_TAB_NAMES` overrides the path. The README said `F2` renames a tab; it is `Alt+F`. CCNEST_INPUT_TRACE logs `begin_rename_tab idx=N` and `rename_tab idx=N name=...`. E2E `scripts/e2e/dblclick-rename-tab.ps1` (console input) and `dblclick-rename-tab-wt.ps1` (real pointer on Windows Terminal).
+ver0.1.46 - 2026-11-21 - Reopen a session and tell it to continue. `--resume-prompt-file <path>` after a `--resume` sends the file's text as that session's first message (`claude --resume <id> "<text>"`, the text folded to one line), and `--resume-permission-mode <mode>` starts that one session in the given mode (`bypassPermissions` starts in bypass like `CCNEST_CLAUDE_PERMISSION_MODE=off`; other modes go to `--permission-mode`; `CCNEST_CLAUDE_NO_SKIP_PERMISSIONS` still wins). Both apply only to the `--resume` right before them, also through `--add`; sessions without them open exactly as before. Made for reopening the sessions a Windows Update restart cut off, in the mode they were in. Misuse (option before any `--resume`, unreadable or empty file, a mode that is not a word) exits with an error before a window opens. E2E `scripts/e2e/resume-prompt.ps1` (fake claude: the prompt arrives as one argument) and `scripts/e2e/resume-prompt-real.ps1` (real claude on a light model: the prompt is sent, answered, and the session runs in bypassPermissions).

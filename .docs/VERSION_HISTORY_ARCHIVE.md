@@ -5,6 +5,43 @@
 
 ---
 
+## 2026-11-21 — 再開したセッションに最初の一言とモードを渡す（`--resume-prompt-file`／`--resume-permission-mode`・v0.1.46）
+
+ブランチ: `feature/resume-prompt-file`
+
+### 背景
+
+メイン PC が Windows Update で夜中に自動で再起動し、動いていた Claude セッションが全部止まる（11/12 0:35・11/21 0:12）。ゆうさん「セッションの控えを自動でとって、再起動したら、そのセッションを再開させて、各セッションで、続きを行える？」。
+
+`ccnest --resume` は開き直すだけで、最初の一言を渡す口が無かった。また、開き直したタブは全部 plan モードで始まるので、続きを指示しても計画を出し直して承認待ちで止まる。ゆうさんの決定は「直前のモードに戻す」。
+
+### 動き
+
+- `--resume <id>[=<名前>]` の後ろに `--resume-prompt-file <パス>` → そのセッションだけ、ファイルの文面を最初の一言として送る（`claude --resume <id> "<文面>"`）。文面は BOM を外して 1 行に畳む
+- `--resume-permission-mode <モード>` → そのセッションだけ、そのモードで始める
+  - `bypassPermissions` → `--dangerously-skip-permissions`（`CCNEST_CLAUDE_PERMISSION_MODE=off` と同じ渡し方）
+  - それ以外 → `--permission-mode <モード>`
+  - 安全弁 `CCNEST_CLAUDE_NO_SKIP_PERMISSIONS` が効いている窓では bypass に上げない
+- どちらも直前の `--resume` 1 つにだけ効く。付けていないセッションは今までと 1 文字も変わらない
+- `--add`（動いている窓への依頼）でも同じ指定が届く（`ResumeSpec` に載る）
+- 誤用（`--resume` より前・読めないファイル・空のファイル・英字でないモード）は窓を開く前にエラー終了
+
+### 触った所
+
+- `src/cli.rs`: `ResumeSpec.prompt`／`.permission_mode`・`parse_args_with`（ファイル読みを注入）・`normalize_prompt`
+- `src/claude/launcher.rs`: `ResumeExtras`・`opts_for_resume`・`build_claude_args_with`・`spawn_claude` が extras を受け取る
+- `src/pane/mod.rs`: `Pane::spawn_with`（`Pane::spawn` はそのまま）
+- `src/app.rs`: `with_resumes`／`spawn_next_resume` が extras を渡す
+
+### 確かめ
+
+- 単体テスト 468 本（追加 10 本）・clippy
+- `scripts/e2e/resume-prompt.ps1`: 使い捨ての ccnest＋偽 claude。文面（日本語・空白・`;` 入り）が 1 つの引数で届く／指定の無いセッションは窓の既定のまま／誤用 3 種はエラー → PASS
+- `scripts/e2e/resume-prompt-real.ps1`: 本物の claude（sonnet）。再開 3 秒後に文面がユーザー発話として会話ログに入り、返事が返り、`permissionMode` は `bypassPermissions` → PASS。本物のシム（`ccnest-claude-launcher.exe`）越しの引数は `--settings … --effort high --resume <id> --dangerously-skip-permissions "<文面>"`
+
+### 使う側
+
+`~/.claude/scripts/claude-sessions-restore.ps1 -AutoContinue`（ver1.3）と `~/.claude/scripts/wu-restart-notify/`（Windows Update の通知・控え・再起動後の復元）。
 ## 2026-11-21 — タブをダブルクリックして名前を変える（v0.1.45）
 
 ブランチ: `feature/tab-dblclick-rename`
