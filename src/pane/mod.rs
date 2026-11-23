@@ -49,6 +49,13 @@ pub struct Pane {
     /// Claude の実行状態 (タブ/サイドバーの色分け用)。session と同じく
     /// 定期 tick (`App::refresh_pane_state`) だけが更新するキャッシュ。
     pub status: ClaudeStatus,
+    /// 画面から読んだそのままの判定 (`status` は「まだ見ていない」の目印で
+    /// 🟨 にしたあとの表示用)。次の tick で「返答が終わった瞬間」を見分けるのに使う
+    /// (`status::unseen_turn_end`)。
+    pub detected: ClaudeStatus,
+    /// 返答が終わった瞬間にこのタブを見ていなかった目印。立っている間は
+    /// 裏が動いていても 🟨 (`status::displayed_status`)。開いたら下りる。
+    pub unseen_turn_end: bool,
     /// 「今なにをしているか」の表示文字列 (OSC タイトル優先、無ければ
     /// セッション JSONL の最後のユーザー発話)。これも tick 更新キャッシュ。
     pub task: Option<String>,
@@ -130,6 +137,8 @@ impl Pane {
             claude_running,
             session,
             status: ClaudeStatus::default(),
+            detected: ClaudeStatus::default(),
+            unseen_turn_end: false,
             task: None,
             output_stamp: hooks.stamp,
             waker,
@@ -155,6 +164,8 @@ impl Pane {
             claude_running: true,
             session: SessionTailer::default(),
             status: ClaudeStatus::NeedsAttention,
+            detected: ClaudeStatus::NeedsAttention,
+            unseen_turn_end: false,
             task: None,
             output_stamp: OutputStamp::new(),
             waker: OutputWaker::new(wake, id),

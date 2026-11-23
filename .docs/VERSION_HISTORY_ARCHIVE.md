@@ -5,6 +5,37 @@
 
 ---
 
+## 2026-11-23 — スクロール中も色を判定する・裏が動いていても見るまで 🟨（v0.1.53）
+
+ブランチ: `fix/status-scroll-and-unseen`
+
+### 背景
+ゆうさん（2026-11-23）:
+1. 「CC の回答がスクロールの途中だと緑色のタブになる。手動でスクロールして最後まで見たらオレンジになった」
+2. 報告で返答が終わっていても、フッターに `1 shell` があると 🟢 のまま。ゆうさんの判断待ちなのに分からない（シェルが本当に動いているときもあるので壁打ち）→ 案 A「見るまでオレンジ」に決定
+
+### 原因
+1. `App::refresh_pane_state` は `screen.scrollback() == 0` のときしか判定せず、履歴を見ている間は前回の状態（返答中の 🟢）を据え置いていた
+2. 判定は「裏の仕事の札あり → Background（🟢）」だけで、返答を読んだかどうかを見ていなかった
+
+### 変更
+- `src/app.rs` `live_screen_text`: 判定のときだけ同じロックの中で `set_scrollback(0)` → 行を読む → 元の位置へ戻す
+- `src/pane/status.rs` `unseen_turn_end`／`displayed_status`（純粋関数）: Busy → Background に変わった tick にそのタブを見ていなければ目印を立て、立っている間は NeedsAttention で出す。今見ているタブのペインは毎 tick で下ろす。Background 以外になったら下ろす
+- `src/pane/mod.rs` `Pane.detected`（画面から読んだそのままの判定）・`Pane.unseen_turn_end`
+- `CCNEST_STATUS_TRACE` の見出しに `detected`・`unseen`・`scroll`
+- README のタブの節・`Cargo.toml` 0.1.53
+
+### 決めたこと（ゆうさんの言葉に無かった所）
+- 「見た」は今見ているタブ（`active_tab`）にそのペインがあること。2 秒 tick で判定するので、開いてから 🟢 になるまで最大 2 秒
+- 窓を開いた直後・`--resume` で開いたタブ（前回の判定が Busy でない Background）は目印を立てない＝今までどおり 🟢
+- 裏のエージェント／workflow 待ち（`Waiting for … to finish`）も同じ扱い
+
+### テスト
+- 単体: `turn_end_with_background_while_away_is_unseen` ほか 6 件（status.rs）・`live_screen_text_reads_bottom_and_keeps_scroll_position`（app.rs）
+- E2E: `scripts/e2e/unseen-turn-end.ps1`（窓なし・偽 claude `turn-end-shim.ps1`・11 項目 PASS）。回帰に `idle-compaction-waiting.ps1`・`park-working-tabs.ps1`・`hold-sleep.ps1` も PASS
+
+---
+
 ## 2026-11-21 — 止まっている保留タブの案内に「Alt+C で再開」と書く（v0.1.50）
 
 ブランチ: `feature/hold-wake-hint`
