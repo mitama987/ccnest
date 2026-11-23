@@ -13,6 +13,10 @@
 //! - 宛先 ([`resolve_target`]): `--to <pid>` → 環境変数 [`PID_ENV`]。ccnest は
 //!   ペインの子へ `CCNEST_PID=<自分の pid>` を渡すので、タブの中から打てば
 //!   「この窓」に届く。
+//!
+//! `ccnest --close [--after <秒>]` も同じ依頼ファイルで届く ([`CloseRequest`])。
+//! 宛先は `CCNEST_PID` と、ペインの子へ渡す `CCNEST_PANE=<ペイン id>`
+//! ([`PANE_ENV`]) の組。窓は「そのペインのあるタブ」を `after` 秒後に閉じる。
 
 use std::collections::HashSet;
 use std::fs;
@@ -25,17 +29,42 @@ use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 use crate::cli::ResumeSpec;
+use crate::pane::PaneId;
 
 /// ccnest がペインの子プロセスへ渡す「この窓の pid」。
 pub const PID_ENV: &str = "CCNEST_PID";
 
+/// ccnest がペインの子プロセスへ渡す「このペインの id」。`ccnest --close` が
+/// 「どのペインから打たれたか」を知る目印 (v0.1.51 から)。
+pub const PANE_ENV: &str = "CCNEST_PANE";
+
 /// 送る側が受け取らなかった `.done` を窓側が片付けるまでの時間。
 const STALE_REPLY: Duration = Duration::from_secs(60);
 
-/// 依頼 1 件 (= 依頼ファイル 1 つ)。
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+/// 「このペインのあるタブを `after_secs` 秒後に閉じて」(`ccnest --close`)。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CloseRequest {
+    pub pane: PaneId,
+    pub after_secs: u64,
+}
+
+/// 依頼 1 件 (= 依頼ファイル 1 つ)。`resumes` (タブを足す) と `close` (タブを閉じる)
+/// のどちらか。
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub struct Request {
+    #[serde(default)]
     pub resumes: Vec<ResumeSpec>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub close: Option<CloseRequest>,
+}
+
+/// 閉じる予約を受け付けたときの返事。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CloseReply {
+    /// 何秒後に閉じるか (実際は 2 秒 tick の粒度で、最大 2 秒遅れる)。
+    pub after_secs: u64,
+    /// 閉じるタブの表示名。
+    pub tab_title: String,
 }
 
 /// 開かなかった理由。
@@ -61,9 +90,12 @@ pub struct Reply {
     pub accepted: Vec<Uuid>,
     #[serde(default)]
     pub skipped: Vec<Skipped>,
-    /// 依頼そのものが読めなかった (壊れた JSON など)。
+    /// 依頼そのものが読めなかった (壊れた JSON など)・閉じられなかった (理由つき)。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
+    /// `--close` を受け付けた。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub close: Option<CloseReply>,
 }
 
 impl Reply {
@@ -109,6 +141,61 @@ pub fn resolve_target(to: Option<u32>, env: Option<&str>) -> Result<u32> {
     })?;
     raw.parse::<u32>()
         .map_err(|e| anyhow!("{PID_ENV} が pid ではありません ({raw:?}): {e}"))
+}
+
+/// 純粋: `--close` の宛先 (窓の pid, ペイン id)。環境変数 [`PID_ENV`] と
+/// [`PANE_ENV`] の両方が要る (`--to` は無い＝別の窓のペイン id と取り違えない)。
+/// 片方でも無いのは、v0.1.51 より前の窓／ccnest の外から打たれた場合。
+pub fn resolve_close_target(
+    pid_env: Option<&str>,
+    pane_env: Option<&str>,
+) -> Result<(u32, PaneId)> {
+    let present = |v: Option<&str>| {
+        v.map(str::trim)
+            .filter(|v| !v.is_empty())
+            .map(str::to_string)
+    };
+    let (Some(pid), Some(pane)) = (present(pid_env), present(pane_env)) else {
+        return Err(anyhow!(
+            "このペインには目印 ({PANE_ENV}) がありません。ccnest v0.1.51 以降で開いた窓のタブの中から打ってください (それより古い窓は開き直してください)"
+        ));
+    };
+    let pid = pid
+        .parse::<u32>()
+        .map_err(|e| anyhow!("{PID_ENV} が pid ではありません ({pid:?}): {e}"))?;
+    let pane = pane
+        .parse::<PaneId>()
+        .map_err(|e| anyhow!("{PANE_ENV} がペイン id ではありません ({pane:?}): {e}"))?;
+    Ok((pid, pane))
+}
+
+/// 純粋 (窓側): 閉じる予約を受け付けてよいか。`pane_exists` はそのペインが窓に
+/// あるか、`tab_count` は窓のタブ数。最後の 1 タブは閉じない (閉じると ccnest 自体が終わる)。
+pub fn check_close(pane_exists: bool, tab_count: usize) -> Result<(), String> {
+    if !pane_exists {
+        return Err(
+            "そのペインはこの窓にありません (すでに閉じたか、別の窓のペインです)".to_string(),
+        );
+    }
+    if tab_count <= 1 {
+        return Err("この窓の最後のタブです (閉じると ccnest が終わるので閉じません)".to_string());
+    }
+    Ok(())
+}
+
+/// 純粋 (窓側): 閉じる予約を積む。同じペインへの 2 回目は期限を置き換える (後の指定が勝つ)。
+pub fn schedule_close(pending: &mut Vec<(PaneId, Instant)>, pane: PaneId, due: Instant) {
+    match pending.iter_mut().find(|(p, _)| *p == pane) {
+        Some(entry) => entry.1 = due,
+        None => pending.push((pane, due)),
+    }
+}
+
+/// 純粋 (窓側): 期限が来た予約を `pending` から取り出して返す。
+pub fn take_due_closes(pending: &mut Vec<(PaneId, Instant)>, now: Instant) -> Vec<PaneId> {
+    let (due, rest): (Vec<_>, Vec<_>) = pending.drain(..).partition(|(_, at)| *at <= now);
+    *pending = rest;
+    due.into_iter().map(|(p, _)| p).collect()
 }
 
 /// 純粋: 依頼されたセッションを「開く」と「開かない (理由つき)」に分ける。
@@ -202,6 +289,18 @@ pub fn write_reply(path: &Path, reply: &Reply) -> Result<()> {
 /// いない／この機能より前の版) なら即エラー。`timeout` までに返事が無ければ
 /// 依頼を回収してエラー。
 pub fn send(dir: &Path, specs: &[ResumeSpec], timeout: Duration) -> Result<Reply> {
+    send_request(
+        dir,
+        &Request {
+            resumes: specs.to_vec(),
+            close: None,
+        },
+        timeout,
+    )
+}
+
+/// [`send`] の本体。依頼 1 件 (タブを足す／閉じる) を置いて返事を待つ。
+pub fn send_request(dir: &Path, request_body: &Request, timeout: Duration) -> Result<Reply> {
     if !dir.is_dir() {
         return Err(anyhow!(
             "宛先の ccnest が見つかりません (動いていないか、--add に対応していない古い版です): {}",
@@ -222,9 +321,7 @@ pub fn send(dir: &Path, specs: &[ResumeSpec], timeout: Duration) -> Result<Reply
     let request = dir.join(format!("{stem}.json"));
     let tmp = dir.join(format!("{stem}.json.tmp"));
     let done = dir.join(format!("{stem}.done"));
-    let body = serde_json::to_vec(&Request {
-        resumes: specs.to_vec(),
-    })?;
+    let body = serde_json::to_vec(request_body)?;
     fs::write(&tmp, body).with_context(|| format!("write {}", tmp.display()))?;
     fs::rename(&tmp, &request).with_context(|| format!("rename to {}", request.display()))?;
 
@@ -276,6 +373,22 @@ pub fn format_reply(pid: u32, specs: &[ResumeSpec], reply: &Reply) -> String {
         out.push_str(&format!("\n  スキップ  {}  ({why})", s.session_id));
     }
     out
+}
+
+/// `--close` の返事の表示。受け付けたら 1 行、断られたら理由 (Err 側で返す)。
+pub fn format_close_reply(pid: u32, reply: &Reply) -> Result<String> {
+    if let Some(e) = &reply.error {
+        return Err(anyhow!("ccnest {pid}: タブを閉じられません: {e}"));
+    }
+    let Some(close) = &reply.close else {
+        return Err(anyhow!(
+            "ccnest {pid}: 返事に閉じる予約がありません (--close に対応していない古い版かもしれません)"
+        ));
+    };
+    Ok(format!(
+        "ccnest {pid}: このタブ「{}」を {} 秒後に閉じます (Ctrl+Shift+T で開き直せます)",
+        close.tab_title, close.after_secs
+    ))
 }
 
 /// その pid のプロセスが動いているか。Windows 以外は調べず true
@@ -461,6 +574,7 @@ mod tests {
         let req = |s: &str| {
             serde_json::to_string(&Request {
                 resumes: vec![spec(s, None)],
+                ..Request::default()
             })
             .unwrap()
         };
@@ -636,6 +750,7 @@ mod tests {
                 },
             ],
             error: None,
+            close: None,
         };
         let text = format_reply(15416, &specs, &reply);
         let lines: Vec<&str> = text.lines().collect();
@@ -643,6 +758,185 @@ mod tests {
         assert!(lines[1].contains(A) && lines[1].contains("v4.25"));
         assert!(lines[2].contains(B) && lines[2].contains("すでに開いています"));
         assert!(lines[3].contains(C) && lines[3].contains("会話ログがありません"));
+    }
+
+    /// `--close` の宛先は環境変数 2 つの組。どちらか欠ける・数字でないはエラーで、
+    /// 欠けたときのメッセージは「目印」と版を伝える。
+    #[test]
+    fn resolve_close_target_needs_both_envs() {
+        assert_eq!(
+            resolve_close_target(Some("100"), Some("7")).unwrap(),
+            (100, 7)
+        );
+        assert_eq!(
+            resolve_close_target(Some(" 100 "), Some(" 7 ")).unwrap(),
+            (100, 7)
+        );
+        for (pid, pane) in [
+            (None, None),
+            (Some("100"), None),
+            (None, Some("7")),
+            (Some("100"), Some("")),
+            (Some(""), Some("7")),
+        ] {
+            let msg = resolve_close_target(pid, pane).unwrap_err().to_string();
+            assert!(msg.contains("目印") && msg.contains("v0.1.51"), "{msg}");
+        }
+        assert!(resolve_close_target(Some("abc"), Some("7")).is_err());
+        assert!(resolve_close_target(Some("100"), Some("x")).is_err());
+        assert!(resolve_close_target(Some("100"), Some("-1")).is_err());
+    }
+
+    /// 窓側の判定: ペインが無い・最後の 1 タブは断る。
+    #[test]
+    fn check_close_refuses_unknown_pane_and_last_tab() {
+        assert!(check_close(true, 2).is_ok());
+        assert!(check_close(false, 3)
+            .unwrap_err()
+            .contains("この窓にありません"));
+        assert!(check_close(true, 1).unwrap_err().contains("最後のタブ"));
+        assert!(check_close(true, 0).is_err());
+        // ペインが無いことを先に言う。
+        assert!(check_close(false, 1)
+            .unwrap_err()
+            .contains("この窓にありません"));
+    }
+
+    /// 予約: 同じペインへの 2 回目は期限を置き換える (後の指定が勝つ)。
+    #[test]
+    fn schedule_close_replaces_the_deadline_for_the_same_pane() {
+        let t0 = Instant::now();
+        let mut pending = Vec::new();
+        schedule_close(&mut pending, 3, t0 + Duration::from_secs(8));
+        schedule_close(&mut pending, 4, t0 + Duration::from_secs(5));
+        schedule_close(&mut pending, 3, t0 + Duration::from_secs(2));
+        assert_eq!(pending.len(), 2);
+        assert_eq!(pending[0], (3, t0 + Duration::from_secs(2)));
+    }
+
+    /// 期限が来たものだけ取り出し、残りは残す。
+    #[test]
+    fn take_due_closes_returns_only_due_panes() {
+        let t0 = Instant::now();
+        let mut pending = vec![
+            (1, t0 + Duration::from_secs(5)),
+            (2, t0 + Duration::from_secs(1)),
+            (3, t0 + Duration::from_secs(9)),
+        ];
+        assert!(take_due_closes(&mut pending, t0).is_empty());
+        assert_eq!(pending.len(), 3);
+        let due = take_due_closes(&mut pending, t0 + Duration::from_secs(5));
+        assert_eq!(due, vec![1, 2]);
+        assert_eq!(pending, vec![(3, t0 + Duration::from_secs(9))]);
+    }
+
+    /// 閉じる依頼・返事の JSON は往復でき、足す依頼 (旧形式) も欠けた項目を既定値で読める。
+    #[test]
+    fn close_request_and_reply_json_round_trip() {
+        let req = Request {
+            close: Some(CloseRequest {
+                pane: 12,
+                after_secs: 5,
+            }),
+            ..Request::default()
+        };
+        let text = serde_json::to_string(&req).unwrap();
+        assert_eq!(serde_json::from_str::<Request>(&text).unwrap(), req);
+        // 旧形式 (resumes だけ) は close 無しで読める。
+        let old: Request =
+            serde_json::from_str(&format!(r#"{{"resumes":[{{"session_id":"{A}"}}]}}"#)).unwrap();
+        assert_eq!(old.close, None);
+        assert_eq!(old.resumes.len(), 1);
+        // 足す依頼を JSON にしても close は出ない (古い窓へ余計な項目を送らない)。
+        let add = serde_json::to_string(&Request {
+            resumes: vec![spec(A, None)],
+            ..Request::default()
+        })
+        .unwrap();
+        assert!(!add.contains("close"));
+
+        let reply = Reply {
+            close: Some(CloseReply {
+                after_secs: 5,
+                tab_title: "Affilia P1".to_string(),
+            }),
+            ..Reply::default()
+        };
+        let back: Reply = serde_json::from_str(&serde_json::to_string(&reply).unwrap()).unwrap();
+        assert_eq!(back, reply);
+    }
+
+    /// 送る → 窓側が close 依頼を拾って返事 → 返事が届く (`send_request`)。
+    #[test]
+    fn send_request_round_trips_a_close_request() {
+        let tmp = tempfile::tempdir().unwrap();
+        let d = tmp.path().to_path_buf();
+        let server_dir = d.clone();
+        let server = std::thread::spawn(move || {
+            for _ in 0..200 {
+                if let Some(inc) = take_requests(&server_dir).into_iter().next() {
+                    let req = inc.request.unwrap();
+                    let close = req.close.unwrap();
+                    let reply = Reply {
+                        close: Some(CloseReply {
+                            after_secs: close.after_secs,
+                            tab_title: "t".to_string(),
+                        }),
+                        ..Reply::default()
+                    };
+                    write_reply(&inc.reply_path, &reply).unwrap();
+                    return close;
+                }
+                std::thread::sleep(Duration::from_millis(20));
+            }
+            panic!("server saw no request");
+        });
+        let reply = send_request(
+            &d,
+            &Request {
+                close: Some(CloseRequest {
+                    pane: 9,
+                    after_secs: 4,
+                }),
+                ..Request::default()
+            },
+            Duration::from_secs(5),
+        )
+        .unwrap();
+        let seen = server.join().unwrap();
+        assert_eq!(
+            seen,
+            CloseRequest {
+                pane: 9,
+                after_secs: 4
+            }
+        );
+        assert_eq!(reply.close.unwrap().after_secs, 4);
+        assert_eq!(fs::read_dir(&d).unwrap().count(), 0);
+    }
+
+    /// 返事の表示: 受け付けたら 1 行 (秒数とタブ名)、断られたら理由つきエラー。
+    #[test]
+    fn format_close_reply_shows_the_plan_or_the_refusal() {
+        let ok = Reply {
+            close: Some(CloseReply {
+                after_secs: 10,
+                tab_title: "Affilia P1".to_string(),
+            }),
+            ..Reply::default()
+        };
+        let text = format_close_reply(15416, &ok).unwrap();
+        assert!(text.contains("15416") && text.contains("10 秒後") && text.contains("Affilia P1"));
+        assert!(text.contains("Ctrl+Shift+T"));
+        let refused = Reply {
+            error: Some("この窓の最後のタブです".to_string()),
+            ..Reply::default()
+        };
+        assert!(format_close_reply(1, &refused)
+            .unwrap_err()
+            .to_string()
+            .contains("最後のタブ"));
+        assert!(format_close_reply(1, &Reply::default()).is_err());
     }
 
     /// 返事の JSON は欠けた項目を既定値で読める (版が違っても落ちない)。
@@ -663,3 +957,7 @@ mod tests {
 //                       drop), take_requests / plan_requests / write_reply on
 //                       the window side, resolve_target / send / format_reply
 //                       on the sender side.
+// ver0.2 - 2026-11-23 - `ccnest --close [--after <s>]`: Request.close (CloseRequest) /
+//                       Reply.close (CloseReply), PANE_ENV (`CCNEST_PANE`), resolve_close_target,
+//                       check_close / schedule_close / take_due_closes (window side, pure),
+//                       send_request (send() wraps it), format_close_reply.

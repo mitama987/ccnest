@@ -257,6 +257,8 @@ pub fn run_event_loop<B: Backend>(term: &mut Terminal<B>, mut app: App) -> Resul
             app.expire_notice(Instant::now());
             // `ccnest --add` で外から届いた依頼を開き待ちに積む (下で 1 つ開く)。
             app.accept_remote_requests();
+            // `ccnest --close` で予約されたタブのうち、期限が来たものを閉じる。
+            app.process_pending_closes(Instant::now());
             // `--resume` の残りを 1 tick 1 タブずつ開く。失敗はステータス行に
             // 出して次へ (1 件の失敗で残りを止めない)。
             if let Err(e) = app.spawn_next_resume() {
@@ -5949,3 +5951,5 @@ mod tests {
 //                        ignored there. The tick expires the notice. The
 //                        trace adds stopped= kept= woken= and
 //                        `wake_pane id=N woke=..`.
+// ver0.27 - 2026-11-23 - The 2 s tick calls app.process_pending_closes() right after
+//                        accept_remote_requests() (`ccnest --close`).

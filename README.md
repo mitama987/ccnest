@@ -72,6 +72,27 @@ cut off mid-work (a reboot, for example):
 
 Sessions without these options just open, as before.
 
+### Close your own tab from inside it
+
+```sh
+ccnest --close                 # closes the tab this command was typed in, after 5 seconds
+ccnest --close --after 10      # after 10 seconds (0 to 600)
+```
+
+For Claude to close its own old tab after it has opened a new one. Typed in a
+pane's shell (for example Claude's shell tool), `--close` closes the tab that
+holds that pane, the same way as middle-clicking it: its process tree ends and
+`Ctrl+Shift+T` opens it again. It returns at once; the tab closes `--after`
+seconds later (the window checks on its 2 second tick, so up to 2 seconds
+more), which leaves time for the last reply to show. The pane is found through
+`CCNEST_PID` and `CCNEST_PANE`, which ccnest sets for everything it starts in a
+pane (v0.1.51 and later); there is no `--to`, so another window's pane can not
+be closed by mistake. Only that pane's tab closes, never any other. It is
+refused, with a reason and exit code 1, when the window has only this one tab
+(closing it would end ccnest), when the pane is not in the window any more, or
+when the environment variables are missing (a window started before v0.1.51, or
+a shell outside ccnest: restart that window first).
+
 ### Add tabs to a running window
 
 ```sh
@@ -450,3 +471,4 @@ ver0.1.47 - 2026-11-21 - Working tabs are parked small on the right. A tab that 
 ver0.1.48 - 2026-11-21 - Put a tab on hold with `Alt+C`. The active tab moves to the far right of the tab bar, behind a second divider, and shrinks to a grey dot and its number (`●5`); the front moves on to the neighbouring tab (right neighbour in the same group, else the left one, else the nearest tab that is not on hold). A tab on hold ignores its status: it stays a grey dot while Claude works or finishes in it, until you open it and press `Alt+C` again, which puts it back at its old place. The front tab always shows its name, so a held tab you click reads `● 5:name`. `Ctrl+C` is not used for this on purpose (it interrupts Claude; twice replaces it with a shell). Holds are stored per session id in `%APPDATA%\ccnest\tab-holds.json` (all panes of the tab; 500 entries max) and come back after Ctrl+Shift+T, after the window is closed, and with `--resume` / `--add`. `CCNEST_TAB_HOLDS` overrides the path. Dragging still reorders within a group only; with `CCNEST_TAB_GROUP=off` a held tab is drawn small in place. CCNEST_INPUT_TRACE logs `hold_tab idx=N held=true|false active=M`. E2E `scripts/e2e/hold-tab.ps1` (`-Off`, `-Wt`). The tab E2E scripts (`hold-tab`, `park-working-tabs`, `drag-reorder-tab`, `dblclick-rename-tab`, `reopen-tab`) now start their throw-away ccnest with no console window at all (CREATE_NO_WINDOW), so a run shows nothing and never takes the keyboard focus.
 ver0.1.49 - 2026-11-21 - Holding a tab frees its memory. `Alt+C` now also stops the Claude of each pane in the tab when that loses nothing: the pane is not working, has no background work (footer pills such as `1 shell`, or `Waiting for … to finish`, even when the tab shows 🟨 because a decision is pending), shows an empty input box (no permission / question dialog, no half-written prompt) and was not sent a key in the last 5 seconds. The screen is read at that moment, not from the 2-second status cache. Anything else is left running. The bottom line of the status bar says which happened for 8 seconds. A stopped pane keeps its last screen and its frame title says so; opening the tab or passing through it with Alt+←/→ starts nothing. A key typed into the pane (dropped), or releasing the hold, starts Claude again with `--resume <session id>` in the same pane; `Ctrl+C` is ignored there. A held session opened with `--resume` / `--add` and no first prompt starts without a process. `CCNEST_HOLD_SLEEP=off` keeps held tabs running. Measured with the real Claude Code 2.1.330: 650 MB freed for one tab, about 1 MB (the pane's pseudo console host) left. CCNEST_INPUT_TRACE logs `hold_tab … stopped=N kept=N woken=N` and `wake_pane id=N woke=..`. E2E `scripts/e2e/hold-sleep.ps1` (`-Off`; fake claude that draws Claude Code's screen shapes) and `hold-sleep-real.ps1` (the real claude, once).
 ver0.1.50 - 2026-11-21 - The hints for a stopped (held) pane name the key that wakes it: the frame title says `保留中: Claude 停止・Alt+C で再開`, and the status-bar notice says `もう一度 Alt+C で続きから再開`. Behaviour is unchanged (`Alt+C` releases the hold and wakes; typing into the pane also wakes).
+ver0.1.51 - 2026-11-23 - `ccnest --close [--after <seconds>]` closes the tab of the pane the command was typed in, so Claude can close its own old tab after opening a new one with `--add`. ccnest now gives every pane's children `CCNEST_PANE=<pane id>` next to `CCNEST_PID`; the command sends a close request (same request-file channel as `--add`) and returns at once, and the window closes the tab `--after` seconds later (default 5, 0 to 600; checked on the 2 s tick) with `close_tab`, so the process tree ends and `Ctrl+Shift+T` reopens it. Only the tab that holds the pane closes; the window's last tab, an unknown pane and missing `CCNEST_PANE` / `CCNEST_PID` (windows before v0.1.51) are refused at once with exit code 1. A second `--close` for the same pane replaces the deadline. E2E `scripts/e2e/close-tab.ps1` (no console window).

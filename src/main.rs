@@ -27,6 +27,10 @@ fn main() -> Result<()> {
         // 新しい窓は開かない。動いている窓へ依頼を送って結果を表示するだけ。
         std::process::exit(run_add(&cli));
     }
+    if cli.close {
+        // こちらも新しい窓は開かない。打ったペインのあるタブを閉じてもらう。
+        std::process::exit(run_close(&cli));
+    }
     let cwd = cli
         .cwd
         .unwrap_or_else(|| std::env::current_dir().expect("current_dir"));
@@ -87,6 +91,42 @@ fn send_add(cli: &Cli) -> Result<(String, bool)> {
         remote::format_reply(pid, &cli.resumes, &reply),
         reply.all_present(),
     ))
+}
+
+/// `ccnest --close [--after <秒>]`: このコマンドを打ったペイン (環境変数 `CCNEST_PID` /
+/// `CCNEST_PANE`) のあるタブを、動いている窓に `--after` 秒後 (既定 5 秒) に閉じてもらう。
+/// 返事は予約の受け付けまで (待たない)＝最後の返事が画面に出てからタブが閉じる。
+/// 終了コードは受け付けられたら 0、それ以外 (目印なし・古い窓・最後のタブなど) は 1。
+fn run_close(cli: &Cli) -> i32 {
+    match send_close(cli) {
+        Ok(text) => {
+            println!("{text}");
+            0
+        }
+        Err(e) => {
+            eprintln!("ccnest --close: {e:#}");
+            1
+        }
+    }
+}
+
+fn send_close(cli: &Cli) -> Result<String> {
+    let pid_env = std::env::var(remote::PID_ENV).ok();
+    let pane_env = std::env::var(remote::PANE_ENV).ok();
+    let (pid, pane) = remote::resolve_close_target(pid_env.as_deref(), pane_env.as_deref())?;
+    let root = remote::requests_root().context("no data dir for ccnest requests")?;
+    if !remote::pid_alive(pid) {
+        anyhow::bail!("pid {pid} の ccnest は動いていません");
+    }
+    let request = remote::Request {
+        close: Some(remote::CloseRequest {
+            pane,
+            after_secs: cli.after.unwrap_or(ccnest::cli::DEFAULT_CLOSE_AFTER_SECS),
+        }),
+        ..remote::Request::default()
+    };
+    let reply = remote::send_request(&remote::inbox_dir(&root, pid), &request, ADD_TIMEOUT)?;
+    remote::format_close_reply(pid, &reply)
 }
 
 /// 窓側は 2 秒 tick で拾う。tick が重い瞬間 (git の走査など) を見込んで余裕を持つ。
@@ -162,3 +202,6 @@ fn write_crash_log(info: &std::panic::PanicHookInfo<'_>) -> Option<PathBuf> {
 //                       running window (remote::send) and exits without
 //                       entering raw mode; exit code 0 only when every
 //                       requested session ends up as a tab there.
+// ver0.5 - 2026-11-23 - `--close [--after <s>]`: run_close() asks the running window
+//                       (CCNEST_PID + CCNEST_PANE) to close the tab of the pane the
+//                       command was typed in; the window schedules it and replies at once.

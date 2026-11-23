@@ -105,6 +105,7 @@ impl Pane {
             waker: Some(waker.clone()),
         };
         let (pty, command, claude_running) = spawn_claude(
+            id,
             cwd,
             session_id,
             start,
@@ -236,7 +237,7 @@ impl Pane {
             stamp: self.output_stamp.clone(),
             waker: Some(self.waker.clone()),
         };
-        let (new_pty, cmd_label) = spawn_shell(&self.cwd, Arc::clone(&new_parser), hooks)?;
+        let (new_pty, cmd_label) = spawn_shell(self.id, &self.cwd, Arc::clone(&new_parser), hooks)?;
         self.pty = Some(new_pty);
         self.parser = new_parser;
         // 新しい PTY (40x140) / parser (24x80) は矩形と食い違うので、次の描画後の
@@ -307,6 +308,8 @@ mod tests {
 }
 
 // Version History
+// ver0.6 - 2026-11-23 - Pane::spawn_with / respawn_as_shell pass the pane id to spawn_claude /
+//                       spawn_shell so the child gets `CCNEST_PANE=<id>` (`ccnest --close`).
 // ver0.5 - 2026-11-21 - DORMANT_HINT names the key that wakes the pane (Alt+C;
 //                       typing into the pane also wakes it).
 // ver0.4 - 2026-11-21 - A pane can be asleep: `pty` is an Option, None = no child

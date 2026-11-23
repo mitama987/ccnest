@@ -14,7 +14,7 @@ use crate::pane::status::{
     aggregate_status, detect_status, is_safe_to_stop, sanitize_task, screen_text, ClaudeStatus,
 };
 use crate::pane::{Pane, PaneId};
-use crate::remote::{self, Inbox, Reply};
+use crate::remote::{self, CloseReply, CloseRequest, Inbox, Reply};
 use crate::sidebar::SidebarState;
 use crate::wake::{WakeRx, WakeTx};
 
@@ -385,6 +385,9 @@ pub struct App {
     /// `ccnest --add` の依頼が届くフォルダ (`remote::Inbox`)。作れなかったら
     /// None (依頼を受けないだけ)。App と一緒に drop されてフォルダが消える。
     inbox: Option<Inbox>,
+    /// `ccnest --close` で予約された「このペインのあるタブを閉じる」(ペイン, 期限)。
+    /// 2 秒 tick の `process_pending_closes` が期限の来たものを閉じる。
+    pending_closes: Vec<(PaneId, Instant)>,
     /// イベントループを起こすチャネルの送信側。ペイン生成時に reader へ配る。
     wake_tx: WakeTx,
     /// 受信側。`run_event_loop` が起動時に `take_wake_rx` で持っていく。
@@ -593,6 +596,7 @@ impl App {
             pending_resumes,
             closed_tabs: Vec::new(),
             inbox: Inbox::open_own(),
+            pending_closes: Vec::new(),
             wake_tx,
             wake_rx: Some(wake_rx),
         })
@@ -654,6 +658,7 @@ impl App {
         let mut added = 0;
         for inc in incoming {
             let reply = match inc.request {
+                Ok(req) if req.close.is_some() => self.accept_close(req.close.unwrap()),
                 Ok(req) => {
                     // シェルに切り戻したペインのセッションは「開いている」に数えない。
                     let open: HashSet<Uuid> = self
@@ -673,6 +678,7 @@ impl App {
                         accepted: accepted.iter().map(|r| r.session_id).collect(),
                         skipped,
                         error: None,
+                        close: None,
                     };
                     self.pending_resumes.extend(accepted);
                     reply
@@ -689,6 +695,69 @@ impl App {
             self.status = Some(format!("タブを追加: {added} 件"));
         }
         true
+    }
+
+    /// `ccnest --close` の依頼 1 件を受け付ける。そのペインが窓にあり、閉じても窓に
+    /// タブが残るなら期限を積み、返事に秒数とタブ名を入れる。断るときは `error` に理由。
+    fn accept_close(&mut self, close: CloseRequest) -> Reply {
+        let idx = self.tab_index_of_pane(close.pane);
+        if let Err(e) = remote::check_close(idx.is_some(), self.tabs.len()) {
+            return Reply {
+                error: Some(e),
+                ..Reply::default()
+            };
+        }
+        let Some(idx) = idx else {
+            return Reply::default();
+        };
+        let tab_title = self.tab_display_name(idx);
+        remote::schedule_close(
+            &mut self.pending_closes,
+            close.pane,
+            Instant::now() + Duration::from_secs(close.after_secs),
+        );
+        self.set_notice(format!(
+            "{} 秒後にタブ「{tab_title}」を閉じます",
+            close.after_secs
+        ));
+        Reply {
+            close: Some(CloseReply {
+                after_secs: close.after_secs,
+                tab_title,
+            }),
+            ..Reply::default()
+        }
+    }
+
+    /// 期限の来た `--close` の予約を実行する (タブバー中クリックと同じ [`App::close_tab`]
+    /// なので、子プロセス木ごと終了し、Ctrl+Shift+T で開き直せる)。ペインがもう無い
+    /// (手で閉じた) 予約は捨てる。最後のタブは閉じない。閉じたら true。
+    /// イベントループの 2 秒 tick からのみ呼ぶ。
+    pub fn process_pending_closes(&mut self, now: Instant) -> bool {
+        let mut closed = false;
+        for pane in remote::take_due_closes(&mut self.pending_closes, now) {
+            let Some(idx) = self.tab_index_of_pane(pane) else {
+                continue;
+            };
+            if self.tabs.len() <= 1 {
+                self.set_notice("最後のタブなので閉じませんでした".to_string());
+                continue;
+            }
+            let title = self.tab_display_name(idx);
+            self.close_tab(idx);
+            self.set_notice(format!(
+                "タブ「{title}」を閉じました (Ctrl+Shift+T で開き直せます)"
+            ));
+            closed = true;
+        }
+        closed
+    }
+
+    /// `pane` が属するタブの番号。どのタブにも無ければ None。
+    fn tab_index_of_pane(&self, pane: PaneId) -> Option<usize> {
+        self.tabs
+            .iter()
+            .position(|t| t.layout.leaves().contains(&pane))
     }
 
     /// 入力ポンプスレッドなどに配る送信側。
@@ -2181,3 +2250,7 @@ mod tests {
 //                        CCNEST_HOLD_SLEEP=off turns the feature off.
 // ver0.23 - 2026-11-21 - hold_notice names the key that wakes the stopped
 //                        Claude ("もう一度 Alt+C で続きから再開").
+// ver0.24 - 2026-11-23 - `ccnest --close`: accept_remote_requests() hands a close request to
+//                        accept_close() (pane must be in the window and not its last tab),
+//                        which queues it in pending_closes; process_pending_closes() (2 s tick)
+//                        closes the tab with close_tab() once the deadline passes.
