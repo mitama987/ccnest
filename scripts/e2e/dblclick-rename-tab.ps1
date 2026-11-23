@@ -147,6 +147,9 @@ public static class K {
       'altright' { [K]::Key(0x27, [char]0, 0x102) }
       'altleft' { [K]::Key(0x25, [char]0, 0x102) }
       'sleep' { Start-Sleep -Milliseconds $n[0] }
+      # wheelup:c,r,count = turn the wheel up (back into the history) count notches at (c, r).
+      # Buttons high word = +120 per notch (up), flags 4 = MOUSE_WHEELED.
+      'wheelup' { foreach ($i in 1..$n[2]) { [K]::Mouse($n[0], $n[1], [uint32]0x00780000, 4); Start-Sleep -Milliseconds 60 } }
     }
     Start-Sleep -Milliseconds 150
   }

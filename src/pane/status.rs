@@ -446,6 +446,38 @@ pub fn is_safe_to_stop(screen_text: &str) -> bool {
         && at_empty_prompt(screen_text)
 }
 
+/// 「返答は終わったが、まだ見ていない」の目印を次の tick でどうするか。
+///
+/// 裏でシェル・エージェントが動いていると判定は [`ClaudeStatus::Background`]
+/// (🟢) になるが、返答 (報告) 自体は終わっていてユーザーが読む番のことが多い
+/// (2026-11-23 のゆうさんのスクショ: `1 shell` が残った報告のタブが 🟢)。
+/// そこで返答が終わった瞬間 (Busy → Background) にそのタブを見ていなければ
+/// 目印を立て、立っている間は 🟨 で出す ([`displayed_status`])。
+/// 一度そのタブを開いたら下ろし、裏が動いている間は 🟢 に戻す (ユーザー決定
+/// 2026-11-23「見るまでオレンジ」)。
+///
+/// - `prev`: 前回の tick の判定 (目印で 🟨 にする前の値)
+/// - `now`: 今回の判定
+/// - `unseen`: 前回までの目印
+/// - `viewing`: このペインが今見ているタブにあるか
+///
+/// 判定が Background 以外になったら下ろす (Busy = 続きを始めた・
+/// NeedsAttention = もともと 🟨)。前回の状態が Busy でない Background
+/// (窓を開いた直後・再開したタブ) では立てない。
+pub fn unseen_turn_end(prev: ClaudeStatus, now: ClaudeStatus, unseen: bool, viewing: bool) -> bool {
+    !viewing && now == ClaudeStatus::Background && (unseen || prev == ClaudeStatus::Busy)
+}
+
+/// タブ・サイドバーに出す状態。「返答は終わったが、まだ見ていない」の目印
+/// ([`unseen_turn_end`]) が立っていれば対応待ち (🟨)、無ければ判定どおり。
+pub fn displayed_status(detected: ClaudeStatus, unseen: bool) -> ClaudeStatus {
+    if unseen {
+        ClaudeStatus::NeedsAttention
+    } else {
+        detected
+    }
+}
+
 /// タブ配下の複数ペインの状態を 1 つ (タブのマーカー) に畳む。
 /// 優先度: NeedsAttention > Busy > Background > Idle (1 ペインでも対応待ちなら 🟨)。
 pub fn aggregate_status(statuses: impl IntoIterator<Item = ClaudeStatus>) -> ClaudeStatus {
@@ -520,6 +552,58 @@ pub fn sanitize_task(raw: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // ---- unseen_turn_end / displayed_status ----
+
+    use ClaudeStatus::{Background, Busy, Idle, NeedsAttention};
+
+    // 見ていないタブで返答が終わり、裏の仕事が残った → 見るまで 🟨。
+    #[test]
+    fn turn_end_with_background_while_away_is_unseen() {
+        assert!(unseen_turn_end(Busy, Background, false, false));
+        assert_eq!(displayed_status(Background, true), NeedsAttention);
+    }
+
+    // そのタブを見ている間に返答が終わったなら、もう見た扱い (🟢 のまま)。
+    #[test]
+    fn turn_end_while_viewing_is_seen() {
+        assert!(!unseen_turn_end(Busy, Background, false, true));
+        assert_eq!(displayed_status(Background, false), Background);
+    }
+
+    // 一度立ったら、開くまで裏の仕事が続くかぎり立ったまま。開いたら下りる。
+    #[test]
+    fn unseen_stays_until_viewed() {
+        assert!(unseen_turn_end(Background, Background, true, false));
+        assert!(!unseen_turn_end(Background, Background, true, true));
+        // 開いたあとに別のタブへ移っても、もう 🟨 には戻らない。
+        assert!(!unseen_turn_end(Background, Background, false, false));
+    }
+
+    // 裏の仕事が終わって Claude が続きを始めた／対応待ちになったら下ろす
+    // (Busy は 🟢、NeedsAttention はもともと 🟨)。
+    #[test]
+    fn unseen_clears_when_status_moves_on() {
+        assert!(!unseen_turn_end(Background, Busy, true, false));
+        assert!(!unseen_turn_end(Background, NeedsAttention, true, false));
+        assert!(!unseen_turn_end(Background, Idle, true, false));
+    }
+
+    // 前回の状態が分からない (窓を開いた直後・再開したタブ) ときは立てない
+    // (今までどおり 🟢)。前回が対応待ちから裏の仕事に変わることは普通は無い。
+    #[test]
+    fn background_without_turn_end_is_not_unseen() {
+        assert!(!unseen_turn_end(Idle, Background, false, false));
+        assert!(!unseen_turn_end(NeedsAttention, Background, false, false));
+    }
+
+    // 立っていなければ判定どおりに出す。
+    #[test]
+    fn displayed_status_passes_through_when_seen() {
+        for s in [Idle, Busy, Background, NeedsAttention] {
+            assert_eq!(displayed_status(s, false), s);
+        }
+    }
 
     // ---- detect_status ----
 

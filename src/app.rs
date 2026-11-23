@@ -11,7 +11,8 @@ use crate::claude::usage::{UsageCell, UsageLabel, UsageSnapshot};
 use crate::cli::ResumeSpec;
 use crate::pane::grid::{Direction, Layout};
 use crate::pane::status::{
-    aggregate_status, detect_status, is_safe_to_stop, sanitize_task, screen_text, ClaudeStatus,
+    aggregate_status, detect_status, displayed_status, is_safe_to_stop, sanitize_task, screen_text,
+    unseen_turn_end, ClaudeStatus,
 };
 use crate::pane::{Pane, PaneId};
 use crate::remote::{self, CloseReply, CloseRequest, Inbox, Reply};
@@ -785,6 +786,12 @@ impl App {
         let resumes_done = self.pending_resumes.is_empty();
         // 開発用 (CCNEST_STATUS_TRACE): 判定結果と、判定に使った画面テキストを控える。
         let mut trace = status_trace_path().map(|_| String::new());
+        // 今見ているタブのペイン (「返答が終わったのを見たか」の判定用)。
+        let viewing: HashSet<PaneId> = self
+            .tabs
+            .get(self.active_tab)
+            .map(|t| t.layout.leaves().into_iter().collect())
+            .unwrap_or_default();
         for (id, pane) in self.panes.iter_mut() {
             // 眠っているペイン (プロセスなし) は、最後の状態・タスク名のまま据え置く。
             if pane.asleep() {
@@ -795,6 +802,8 @@ impl App {
                 // shell ペインに状態色・タスク名は出さない
                 // (focused_model_label と同じゲート)。
                 pane.status = ClaudeStatus::Idle;
+                pane.detected = ClaudeStatus::Idle;
+                pane.unseen_turn_end = false;
                 pane.task = None;
                 continue;
             }
@@ -804,28 +813,32 @@ impl App {
             // 抑止の前提を崩す (ホイールで Claude 履歴が開く回帰の一因)。
             // try_lock で取れなければ前回の status / task を据え置き、次 tick
             // (2 秒後) に再試行する (表示専用なので staleness は無害)。
-            let Ok(p) = pane.parser.try_lock() else {
+            let Ok(mut p) = pane.parser.try_lock() else {
                 continue;
             };
-            let screen = p.screen();
-            // スクロールバック閲覧中は過去の画面が返るため判定しない (前回の
-            // 状態を据え置き、最下部へ戻った次の tick で回復する)。
+            // 履歴を見ている途中でも最下部の画面で判定する (live_screen_text)。
             // 画面の文字は行ごとに取る (contents() は最終列まで埋まった行を
             // 次の行とつなぐ。status::screen_text 参照)。
-            if screen.scrollback() == 0 {
-                let (_, cols) = screen.size();
-                let text = screen_text(screen.rows(0, cols));
-                pane.status = detect_status(&text);
-                if let Some(t) = trace.as_mut() {
-                    t.push_str(&format!(
-                        "=== pane {id} status={:?} ===
-{text}
-",
-                        pane.status
-                    ));
-                }
+            let scroll = p.screen().scrollback();
+            let text = live_screen_text(&mut p);
+            let detected = detect_status(&text);
+            // 返答が終わった瞬間に見ていなかったタブは、裏が動いていても
+            // 開くまで 🟨 (status::unseen_turn_end)。
+            pane.unseen_turn_end = unseen_turn_end(
+                pane.detected,
+                detected,
+                pane.unseen_turn_end,
+                viewing.contains(id),
+            );
+            pane.detected = detected;
+            pane.status = displayed_status(detected, pane.unseen_turn_end);
+            if let Some(t) = trace.as_mut() {
+                t.push_str(&format!(
+                    "=== pane {id} status={:?} detected={:?} unseen={} scroll={scroll} ===\n{text}\n",
+                    pane.status, detected, pane.unseen_turn_end
+                ));
             }
-            let title_task = sanitize_task(screen.title());
+            let title_task = sanitize_task(p.screen().title());
             drop(p);
             // 人が付けた名前 > 日本語の名前 > OSC タイトル (英語) > 最後の
             // ユーザー発話 (claude::jp_title::pick_task)。
@@ -1509,6 +1522,27 @@ fn direction_score(from: &Rect, to: &Rect, dir: Direction) -> Option<i64> {
 /// 状態判定のテスト文字列を実物から起こすため (v0.1.31〜33 は conhost 越しに
 /// 読んで空白が潰れた文字列でテストを書き、実物に一度も当たらなかった)。
 /// 未設定なら OnceLock の判定だけ。
+/// 状態の判定に使う「最下部の」画面の文字。上へスクロールして履歴を見ている
+/// 途中でも、判定のときだけ同じロックの中で最下部へ戻して読み、すぐ元の位置へ
+/// 戻す (ロックの中なので描画に途中の位置は出ない)。
+///
+/// v0.1.52 までは履歴を見ている間は判定せず前回の状態を据え置いていたので、
+/// 返答中にスクロールしたタブは返答が終わっても 🟢 のままだった
+/// (2026-11-23 ゆうさん「スクロールの途中だと緑・最後まで見たらオレンジ」)。
+fn live_screen_text(parser: &mut vt100::Parser) -> String {
+    let saved = parser.screen().scrollback();
+    if saved != 0 {
+        parser.set_scrollback(0);
+    }
+    let screen = parser.screen();
+    let (_, cols) = screen.size();
+    let text = screen_text(screen.rows(0, cols));
+    if saved != 0 {
+        parser.set_scrollback(saved);
+    }
+    text
+}
+
 fn status_trace_path() -> Option<&'static Path> {
     use std::sync::OnceLock;
     static PATH: OnceLock<Option<PathBuf>> = OnceLock::new();
@@ -1683,6 +1717,28 @@ mod tests {
             focused: 1,
             panes: Vec::new(),
         }
+    }
+
+    /// 上へスクロールして履歴を見ている途中でも、判定には最下部の画面を使い、
+    /// スクロール位置は元のまま (2026-11-23: 途中だと 🟢 のままだった)。
+    #[test]
+    fn live_screen_text_reads_bottom_and_keeps_scroll_position() {
+        let mut parser = vt100::Parser::new(6, 40, 100);
+        for i in 0..30 {
+            parser.process(format!("old line {i}\r\n").as_bytes());
+        }
+        parser.process(b"done reply\r\n");
+        parser.set_scrollback(10);
+        let shown = screen_text(parser.screen().rows(0, 40));
+        assert!(!shown.contains("done reply"), "前提: 履歴の画面が出ている");
+
+        let text = live_screen_text(&mut parser);
+        assert!(text.contains("done reply"), "最下部を読む: {text}");
+        assert_eq!(parser.screen().scrollback(), 10, "スクロール位置は戻す");
+
+        parser.set_scrollback(0);
+        assert_eq!(live_screen_text(&mut parser), text, "最下部なら同じ");
+        assert_eq!(parser.screen().scrollback(), 0);
     }
 
     /// 閉じたタブは新しい順に取り出せ、上限を超えたら古いものから捨てる。
