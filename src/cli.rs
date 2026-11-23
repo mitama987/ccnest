@@ -32,7 +32,18 @@ pub struct Cli {
     pub add: bool,
     /// `--to <pid>`: `--add` の宛先。None なら環境変数 `CCNEST_PID`。
     pub to: Option<u32>,
+    /// `--close`: 新しい窓を開かず、このコマンドを打ったペインのあるタブを、動いている
+    /// 窓に閉じてもらう (宛先は環境変数 `CCNEST_PID` / `CCNEST_PANE`)。
+    pub close: bool,
+    /// `--after <秒>`: `--close` が実際に閉じるまでの秒数。None なら
+    /// [`DEFAULT_CLOSE_AFTER_SECS`]。
+    pub after: Option<u64>,
 }
+
+/// `--close` の既定の待ち秒数 (最後の返事を画面に出す時間)。
+pub const DEFAULT_CLOSE_AFTER_SECS: u64 = 5;
+/// `--after` の上限。
+pub const MAX_CLOSE_AFTER_SECS: u64 = 600;
 
 /// `ccnest [cwd] [--resume <uuid>[=<タブ名>]]...` と
 /// `ccnest --add [--to <pid>] --resume <uuid>[=<タブ名>]...` を解析する
@@ -86,6 +97,15 @@ where
             cli.to = Some(parse_pid(&value)?);
         } else if let Some(value) = arg.strip_prefix("--to=") {
             cli.to = Some(parse_pid(value)?);
+        } else if arg == "--close" {
+            cli.close = true;
+        } else if arg == "--after" {
+            let value = it
+                .next()
+                .ok_or_else(|| anyhow!("--after needs <seconds>"))?;
+            cli.after = Some(parse_after(&value)?);
+        } else if let Some(value) = arg.strip_prefix("--after=") {
+            cli.after = Some(parse_after(value)?);
         } else if arg.starts_with("--") {
             return Err(anyhow!("unknown option: {arg}"));
         } else if cli.cwd.is_none() {
@@ -93,6 +113,17 @@ where
         } else {
             return Err(anyhow!("unexpected argument: {arg}"));
         }
+    }
+    if cli.close {
+        if cli.add || !cli.resumes.is_empty() || cli.to.is_some() || cli.cwd.is_some() {
+            return Err(anyhow!(
+                "--close cannot be combined with --add / --resume / --to / a folder (it closes the tab of the pane it is typed in)"
+            ));
+        }
+        return Ok(cli);
+    }
+    if cli.after.is_some() {
+        return Err(anyhow!("--after is only valid with --close"));
     }
     if cli.add {
         if cli.resumes.is_empty() {
@@ -109,6 +140,19 @@ where
         return Err(anyhow!("--to is only valid with --add"));
     }
     Ok(cli)
+}
+
+fn parse_after(value: &str) -> Result<u64> {
+    let secs = value
+        .trim()
+        .parse::<u64>()
+        .map_err(|e| anyhow!("--after: invalid seconds {value:?}: {e}"))?;
+    if secs > MAX_CLOSE_AFTER_SECS {
+        return Err(anyhow!(
+            "--after: {secs} is too long (max {MAX_CLOSE_AFTER_SECS} seconds)"
+        ));
+    }
+    Ok(secs)
 }
 
 fn parse_pid(value: &str) -> Result<u32> {
@@ -367,6 +411,39 @@ mod tests {
         assert_eq!(normalize_prompt("\u{feff} \n"), None);
     }
 
+    /// `--close [--after <秒>]`: 打ったペインのタブを閉じてもらう。
+    #[test]
+    fn close_with_and_without_after() {
+        let cli = parse(&["--close"]).unwrap();
+        assert!(cli.close);
+        assert_eq!(cli.after, None);
+        assert!(!cli.add);
+
+        let cli = parse(&["--close", "--after", "10"]).unwrap();
+        assert_eq!(cli.after, Some(10));
+        let cli = parse(&["--after=0", "--close"]).unwrap();
+        assert_eq!(cli.after, Some(0), "順番は問わない・0 は許す");
+        assert_eq!(
+            parse(&["--close", "--after", "600"]).unwrap().after,
+            Some(600)
+        );
+    }
+
+    /// `--close` の誤用は raw mode に入る前にエラーで終わる。
+    #[test]
+    fn close_errors() {
+        assert!(parse(&["--after", "5"]).is_err(), "--after だけ");
+        assert!(parse(&["--close", "--after"]).is_err());
+        assert!(parse(&["--close", "--after", "abc"]).is_err());
+        assert!(parse(&["--close", "--after", "-1"]).is_err());
+        assert!(parse(&["--close", "--after", "601"]).is_err(), "上限超え");
+        assert!(parse(&["--close", "--add", "--resume", ID]).is_err());
+        assert!(parse(&["--close", "--resume", ID]).is_err());
+        assert!(parse(&["--close", "--to", "5"]).is_err());
+        assert!(parse(&["--close", r"C:\work\repo"]).is_err());
+        assert!(parse(&["--after", "5", "--resume", ID]).is_err());
+    }
+
     /// 既存の起動 (--add 無し) は add=false のまま。
     #[test]
     fn plain_launch_is_not_add() {
@@ -389,3 +466,7 @@ mod tests {
 //                       .permission_mode): reopen a session that a reboot cut
 //                       off, tell it to continue, in the mode it was in.
 //                       parse_args_with injects the file read for tests.
+// ver0.4 - 2026-11-23 - `--close [--after <seconds>]` (Cli.close / Cli.after,
+//                       default 5 s, max 600): ask the running window to close
+//                       the tab of the pane the command was typed in. Cannot be
+//                       combined with --add / --resume / --to / a folder.

@@ -6,6 +6,7 @@ use portable_pty::CommandBuilder;
 use uuid::Uuid;
 
 use crate::pane::pty::{PtyHandle, ReaderHooks};
+use crate::pane::PaneId;
 
 /// bypass (パーミッション確認スキップ) 系フラグの渡し方。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -148,6 +149,7 @@ pub fn build_claude_args(session_id: &str, start: SessionStart, opts: &SpawnOpts
 /// Spawn a `claude` process in a PTY, with a fallback to the system shell
 /// when `claude` is not available. Returns (handle, command-used, claude-running?).
 pub fn spawn_claude(
+    pane: PaneId,
     cwd: &Path,
     session_id: Uuid,
     start: SessionStart,
@@ -170,7 +172,7 @@ pub fn spawn_claude(
             cmd.arg(arg);
         }
         cmd.cwd(cwd);
-        apply_env(&mut cmd);
+        apply_env(&mut cmd, pane);
         // fullscreen (alt 画面) の Claude Code は自前で画面を描き直すため、
         // ccnest のローカル選択 (反転) がスクロールに追従できない。ccnest 内では
         // classic モード (ネイティブスクロールバック描画) で起動し、選択・ホイール
@@ -190,7 +192,7 @@ pub fn spawn_claude(
     }
 
     // Fallback: start the system shell so the pane is at least usable.
-    let (h, shell) = spawn_shell(cwd, parser, hooks)
+    let (h, shell) = spawn_shell(pane, cwd, parser, hooks)
         .map_err(|e| anyhow!("failed to spawn both claude and shell: {e}"))?;
     Ok((h, shell, false))
 }
@@ -199,6 +201,7 @@ pub fn spawn_claude(
 /// Used both as the initial fallback when `claude` is missing and when Ctrl+C
 /// 2 連打でペインを shell に切り戻すときの再起動先として使う。
 pub fn spawn_shell(
+    pane: PaneId,
     cwd: &Path,
     parser: Arc<Mutex<vt100::Parser>>,
     hooks: ReaderHooks,
@@ -210,7 +213,7 @@ pub fn spawn_shell(
     };
     let mut cmd = CommandBuilder::new(&shell);
     cmd.cwd(cwd);
-    apply_env(&mut cmd);
+    apply_env(&mut cmd, pane);
     let h =
         PtyHandle::spawn(cmd, parser, hooks).map_err(|e| anyhow!("failed to spawn shell: {e}"))?;
     Ok((h, shell))
@@ -237,7 +240,7 @@ pub fn should_pass_env(key: &str) -> bool {
         && !key.to_ascii_uppercase().starts_with("CONEMU")
 }
 
-fn apply_env(cmd: &mut CommandBuilder) {
+fn apply_env(cmd: &mut CommandBuilder, pane: PaneId) {
     for (k, v) in std::env::vars() {
         if should_pass_env(&k) {
             cmd.env(k, v);
@@ -251,6 +254,9 @@ fn apply_env(cmd: &mut CommandBuilder) {
     // 「この窓の pid」。タブの中から `ccnest --add` を打つと、この値を宛先に
     // する (remote.rs)。親から継いだ値 (入れ子の ccnest) は必ず上書きする。
     cmd.env(crate::remote::PID_ENV, std::process::id().to_string());
+    // 「このペインの id」。タブの中から `ccnest --close` を打つと、この値のペインが
+    // あるタブが閉じる (remote.rs)。起こし直し・shell への切り戻しでも同じ id。
+    cmd.env(crate::remote::PANE_ENV, pane.to_string());
 }
 
 /// Locate the `claude` executable by walking `PATH` with all plausible
@@ -508,15 +514,31 @@ mod tests {
     #[test]
     fn apply_env_sets_ccnest_pid_to_this_process() {
         let mut cmd = CommandBuilder::new("x");
-        apply_env(&mut cmd);
+        apply_env(&mut cmd, 1);
         assert_eq!(
             cmd.get_env(crate::remote::PID_ENV).and_then(|v| v.to_str()),
             Some(std::process::id().to_string().as_str())
         );
     }
+
+    /// ペインの子には「このペインの id」も渡す (`ccnest --close` の目印)。
+    /// 親 (入れ子の ccnest) から継いだ値があっても必ず自分のペイン id で上書きする。
+    #[test]
+    fn apply_env_sets_ccnest_pane_and_overrides_inherited() {
+        let mut cmd = CommandBuilder::new("x");
+        cmd.env(crate::remote::PANE_ENV, "999");
+        apply_env(&mut cmd, 42);
+        assert_eq!(
+            cmd.get_env(crate::remote::PANE_ENV)
+                .and_then(|v| v.to_str()),
+            Some("42")
+        );
+    }
 }
 
 // Version History
+// - ver1.7 (2026-11-23): spawn_claude / spawn_shell / apply_env が PaneId を受け取り、子へ
+//   `CCNEST_PANE=<ペイン id>` を渡す (タブの中から `ccnest --close` を打ったときの目印。remote.rs)。
 // - ver1.6 (2026-11-21): ResumeExtras (最初の一言・セッション個別の開始モード) と
 //   opts_for_resume / build_claude_args_with。spawn_claude が extras を受け取る。
 //   Windows Update の再起動で止まったセッションを、直前のモードで開き直して続きを指示する用。

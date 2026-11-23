@@ -18,6 +18,7 @@ fn main() {
     let cwd = std::env::current_dir().expect("cwd");
 
     let (pty, cmd_label, claude_running) = spawn_claude(
+        0,
         &cwd,
         session_id,
         SessionStart::New,
