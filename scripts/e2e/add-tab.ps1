@@ -1,7 +1,7 @@
 ﻿# `ccnest --add` (v0.1.35): 動いている窓にタブを足す、の実機確認。
-# 使い捨て ccnest を conhost で起動し (偽 claude = 引数を表示して待つだけの cmd)、
+# 使い捨て ccnest を窓なし (CREATE_NO_WINDOW) で起動し (偽 claude = 引数を表示して待つだけの cmd)、
 # 別プロセスの `ccnest --add --to <pid> --resume ...` で依頼を送る。
-#  1. 2 本送る → 終了コード 0・偽 claude が `--resume <id>` で 2 つ起動・タブ名が出る・
+#  1. 2 本送る (2 本目に --resume-model fable) → 終了コード 0・2 本目だけ --model fable が届く・偽 claude が `--resume <id>` で 2 つ起動・タブ名が出る・
 #     表示中のタブは元のまま・偽 claude が受け取った CCNEST_PID が窓の pid
 #  2. 同じセッションをもう一度 → 「すでに開いています」で増えない (終了コード 0)
 #  3. 会話ログの無いセッション → 「会話ログがありません」で開かない (終了コード 1)
@@ -105,7 +105,11 @@ function Add($argList) {
 function Wait-Until($sec, $cond) { $until = (Get-Date).AddSeconds($sec); while ((Get-Date) -lt $until) { if (& $cond) { return $true }; Start-Sleep -Milliseconds 500 }; return $false }
 
 $before = @(Get-Process ccnest -ErrorAction SilentlyContinue).Count
-$p = Start-Process -FilePath "conhost.exe" -ArgumentList "`"$exe`"" -WorkingDirectory $work -PassThru
+# No console window at all (CREATE_NO_WINDOW): nothing shows up and nothing takes the keyboard
+# focus from the user. The screen is read through the console API, which needs no window.
+$si = New-Object Diagnostics.ProcessStartInfo 'cmd.exe', "/c `"$exe`""
+$si.UseShellExecute = $false; $si.CreateNoWindow = $true; $si.WorkingDirectory = $work
+$p = [Diagnostics.Process]::Start($si)
 $logDir = $null
 $inbox = $null
 $fails = 0
@@ -131,7 +135,7 @@ try {
   $jp = "追加タブ"
 
   "1. add two sessions"
-  Add @('--add', '--to', $cc, '--resume', "$a=first-tab", '--resume', "$b=$jp")
+  Add @('--add', '--to', $cc, '--resume', "$a=first-tab", '--resume', "$b=$jp", '--resume-model', 'fable')
   Check ($last.Code -eq 0) "exit code 0"
   Check ($last.Out -match '2 件') "the reply says 2 tabs were accepted"
   $opened = Wait-Until 12 { $r = @(Shims $cc '--resume'); ($r -contains $a) -and ($r -contains $b) }
@@ -145,6 +149,8 @@ try {
   Check (($screen -match [regex]::Escape($id1)) -and ($screen -notmatch [regex]::Escape($a)) -and ($screen -notmatch [regex]::Escape($b))) "the visible tab is still tab 1 (active tab not stolen)"
   $log = @(Get-Content $shimLog)
   "  shim log:"; $log | ForEach-Object { "    $_" }
+  Check (@($log | Where-Object { $_ -match "--resume $b .*--model fable" }).Count -eq 1) "--resume-model fable reached only the second session (claude --resume <id> ... --model fable)"
+  Check (@($log | Where-Object { $_ -match "--resume $a " -and $_ -notmatch '--model' }).Count -eq 1) "the first session got no --model (claude's own default)"
   Check ($log.Count -eq 3 -and @($log | Where-Object { ($_ -split ' ')[0] -ne "$cc" }).Count -eq 0) "every pane got CCNEST_PID=$cc"
 
   "2. the same session again"

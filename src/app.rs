@@ -1571,6 +1571,7 @@ fn resume_extras(spec: &ResumeSpec) -> ResumeExtras {
     ResumeExtras {
         prompt: spec.prompt.clone(),
         permission_mode: spec.permission_mode.clone(),
+        model: spec.model.clone(),
     }
 }
 

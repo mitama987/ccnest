@@ -79,6 +79,8 @@ pub struct ResumeExtras {
     pub prompt: Option<String>,
     /// このセッションだけの開始モード。
     pub permission_mode: Option<String>,
+    /// このセッションだけのモデル (`claude --model <model>`)。
+    pub model: Option<String>,
 }
 
 /// 純粋: セッション個別のモード指定を、窓全体の [`SpawnOpts`] に重ねる。
@@ -121,6 +123,15 @@ pub fn build_claude_args_with(
 ) -> Vec<String> {
     let opts = opts_for_resume(opts, extras.permission_mode.as_deref());
     let mut args = build_claude_args(session_id, start, &opts);
+    if let Some(model) = extras
+        .model
+        .as_deref()
+        .map(str::trim)
+        .filter(|m| !m.is_empty())
+    {
+        args.push("--model".to_string());
+        args.push(model.to_string());
+    }
     if let Some(prompt) = extras.prompt.as_deref().filter(|p| !p.is_empty()) {
         args.push(prompt.to_string());
     }
@@ -409,7 +420,40 @@ mod tests {
         ResumeExtras {
             prompt: prompt.map(str::to_string),
             permission_mode: mode.map(str::to_string),
+            ..ResumeExtras::default()
         }
+    }
+
+    // `--resume-model`: `--model <名前>` が付き、最初の一言 (位置引数) は最後のまま
+    #[test]
+    fn resume_model_is_passed_before_the_prompt() {
+        let opts = spawn_opts_from(env_none);
+        let with_model = ResumeExtras {
+            model: Some(" fable ".to_string()),
+            prompt: Some("go on".to_string()),
+            ..ResumeExtras::default()
+        };
+        assert_eq!(
+            build_claude_args_with("abc", SessionStart::Resume, &opts, &with_model),
+            [
+                "--resume",
+                "abc",
+                "--permission-mode",
+                "plan",
+                "--allow-dangerously-skip-permissions",
+                "--model",
+                "fable",
+                "go on",
+            ]
+        );
+        let blank = ResumeExtras {
+            model: Some("  ".to_string()),
+            ..ResumeExtras::default()
+        };
+        assert!(
+            !build_claude_args_with("abc", SessionStart::Resume, &opts, &blank)
+                .contains(&"--model".to_string())
+        );
     }
 
     // 個別の指定が無い再開は、これまでと 1 文字も変わらない
@@ -537,6 +581,8 @@ mod tests {
 }
 
 // Version History
+// - ver1.8 (2026-11-23): ResumeExtras.model → build_claude_args_with が `--model <名前>` を
+//   最初の一言の前に足す (`ccnest --resume-model`)。引き継ぎ先のモデルを指定する用。
 // - ver1.7 (2026-11-23): spawn_claude / spawn_shell / apply_env が PaneId を受け取り、子へ
 //   `CCNEST_PANE=<ペイン id>` を渡す (タブの中から `ccnest --close` を打ったときの目印。remote.rs)。
 // - ver1.6 (2026-11-21): ResumeExtras (最初の一言・セッション個別の開始モード) と
