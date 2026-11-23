@@ -483,6 +483,7 @@ mod tests {
             title: title.map(str::to_string),
             prompt: None,
             permission_mode: None,
+            model: None,
         }
     }
 

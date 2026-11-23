@@ -19,6 +19,10 @@ pub struct ResumeSpec {
     /// ほかのタブと同じ (`CCNEST_CLAUDE_PERMISSION_MODE`・既定 plan)。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub permission_mode: Option<String>,
+    /// このセッションだけのモデル (`--resume-model`)。None なら claude の既定
+    /// (再開するセッションが前に使っていたモデル)。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
 }
 
 /// コマンドライン引数の解析結果。
@@ -61,6 +65,8 @@ pub fn parse_args<I: IntoIterator<Item = String>>(args: I) -> Result<Cli> {
 ///   送る (再起動で止まった作業の続きを指示する用)。文面は 1 行に畳む。
 /// - `--resume-permission-mode <mode>`: そのセッションだけこのモードで始める
 ///   (`bypassPermissions` / `plan` / `acceptEdits` …)。
+/// - `--resume-model <model>`: そのセッションだけこのモデルで始める
+///   (`claude --model <model>`・`fable` / `opus` / `claude-fable-5-1` …)。
 pub fn parse_args_with<I, F>(args: I, read_file: F) -> Result<Cli>
 where
     I: IntoIterator<Item = String>,
@@ -90,6 +96,13 @@ where
             set_permission_mode(&mut cli, &value)?;
         } else if let Some(value) = arg.strip_prefix("--resume-permission-mode=") {
             set_permission_mode(&mut cli, value)?;
+        } else if arg == "--resume-model" {
+            let value = it
+                .next()
+                .ok_or_else(|| anyhow!("--resume-model needs <model>"))?;
+            set_model(&mut cli, &value)?;
+        } else if let Some(value) = arg.strip_prefix("--resume-model=") {
+            set_model(&mut cli, value)?;
         } else if arg == "--add" {
             cli.add = true;
         } else if arg == "--to" {
@@ -174,6 +187,7 @@ fn parse_resume(value: &str) -> Result<ResumeSpec> {
         title: title.filter(|t| !t.is_empty()).map(str::to_string),
         prompt: None,
         permission_mode: None,
+        model: None,
     })
 }
 
@@ -193,6 +207,23 @@ fn set_prompt(
     let prompt = normalize_prompt(&raw)
         .ok_or_else(|| anyhow!("--resume-prompt-file: {path} has no text"))?;
     spec.prompt = Some(prompt);
+    Ok(())
+}
+
+fn set_model(cli: &mut Cli, model: &str) -> Result<()> {
+    let spec = last_resume(cli, "--resume-model")?;
+    let model = model.trim();
+    // モデル名 (別名 `fable` / 完全名 `claude-fable-5-1` / `opus[1m]`)。`-` 始まりは
+    // claude がオプションと読むので不可。
+    let ok = !model.is_empty()
+        && !model.starts_with('-')
+        && model
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.' | '[' | ']' | ':'));
+    if !ok {
+        return Err(anyhow!("--resume-model: invalid model {model:?}"));
+    }
+    spec.model = Some(model.to_string());
     Ok(())
 }
 
@@ -255,12 +286,14 @@ mod tests {
                     title: Some("discord-open-issues-slides (bg)".to_string()),
                     prompt: None,
                     permission_mode: None,
+                    model: None,
                 },
                 ResumeSpec {
                     session_id: Uuid::parse_str(ID2).unwrap(),
                     title: None,
                     prompt: None,
                     permission_mode: None,
+                    model: None,
                 },
             ]
         );
@@ -444,6 +477,51 @@ mod tests {
         assert!(parse(&["--after", "5", "--resume", ID]).is_err());
     }
 
+    /// `--resume-model` は直前の `--resume` 1 つにだけ効く (`--add` でも使える)。
+    #[test]
+    fn resume_model_applies_to_the_preceding_resume_only() {
+        let cli = parse(&[
+            "--add",
+            "--resume",
+            ID,
+            "--resume-model",
+            "fable",
+            "--resume",
+            ID2,
+            "--resume-model=claude-fable-5-1",
+        ])
+        .unwrap();
+        assert_eq!(cli.resumes[0].model.as_deref(), Some("fable"));
+        assert_eq!(cli.resumes[1].model.as_deref(), Some("claude-fable-5-1"));
+        let cli = parse(&[
+            "--resume",
+            ID,
+            "--resume",
+            ID2,
+            "--resume-model",
+            "opus[1m]",
+        ])
+        .unwrap();
+        assert_eq!(
+            cli.resumes[0].model, None,
+            "指定していないセッションは既定のまま"
+        );
+        assert_eq!(cli.resumes[1].model.as_deref(), Some("opus[1m]"));
+    }
+
+    #[test]
+    fn resume_model_errors() {
+        assert!(
+            parse(&["--resume-model", "fable", "--resume", ID]).is_err(),
+            "--resume より前"
+        );
+        assert!(parse(&["--resume", ID, "--resume-model"]).is_err());
+        assert!(parse(&["--resume", ID, "--resume-model", ""]).is_err());
+        assert!(parse(&["--resume", ID, "--resume-model", "--fable"]).is_err());
+        assert!(parse(&["--resume", ID, "--resume-model", "a b"]).is_err());
+        assert!(parse(&["--resume", ID, "--resume-model", "a;b"]).is_err());
+    }
+
     /// 既存の起動 (--add 無し) は add=false のまま。
     #[test]
     fn plain_launch_is_not_add() {
@@ -470,3 +548,5 @@ mod tests {
 //                       default 5 s, max 600): ask the running window to close
 //                       the tab of the pane the command was typed in. Cannot be
 //                       combined with --add / --resume / --to / a folder.
+// ver0.5 - 2026-11-23 - `--resume-model <model>` for the preceding `--resume`
+//                       (ResumeSpec.model, passed as `claude --model <model>`).

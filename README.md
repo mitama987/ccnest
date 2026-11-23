@@ -59,8 +59,8 @@ folder name otherwise). The first session opens right away; the rest open one
 per 2 seconds without switching the active tab, so parallel Claude starts do
 not write `~/.claude.json` at the same time.
 
-Two options apply to the `--resume` right before them, for a session that was
-cut off mid-work (a reboot, for example):
+Three options apply to the `--resume` right before them, for a session that was
+cut off mid-work (a reboot, for example) or that is handed over to a new one:
 
 - `--resume-prompt-file <path>` sends the text of that file as the session's
   first message as soon as it is reopened (`claude --resume <id> "<text>"`), so
@@ -69,6 +69,9 @@ cut off mid-work (a reboot, for example):
   (`bypassPermissions`, `plan`, `acceptEdits`, ...) instead of the window's
   default (plan). `bypassPermissions` is ignored when
   `CCNEST_CLAUDE_NO_SKIP_PERMISSIONS` is set.
+- `--resume-model <model>` starts that one session on the given model
+  (`claude --model <model>`: an alias such as `fable` / `opus`, or a full id).
+  Without it the session keeps the model it had. Also works through `--add`.
 
 Sessions without these options just open, as before.
 
@@ -472,3 +475,4 @@ ver0.1.48 - 2026-11-21 - Put a tab on hold with `Alt+C`. The active tab moves to
 ver0.1.49 - 2026-11-21 - Holding a tab frees its memory. `Alt+C` now also stops the Claude of each pane in the tab when that loses nothing: the pane is not working, has no background work (footer pills such as `1 shell`, or `Waiting for … to finish`, even when the tab shows 🟨 because a decision is pending), shows an empty input box (no permission / question dialog, no half-written prompt) and was not sent a key in the last 5 seconds. The screen is read at that moment, not from the 2-second status cache. Anything else is left running. The bottom line of the status bar says which happened for 8 seconds. A stopped pane keeps its last screen and its frame title says so; opening the tab or passing through it with Alt+←/→ starts nothing. A key typed into the pane (dropped), or releasing the hold, starts Claude again with `--resume <session id>` in the same pane; `Ctrl+C` is ignored there. A held session opened with `--resume` / `--add` and no first prompt starts without a process. `CCNEST_HOLD_SLEEP=off` keeps held tabs running. Measured with the real Claude Code 2.1.330: 650 MB freed for one tab, about 1 MB (the pane's pseudo console host) left. CCNEST_INPUT_TRACE logs `hold_tab … stopped=N kept=N woken=N` and `wake_pane id=N woke=..`. E2E `scripts/e2e/hold-sleep.ps1` (`-Off`; fake claude that draws Claude Code's screen shapes) and `hold-sleep-real.ps1` (the real claude, once).
 ver0.1.50 - 2026-11-21 - The hints for a stopped (held) pane name the key that wakes it: the frame title says `保留中: Claude 停止・Alt+C で再開`, and the status-bar notice says `もう一度 Alt+C で続きから再開`. Behaviour is unchanged (`Alt+C` releases the hold and wakes; typing into the pane also wakes).
 ver0.1.51 - 2026-11-23 - `ccnest --close [--after <seconds>]` closes the tab of the pane the command was typed in, so Claude can close its own old tab after opening a new one with `--add`. ccnest now gives every pane's children `CCNEST_PANE=<pane id>` next to `CCNEST_PID`; the command sends a close request (same request-file channel as `--add`) and returns at once, and the window closes the tab `--after` seconds later (default 5, 0 to 600; checked on the 2 s tick) with `close_tab`, so the process tree ends and `Ctrl+Shift+T` reopens it. Only the tab that holds the pane closes; the window's last tab, an unknown pane and missing `CCNEST_PANE` / `CCNEST_PID` (windows before v0.1.51) are refused at once with exit code 1. A second `--close` for the same pane replaces the deadline. E2E `scripts/e2e/close-tab.ps1` (no console window).
+ver0.1.52 - 2026-11-23 - `--resume-model <model>` after a `--resume` starts that one session on the given model (`claude --resume <id> ... --model <model>`, before the first message if there is one), also through `--add`. For handing work over to a new session on a chosen model (Fable, or Opus when Fable is limited): `ccnest --add --resume <id>=<name> --resume-model fable`. Without it the session keeps the model it had (ccnest never passed a model before, so a handed-over tab started on whatever the resumed session or the settings default was). Misuse (before any `--resume`, empty, a leading `-`, spaces or other symbols) exits with an error before a window opens. E2E `scripts/e2e/add-tab.ps1` checks that `--model fable` reaches only the session that asked. `add-tab.ps1` now starts its throw-away ccnest with no console window (CREATE_NO_WINDOW) like the other tab E2E scripts.
