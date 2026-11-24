@@ -269,6 +269,66 @@ fn transcript(screen_text: &str) -> Option<&str> {
     Some(&above_bottom[..end])
 }
 
+/// 返答は終わったが、裏のエージェントがまだ動いているか。フッターの下の一覧
+/// (`● main` の下) に出る、動いているエージェントの行を見る:
+/// `  ◯ general-purpose  Run ping command        2m 17s · ↓ 47.7k tokens`
+///
+/// 待ちの行 ([`is_waiting_for_background`]) は出ないターンがある (2026-11-24 の
+/// ゆうさんのスクショ: 裏のエージェントが動いているのに入力欄の上に待ちの行が無く、
+/// フッターに札も無いので 🟨 だった。本体 v2.1.331 では、待ちの行はターン終了の行の
+/// 差し替えで、ターン終了の行そのものを作らない経路がある)。一覧の行は、動いている
+/// 間は必ず出て、エージェントが終わると一覧ごと消える (v2.1.331 の実物で確認)。
+///
+/// 見るのは [`has_background_work`] と同じ「最後の罫線より後ろ」だけ。会話の本文に
+/// 同じ形の行があっても当たらない。入力欄が無い画面は false。
+pub fn has_running_agent_row(screen_text: &str) -> bool {
+    let Some((_, end)) = last_rule(screen_text) else {
+        return false;
+    };
+    screen_text[end..].lines().any(is_running_agent_row)
+}
+
+/// 一覧の行のうち、動いているエージェントの行か:
+/// `<経過時間> · ↓ <数> tokens` で終わる (経過時間は `6s` / `2m 24s` / `1h 2m 3s` で、
+/// 必ず秒で終わる)。
+///
+/// 当たらない行: `● main`・案内 (`← 8 agents` / `↓ to manage` /
+/// `/tasks to see subagents`)・利用制限のお知らせ・出だしの 1 秒の行 (`… 0s` だけで
+/// トークン数がまだ無い。この瞬間は返答中なので拾わなくてよい)。
+/// 行頭の丸 (`◯` / `○`) とエージェントの種類・説明は見ない (毎回変わる)。
+fn is_running_agent_row(line: &str) -> bool {
+    // 後ろから読む: ` tokens` ← `<数>` ← `↓` ← `·` ← `<n>s` (経過時間の最後の語)。
+    let Some(head) = line.trim_end().strip_suffix(" tokens") else {
+        return false;
+    };
+    let Some((head, count)) = head.rsplit_once('↓') else {
+        return false;
+    };
+    if !is_token_count(count.trim()) {
+        return false;
+    }
+    let Some(head) = head.trim_end().strip_suffix('·') else {
+        return false;
+    };
+    head.split_whitespace()
+        .next_back()
+        .is_some_and(is_seconds_word)
+}
+
+/// トークン数の表記か: `302` / `47.7k` / `116.0k` / `1.2m` (数字と小数点 + 単位 1 文字まで)。
+fn is_token_count(s: &str) -> bool {
+    let digits = s.trim_end_matches(|c: char| c.is_ascii_alphabetic());
+    s.len() - digits.len() <= 1
+        && digits.starts_with(|c: char| c.is_ascii_digit())
+        && digits.chars().all(|c| c.is_ascii_digit() || c == '.')
+}
+
+/// 経過時間の最後の語 `<n>s` か (`6s` / `2m 24s` の `24s`)。
+fn is_seconds_word(word: &str) -> bool {
+    word.strip_suffix('s')
+        .is_some_and(|n| !n.is_empty() && n.chars().all(|c| c.is_ascii_digit()))
+}
+
 /// 「判断待ち」の見出しの末尾に来る言葉。返答の最後に
 /// `▼ ゆうさんの判断待ち` の節を置き、無ければ `・今はなし` と書く報告の型を前提にする。
 const DECISION_HEADINGS: &[&str] = &["判断待ち"];
@@ -377,7 +437,8 @@ pub fn screen_text(rows: impl IntoIterator<Item = String>) -> String {
 /// スピナー行 (現行の経過秒つき、または旧 CLI の "esc to interrupt") が
 /// あれば Busy。無くて、フッターに裏の仕事の札がある ([`has_background_work`])
 /// か、入力欄のすぐ上が裏のエージェント待ちの行 ([`is_waiting_for_background`])
-/// なら Background。どれも無ければ NeedsAttention。
+/// か、フッターの下の一覧に動いているエージェントの行がある
+/// ([`has_running_agent_row`]) なら Background。どれも無ければ NeedsAttention。
 /// ただし裏の仕事があっても、返答が「判断待ち」の節 (中身あり) で終わって
 /// いれば NeedsAttention ([`asks_for_decision`])。
 /// 質問文言の検出はしない (Claude の返答本文に "Would you like" が残っている
@@ -387,7 +448,9 @@ pub fn screen_text(rows: impl IntoIterator<Item = String>) -> String {
 pub fn detect_status(screen_text: &str) -> ClaudeStatus {
     if has_spinner_timer(screen_text) || BUSY_MARKERS.iter().any(|m| screen_text.contains(m)) {
         ClaudeStatus::Busy
-    } else if (has_background_work(screen_text) || is_waiting_for_background(screen_text))
+    } else if (has_background_work(screen_text)
+        || is_waiting_for_background(screen_text)
+        || has_running_agent_row(screen_text))
         && !asks_for_decision(screen_text)
     {
         ClaudeStatus::Background
@@ -430,7 +493,8 @@ pub fn at_empty_prompt(screen_text: &str) -> bool {
 /// 止めても失う物が無い画面か (保留にしたタブの Claude を落としてメモリを空けて
 /// よいか)。次の全部を満たすときだけ真:
 /// - 実行中でない (スピナー行・旧 CLI の "esc to interrupt" が無い)
-/// - 裏の仕事が無い (フッターの札 `1 shell` など・`Waiting for … to finish`)。
+/// - 裏の仕事が無い (フッターの札 `1 shell` など・`Waiting for … to finish`・
+///   フッターの下の一覧の動いているエージェントの行)。
 ///   [`detect_status`] は「判断待ち」の節があれば裏の仕事があっても
 ///   NeedsAttention を返すが、ここでは裏の仕事があれば必ず偽 (落とすと止まる)
 /// - 入力欄が空で出ている ([`at_empty_prompt`])。ダイアログの途中や、書きかけの
@@ -443,6 +507,7 @@ pub fn is_safe_to_stop(screen_text: &str) -> bool {
         && !BUSY_MARKERS.iter().any(|m| screen_text.contains(m))
         && !has_background_work(screen_text)
         && !is_waiting_for_background(screen_text)
+        && !has_running_agent_row(screen_text)
         && at_empty_prompt(screen_text)
 }
 
@@ -1173,6 +1238,170 @@ mod tests {
         assert_eq!(detect_status(&text), ClaudeStatus::Background);
     }
 
+    // ---- has_running_agent_row / フッターの下の一覧に動いているエージェントの行 ----
+
+    // 2026-11-24 に使い捨て ccnest の CCNEST_STATUS_TRACE で取った実物 (claude v2.1.331・
+    // 幅 120 桁・scripts/e2e/agent-list-real.ps1)。裏のエージェントが動いている間のフッターと
+    // 一覧。丸は ◯ (U+25EF)、経過時間は 1 分を超えると `1m 1s`。
+    const REAL_AGENT_LIST_FOOTER: &str = "\
+  ⏵⏵ bypass permissions on (shift+tab to cycle) · ← 8 agents · ↓ to manage                                       /rc
+
+  ● main
+  ◯ general-purpose  Running ping loopback test in foreground                                 1m 1s · ↓ 47.7k tokens";
+
+    // エージェントが終わった直後 (通知の返答中) と、そのあとの実物のフッター。
+    // エージェントが終わると一覧ごと消える。
+    const REAL_AGENT_GONE_FOOTER: &str = "\
+  ⏵⏵ bypass permissions on (shift+tab to cycle) · /tasks to see subagents · ← 8 agents                           /rc";
+
+    // 2026-11-24 のゆうさんのスクショの書き起こし (実物の trace ではない): 返答は終わり、
+    // 裏のエージェントが動いているが、入力欄の上に待ちの行 (`✻ Waiting for …`) が無い。
+    // フッターに札も無い。目印はフッターの下の一覧の行だけ。上枠の右端にセッション名。
+    fn screenshot_agent_running_without_waiting_line() -> String {
+        let rule = "─".repeat(100);
+        let top = format!("{} setup-staging-environment-youtube ─", "─".repeat(70));
+        format!(
+            "\
+● ■ 残りの作業
+
+  ・結果待ち: Google の「本番環境」への切り替え
+  ・前からの判断待ち: 管理者編の動画の試写、手順書と yuya さん向け画像 2 枚を直すかどうか
+
+  切り替えの結果が来たら、すぐ知らせるね✨
+
+{top}
+❯\u{a0}
+{rule}
+  ⏵⏵ bypass permissions on (shift+tab to cycle) · ← 8 agents · ↓ to manage                    /rc
+
+  ● main
+  ○ general-purpose  ブランディング設定を保存中                          2m 17s · ↓ 116.0k tokens
+"
+        )
+    }
+
+    // スクショの画面: 待ちの行も札も無いが、一覧に動いている行がある → 裏で実行中
+    // (v0.1.53 までは NeedsAttention = 🟨 だった)
+    #[test]
+    fn running_agent_row_without_waiting_line_is_background() {
+        let text = screenshot_agent_running_without_waiting_line();
+        assert!(!has_background_work(&text));
+        assert!(!is_waiting_for_background(&text));
+        assert!(has_running_agent_row(&text));
+        assert_eq!(detect_status(&text), ClaudeStatus::Background);
+    }
+
+    // 実物のフッター: 動いている間は行がある / 終わったら一覧ごと消える
+    #[test]
+    fn real_agent_list_footer_is_background_only_while_the_agent_runs() {
+        let running = screen_waiting("● mango", REAL_AGENT_LIST_FOOTER);
+        assert!(!is_waiting_for_background(&running));
+        assert!(has_running_agent_row(&running));
+        assert_eq!(detect_status(&running), ClaudeStatus::Background);
+
+        let gone = screen_waiting("● mango", REAL_AGENT_GONE_FOOTER);
+        assert!(!has_running_agent_row(&gone));
+        assert_eq!(detect_status(&gone), ClaudeStatus::NeedsAttention);
+        // 一覧が無い実物 (エージェントが終わったあと) は今までどおりこちらの番
+        assert!(!has_running_agent_row(REAL_AGENT_DONE_SCREEN));
+        // 待ちの行と一覧の両方がある実物も、もちろん裏で実行中
+        assert!(has_running_agent_row(REAL_WAITING_AGENT_SCREEN));
+    }
+
+    // 行の形: 経過時間 (秒 / 分秒 / 時分秒) + ` · ↓ <数> tokens` で終わる
+    #[test]
+    fn running_agent_row_shapes() {
+        for row in [
+            "  ◯ general-purpose  Run ping command                2s · ↓ 47.7k tokens",
+            "  ○ general-purpose  ブランディング設定を保存中      2m 17s · ↓ 116.0k tokens",
+            "  ◯ general-purpose  Scheduling final run       1h 1m 46s · ↓ 440.5k tokens",
+            "  ◯ Explore  Find the footer code                    12s · ↓ 302 tokens",
+            "  ◯ general-purpose  a  5s · ↓ 1.2m tokens   ",
+            "  ◯ general-purpose  a  5s · ↓1k tokens",
+            // 丸が別の記号 (選んでいる行) でも、説明が数字で終わっていてもよい
+            "  ❯ general-purpose  Retry step 3                    5s · ↓ 1k tokens",
+        ] {
+            assert!(is_running_agent_row(row), "{row}");
+            let text = screen_waiting("● started", &format!("  ⏵⏵ bypass\n\n  ● main\n{row}"));
+            assert_eq!(detect_status(&text), ClaudeStatus::Background, "{row}");
+        }
+    }
+
+    // フッターのほかの行は当たらない
+    #[test]
+    fn other_footer_lines_are_not_running_agent_rows() {
+        for line in [
+            "  ● main",
+            "  ⏵⏵ bypass permissions on (shift+tab to cycle) · ← 8 agents · ↓ to manage        /rc",
+            "  ⏵⏵ bypass permissions on (shift+tab to cycle) · /tasks to see subagents · ← 8 agents",
+            "       You've used 94% of your Fable limit · resets Nov 17, 3am (Asia/Tokyo)",
+            // 出だしの 1 秒 (トークン数がまだ無い)。この瞬間は返答中 (Busy) なので拾わなくてよい
+            "  ◯ general-purpose  Run ping command                                    0s",
+            // 経過時間が無い / トークン数が無い / 形が違う
+            "  ◯ general-purpose  Run ping command   · ↓ 47.7k tokens",
+            "  ◯ general-purpose  Run ping command   done · ↓ 47.7k tokens",
+            "  ◯ general-purpose  Run ping command   2s · ↓ tokens",
+            "  ◯ general-purpose  Run ping command   2s · ↓ many tokens",
+            "  ◯ general-purpose  Run ping command   2s · 47.7k tokens",
+            "  ◯ general-purpose  Run ping command   2s ↓ 47.7k tokens",
+            "  ◯ general-purpose  Run ping command   2s · ↓ 47.7k tokens used",
+            "",
+        ] {
+            assert!(!is_running_agent_row(line), "{line}");
+            let text = screen_waiting("● started", &format!("  ⏵⏵ bypass\n{line}"));
+            assert_eq!(detect_status(&text), ClaudeStatus::NeedsAttention, "{line}");
+        }
+    }
+
+    // 会話の本文 (入力欄より上) に同じ形の行があっても当たらない
+    #[test]
+    fn agent_row_text_in_the_transcript_is_not_background() {
+        let text = screen_waiting(
+            "  ◯ general-purpose  Run ping command        2s · ↓ 47.7k tokens\n\n● 一覧はこう見えるよ。",
+            "  ⏵⏵ bypass permissions on · ← 8 agents",
+        );
+        assert!(!has_running_agent_row(&text));
+        assert_eq!(detect_status(&text), ClaudeStatus::NeedsAttention);
+        // 入力欄が無い画面 (許可ダイアログなど) は見ない
+        assert!(!has_running_agent_row(
+            "Do you want to proceed?\n  ◯ general-purpose  a   2s · ↓ 1k tokens"
+        ));
+    }
+
+    // 返答中 (スピナー行あり) は実行中が勝つ
+    #[test]
+    fn spinner_beats_running_agent_row() {
+        let text = screen_waiting(
+            "❯ 進み具合は？\n\n✶ Boondoggling… (6s · ↓302 tokens)",
+            REAL_AGENT_LIST_FOOTER,
+        );
+        assert_eq!(detect_status(&text), ClaudeStatus::Busy);
+    }
+
+    // 一覧に動いている行があっても、返答が「判断待ち」(中身あり) で終わっていればこちらの番
+    #[test]
+    fn decision_pending_beats_running_agent_row() {
+        let text = screen_waiting(
+            "▼ ゆうさんの判断待ち\n・マーク: A か B のどれにするか",
+            REAL_AGENT_LIST_FOOTER,
+        );
+        assert!(has_running_agent_row(&text));
+        assert_eq!(detect_status(&text), ClaudeStatus::NeedsAttention);
+        let none = screen_waiting("▼ ゆうさんの判断待ち\n・今はなし", REAL_AGENT_LIST_FOOTER);
+        assert_eq!(detect_status(&none), ClaudeStatus::Background);
+    }
+
+    // 入力欄が空でも、一覧に動いている行があれば落とさない (落とすと裏のエージェントが止まる)
+    #[test]
+    fn running_agent_row_is_not_safe_to_stop() {
+        let text = screenshot_agent_running_without_waiting_line();
+        assert!(at_empty_prompt(&text));
+        assert!(!is_safe_to_stop(&text));
+        // 同じ画面でエージェントが終わっていれば (一覧が無ければ) 落としてよい
+        let done = screen_waiting("● 終わったよ。", REAL_AGENT_GONE_FOOTER);
+        assert!(is_safe_to_stop(&done));
+    }
+
     // ---- 放置中のまとめ (idle compaction) が待ちの行の下に足した行 ----
 
     const IDLE_NOTICE: &str = "● Compacted while idle, before the prompt cache expired · turn off with \"idleCompaction\": false in settings.json";
@@ -1647,6 +1876,14 @@ mod tests {
 }
 
 // Version History
+// - ver1.12 (2026-11-24): has_running_agent_row を追加。裏のエージェントが動いているのに
+//   入力欄の上に待ちの行 (`✻ Waiting for … to finish`) が出ないターンがあり、フッターに
+//   札も無いので 🟨 のままだった (ゆうさんのスクショ・claude v2.1.331)。フッターの下の
+//   一覧の行 `◯ general-purpose  … 2m 17s · ↓ 116.0k tokens` (経過時間 + トークン数で
+//   終わる行) があれば Background。エージェントが終わると一覧ごと消える (実物で確認)。
+//   is_safe_to_stop にも足した (保留にしても裏のエージェントを止めない)。
+//   行の形は scripts/e2e/agent-list-real.ps1 で取った実物、待ちの行が無い画面は
+//   スクショからの書き起こし
 // - ver1.11 (2026-11-21): at_empty_prompt / is_safe_to_stop を追加。保留 (Alt+C) にした
 //   タブの Claude を落としてメモリを空けてよい画面か = 実行中でない・裏の仕事が無い・
 //   入力欄が空で出ている (ダイアログの途中・書きかけの入力は偽)。読めない画面は偽

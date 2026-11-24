@@ -5,6 +5,44 @@
 
 ---
 
+## 2026-11-24 — 裏のエージェントが動いているのに 🟨 のままになる（v0.1.54）
+
+ブランチ: `fix/agent-list-background`
+
+### 背景
+ゆうさん（2026-11-24・スクショ）: 「添付の状態だと、私のやることないと思うが、オレンジアイコンのまま。CC は動いてるよね？」
+返答は終わっていて、裏で `general-purpose`（2m 17s）が動いている。タブは 🟨。
+
+### 原因
+- 「裏で実行中」の目印は 2 つだけだった: フッターの札（`1 shell` など）と、入力欄のすぐ上の `✻ Waiting for 1 background agent to finish`
+- スクショの画面にはどちらも無い。裏のエージェントは札を出さず、待ちの行も出ていなかった
+- 本体 v2.1.331 を読むと、待ちの行はターン終了の行（turn_duration）の差し替えで、ターン終了の行そのものを作らない経路がある（team の実行中・detached な tool call の保留・中断など）
+- 画面に出ていたのはフッターの下の一覧だけ: `● main`／`○ general-purpose  ブランディング設定を保存中   2m 17s · ↓ 116.0k tokens`
+- 同じ理由で `is_safe_to_stop` も真になり、この画面のタブを Alt+C で保留にすると裏のエージェントごと Claude を止めていた
+
+### 変更
+- `src/pane/status.rs` `has_running_agent_row`（純粋関数）: 最後の罫線より後ろ（フッター）に、`<経過時間> · ↓ <数> tokens` で終わる行があれば真。行の判定は `is_running_agent_row`（後ろから `tokens` ← 数 ← `↓` ← `·` ← `<n>s` と読む。丸の記号・エージェントの種類・説明は見ない）
+- `detect_status`: Background の条件に足した。スピナー行があれば Busy・「判断待ち」の節に中身があれば 🟨（v0.1.42）・別タブで返答が終わったら開くまで 🟨（v0.1.53）は変えていない
+- `is_safe_to_stop`: 一覧に動いている行があれば偽（保留にしても止めない）
+- README のタブの節・`Cargo.toml` 0.1.54
+
+### 実物で確かめたこと（claude v2.1.331・`scripts/e2e/agent-list-real.ps1`・窓なし・sonnet）
+- 動いている間は一覧に行がある: `  ◯ general-purpose  Run ping command   2s · ↓ 47.7k tokens`（丸は U+25EF・1 分を超えると `1m 1s`）。出だしの 1 秒だけ `0s` でトークン数が無い（この瞬間は返答中）
+- エージェントが終わると一覧ごと消える（フッターは `/tasks to see subagents · ← 8 agents`）
+- 動いている間のフッターに `↓ to manage` が出る（v2.1.325 には無かった）
+- **待ちの行が出ない場面は再現できなかった**（`run_in_background` あり／なし・エージェントが動いている間にもう 1 ターン、の 3 通りとも待ちの行が出た）。待ちの行が無い画面のテストと E2E はスクショからの書き起こし
+
+### テスト
+- 単体: `running_agent_row_without_waiting_line_is_background` ほか 8 件（status.rs）
+- E2E: `scripts/e2e/agent-list-waiting.ps1`（窓なし・偽 claude。判定と、保留で止めない／一覧が消えたら止める、の対）。v0.1.53 の exe では 4 項目 FAIL、v0.1.54 で PASS
+- 実物: `scripts/e2e/agent-list-real.ps1`（動いている間 Background・終わったあと NeedsAttention）
+
+### 残る制限
+- 本体が一覧の行の形を変えたら 🟨 に戻る（`agent-list-real.ps1` で実物を取り直す）
+- 一覧に「終わったエージェントの行」が経過時間とトークン数つきで残る版が出たら 🟢 が貼り付く（v2.1.331 では一覧ごと消える）
+
+---
+
 ## 2026-11-23 — スクロール中も色を判定する・裏が動いていても見るまで 🟨（v0.1.53）
 
 ブランチ: `fix/status-scroll-and-unseen`

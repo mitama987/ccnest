@@ -1,0 +1,16 @@
+● ■ 残りの作業
+
+  ・結果待ち: Google の「本番環境」への切り替え
+
+  切り替えの結果が来たら、すぐ知らせるね
+
+● Agent "ブランディング設定を保存" finished · 2m 40s
+
+● 切り替えが終わったよ。
+
+✻ Churned for 15s · done 12:35
+
+{RULE}
+❯
+{RULE}
+  ⏵⏵ bypass permissions on (shift+tab to cycle) · /tasks to see subagents · ← 8 agents   /rc
