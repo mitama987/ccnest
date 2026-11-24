@@ -2,7 +2,7 @@
 # (ASCII only: PowerShell 5.1 reads a BOM-less script as ANSI. The screens are in
 # fixtures/idle-compaction-step*.txt, UTF-8.)
 #
-# A disposable ccnest in conhost runs a fake claude (idle-compaction-shim.ps1) that
+# A disposable ccnest (no console window) runs a fake claude (idle-compaction-shim.ps1) that
 # draws the screen from the user's 2026-11-18 screenshot, so the text goes through the
 # real path: ConPTY -> vt100 -> Screen::rows -> status::screen_text -> detect_status.
 # The verdict is read from CCNEST_STATUS_TRACE.
@@ -51,7 +51,10 @@ $fails = 0
 function Check($ok, $msg) { if ($ok) { "  ok   $msg" } else { "  FAIL $msg"; $script:fails++ } }
 
 $before = @(Get-Process ccnest -ErrorAction SilentlyContinue).Count
-$p = Start-Process -FilePath 'conhost.exe' -ArgumentList "`"$exe`"" -WorkingDirectory $work -PassThru
+# No console window (CREATE_NO_WINDOW): nothing shows up on the user's desktop.
+$si = New-Object Diagnostics.ProcessStartInfo 'cmd.exe', "/c `"`"$exe`"`""
+$si.UseShellExecute = $false; $si.CreateNoWindow = $true; $si.WorkingDirectory = $work
+$p = [Diagnostics.Process]::Start($si)
 try {
   "1. waiting line + child lines + idle-compaction notice"
   $t = Wait-Trace { param($t) $t.Contains('Compacted while idle') -and $t.Contains('affilia-xboard-gap') } 40

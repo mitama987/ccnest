@@ -1,0 +1,14 @@
+● ■ 残りの作業
+
+  ・結果待ち: Google の「本番環境」への切り替え
+  ・前からの判断待ち: 管理者編の動画の試写、手順書を直すかどうか
+
+  切り替えの結果が来たら、すぐ知らせるね
+
+{RULE}
+❯
+{RULE}
+  ⏵⏵ bypass permissions on (shift+tab to cycle) · ← 8 agents · ↓ to manage              /rc
+
+  ● main
+  ◯ general-purpose  ブランディング設定を保存中                2m 17s · ↓ 116.0k tokens
