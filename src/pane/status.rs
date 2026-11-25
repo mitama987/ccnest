@@ -1410,7 +1410,7 @@ mod tests {
     const WAITING_WORKFLOW_WITH_CHILDREN: &str = "\
 ✻ Waiting for 1 dynamic workflow to finish
   ⎿  Referenced file ..\\28_Affilia\\CLAUDE.md
-  ⎿  Read ..\\..\\..\\.claude\\projects\\C--Users-mitam-Desktop-work-10-ClaudeCompany\\memory\\project_affilia.md (39 lines)
+  ⎿  Read ..\\..\\..\\.claude\\projects\\C--Users-mitam-Desktop-work-1-own-10-ops-10-ClaudeCompany\\memory\\project_affilia.md (39 lines)
   ⎿  Read ..\\28_Affilia\\apps\\renderer\\src\\menu.tsx (65 lines)
   ⎿  Read ..\\..\\..\\.claude\\skills\\chrome-browser-testing\\SKILL.md (195 lines)
   ⎿  Referenced file outputs\\20_xtp3\\2026-10-23_xboard_research\\report.md
@@ -1453,7 +1453,7 @@ mod tests {
     #[test]
     fn wrapped_notice_and_wrapped_child_lines_are_background() {
         let text = screen_idle_compacted(
-            "✻ Waiting for 1 dynamic workflow to finish\n  ⎿  Read ..\\..\\..\\.claude\\projects\\C--Users-mitam-Desktop-work-10-ClaudeCompany\\memory\\\n     project_affilia.md (39 lines)\n  ⎿  Skills restored (deep-plan, workflow-authoring)\n\n● Compacted while idle, before the prompt cache expired · turn off with\n  \"idleCompaction\": false in settings.json",
+            "✻ Waiting for 1 dynamic workflow to finish\n  ⎿  Read ..\\..\\..\\.claude\\projects\\C--Users-mitam-Desktop-work-1-own-10-ops-10-ClaudeCompany\\memory\\\n     project_affilia.md (39 lines)\n  ⎿  Skills restored (deep-plan, workflow-authoring)\n\n● Compacted while idle, before the prompt cache expired · turn off with\n  \"idleCompaction\": false in settings.json",
         );
         assert!(is_waiting_for_background(&text));
         assert_eq!(detect_status(&text), ClaudeStatus::Background);
