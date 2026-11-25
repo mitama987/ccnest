@@ -1253,7 +1253,7 @@ mod tests {
         parts.iter().map(|s| width_of(s)).sum::<usize>() + STATUS_SEP_W * (parts.len() - 1)
     }
 
-    const CWD: &str = "cwd: C:\\Users\\mitam\\Desktop\\work\\80_ccnest";
+    const CWD: &str = "cwd: C:\\Users\\mitam\\Desktop\\work\\1_own\\80_tools\\80_ccnest";
     const MODEL: &str = "Opus 4.8";
     const BRANCH: &str = "⎇ feature/threadstoolspro2-note-article";
 
@@ -1481,14 +1481,14 @@ mod tests {
     #[test]
     fn statusbar_renders_expected_row_at_realistic_width() {
         let row = render_status_row(
-            "cwd: C:\\Users\\mitam\\Desktop\\work\\80_ccnest",
+            "cwd: C:\\Users\\mitam\\Desktop\\work\\1_own\\80_tools\\80_ccnest",
             "Opus 4.8",
             "⎇ main",
             100,
         );
         assert_eq!(
             row,
-            "cwd: C:\\Users\\mitam\\Desktop\\work\\80_ccnest │ Opus 4.8 │ ⎇ main"
+            "cwd: C:\\Users\\mitam\\Desktop\\work\\1_own\\80_tools\\80_ccnest │ Opus 4.8 │ ⎇ main"
         );
     }
 
@@ -1580,7 +1580,7 @@ mod tests {
     // フォルダ名 (タブ初期名と同じ folder_title)。
     #[test]
     fn pane_title_shows_folder_name_not_exe() {
-        let cwd = Path::new(r"C:\Users\mitam\Desktop\work\20_XTP3");
+        let cwd = Path::new(r"C:\Users\mitam\Desktop\work\1_own\20_x\20_XTP3");
         assert_eq!(pane_title(1, cwd), " [1] 20_XTP3 ");
     }
 
@@ -1595,7 +1595,7 @@ mod tests {
     fn pane_frame_renders_folder_title_in_top_border() {
         use ratatui::backend::TestBackend;
         use ratatui::Terminal;
-        let cwd = Path::new(r"C:\Users\mitam\Desktop\work\20_XTP3");
+        let cwd = Path::new(r"C:\Users\mitam\Desktop\work\1_own\20_x\20_XTP3");
         let theme = theme::default_theme();
         let mut term = Terminal::new(TestBackend::new(40, 3)).unwrap();
         term.draw(|f| {
@@ -1616,7 +1616,7 @@ mod tests {
     fn pane_block_draws_plain_box_lines() {
         use ratatui::backend::TestBackend;
         use ratatui::Terminal;
-        let cwd = Path::new(r"C:\Users\mitam\Desktop\work\20_XTP3");
+        let cwd = Path::new(r"C:\Users\mitam\Desktop\work\1_own\20_x\20_XTP3");
         let theme = theme::default_theme();
         let mut term = Terminal::new(TestBackend::new(24, 4)).unwrap();
         term.draw(|f| {

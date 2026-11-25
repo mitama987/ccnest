@@ -34,7 +34,7 @@ param(
   [switch]$AltScreen,
   [switch]$ClaudeDebug,
   [switch]$Mouse,
-  [string]$Cwd = 'C:\Users\mitam\Desktop\work\80_ccnest'
+  [string]$Cwd = 'C:\Users\mitam\Desktop\work\1_own\80_tools\80_ccnest'
 )
 $ErrorActionPreference = 'Stop'
 Add-Type -AssemblyName Microsoft.VisualBasic
